@@ -391,6 +391,7 @@ export default {
         },
     },
     navigation: {
+        projects: "我的项目",
         canvas: "我的画布",
         image: "生图工作台",
         video: "视频创作台",

@@ -11,19 +11,18 @@
       "select_every_nth": 1
     }
   },
-  "2": {
-    "class_type": "RIFE VFI",
+  "4": {
+    "class_type": "FrameInterpolationModelLoader",
     "inputs": {
-      "ckpt_name": "rife49.pth",
-      "frames": ["1", 0],
-      "clear_cache_after_n_frames": 10,
-      "multiplier": 2,
-      "fast_mode": true,
-      "ensemble": true,
-      "scale_factor": 1.0,
-      "dtype": "float32",
-      "torch_compile": false,
-      "batch_size": 1
+      "model_name": "rife_v4.26.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "FrameInterpolate",
+    "inputs": {
+      "interp_model": ["4", 0],
+      "images": ["1", 0],
+      "multiplier": 2
     }
   },
   "3": {
@@ -35,9 +34,6 @@
       "loop_count": 0,
       "filename_prefix": "rife/output",
       "format": "video/h264-mp4",
-      "pix_fmt": "yuv420p",
-      "crf": 18,
-      "save_metadata": true,
       "pingpong": false,
       "save_output": true
     }

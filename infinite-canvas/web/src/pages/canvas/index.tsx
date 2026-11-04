@@ -15,9 +15,11 @@ import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { importCanvasProjects } from "@/lib/canvas/canvas-import";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 
-export default function CanvasPage() {
+// Both library entries operate on the same persisted projects, without a migration.
+export default function CanvasPage({ library = "canvas" }: { library?: "canvas" | "projects" }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const libraryTitle = t(library === "projects" ? "navigation.projects" : "canvas.title");
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const inputRef = useRef<HTMLInputElement>(null);
@@ -65,12 +67,12 @@ export default function CanvasPage() {
                 <header className="flex flex-wrap items-end justify-between gap-4 border-b border-stone-200 pb-6 dark:border-stone-800">
                     <div>
                         <p className="text-xs text-stone-500">{t("canvas.library")}</p>
-                        <h1 className="mt-3 text-3xl font-semibold">{t("canvas.title")}</h1>
+                        <h1 className="mt-3 text-3xl font-semibold">{libraryTitle}</h1>
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
                             <>
-                                <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
+                                <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${libraryTitle}-${selectedIds.length}`)}>
                                     {t("canvas.exportSelected")}
                                 </Button>
                                 <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>

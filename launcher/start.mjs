@@ -11,6 +11,10 @@
  *
  * 用法：
  *   node launcher/start.mjs [--dry-run] [--no-open]
+ *   IPC child: node launcher/start.mjs --desktop [--connect-only]
+ *   Desktop 不启动浏览器、不写 launcher 配置/日志或 dist/config.js、不安装节点，仅停止自有服务。
+ *   connect-only 只探测已有 backend（缺 Comfy 可降级，缺 gateway 失败），允许托管画布。
+ *   注意：启动网关本身仍可能写运行数据和 ComfyUI bridge，不是零运行写盘模式。
  *
  * 环境变量：COMFYUI_DIR / COMFY_URL / GATEWAY_PORT / CANVAS_PORT
  */
@@ -25,15 +29,19 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { installBundledNodes } from "./bootstrap-nodes.mjs";
+import { assertDesktopPortAvailable, comfySpawnEnvironment, createDesktopSession, desktopGet, desktopLocalUrl, isDesktopCanvasConfig, isDesktopCanvasIndex, isDesktopGatewayHealth, sendDesktop } from "./desktop-protocol.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const CONFIG_PATH = process.argv.includes("--desktop") && process.env.DESKTOP_CONFIG_PATH
+  ? path.resolve(process.env.DESKTOP_CONFIG_PATH) : path.join(__dirname, "config.json");
 const LOG_PATH = path.join(__dirname, "launcher.log");
 
 const ARGV = process.argv.slice(2);
 const DRY_RUN = ARGV.includes("--dry-run");
 const NO_OPEN = ARGV.includes("--no-open");
+const DESKTOP = ARGV.includes("--desktop");
+const CONNECT_ONLY = ARGV.includes("--connect-only");
 
 const DEFAULT_CONFIG = {
   comfyUrl: "http://127.0.0.1:8188",
@@ -106,6 +114,10 @@ function browseHostFor(bindHost) {
 function log(message, level = "INFO") {
   const line = `[${new Date().toISOString()}] [${level}] ${message}`;
   console.log(line);
+  if (DESKTOP) {
+    void sendDesktop({ type: "desktop:log", message: String(message), level });
+    return;
+  }
   try {
     fs.appendFileSync(LOG_PATH, line + os.EOL);
   } catch {
@@ -154,8 +166,10 @@ function loadConfig() {
   let created = false;
   let fileConfig = {};
   if (!fs.existsSync(CONFIG_PATH)) {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + os.EOL, "utf8");
-    created = true;
+    if (!DESKTOP) {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + os.EOL, "utf8");
+      created = true;
+    }
   } else {
     try {
       fileConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
@@ -187,6 +201,16 @@ function loadConfig() {
     corsOrigins: String(merged.corsOrigins || "").trim(),
     configCreated: created,
   };
+  if (DESKTOP) {
+    Object.assign(cfg, {
+      desktop: true, allowLan: false, canvasHost: "127.0.0.1", gatewayHost: "127.0.0.1",
+      gatewayPublicHost: "", controlPort: 0, openBrowser: false,
+      closeCanvasStopsBackend: false, stopAdoptedComfyOnCanvasClose: false,
+    });
+    // Include fallback canvas ports without inheriting LAN/wildcard CORS settings.
+    cfg.corsOrigins = Array.from({ length: Math.min(11, 65536 - cfg.canvasPort) }, (_, i) =>
+      `http://127.0.0.1:${cfg.canvasPort + i}`).join(",");
+  }
   if (cfg.allowLan !== true && (!isLoopbackHost(cfg.canvasHost) || !isLoopbackHost(cfg.gatewayHost))) {
     throw new Error("canvasHost/gatewayHost 非回环地址时必须显式设置 allowLan=true；否则可能把无鉴权服务暴露到局域网。");
   }
@@ -562,11 +586,14 @@ async function pickFreePort(ports) {
 }
 
 // 3000 经常被 NEW API / 其他开发服务占着；画布不能因为一个端口就整体退出。
-async function listenCanvasServer(cfg, preferredPort) {
-  const ports = [preferredPort, ...Array.from({ length: 10 }, (_, index) => preferredPort + index + 1)];
+async function listenCanvasServer(cfg, preferredPort, session = null) {
+  const ports = [preferredPort, ...Array.from({ length: 10 }, (_, index) => preferredPort + index + 1)]
+    .filter((port) => !session || port < 65536);
   let lastError = null;
   for (const port of ports) {
+    session?.assertRunning();
     const server = createCanvasServer(cfg);
+    session?.ownServer(server);
     const error = await new Promise((resolve) => {
       server.once("error", (err) => resolve(err));
       server.listen(port, cfg.canvasHost || "127.0.0.1", () => resolve(null));
@@ -584,7 +611,8 @@ async function listenCanvasServer(cfg, preferredPort) {
 }
 
 function spawnComfy(plan, port = COMFY_PORT_FIRST) {
-  const options = { cwd: plan.cwd, detached: true, stdio: "ignore", windowsHide: plan.kind !== "script" };
+  const options = { cwd: plan.cwd, detached: true, stdio: "ignore", windowsHide: plan.kind !== "script",
+    ...(DESKTOP ? { env: comfySpawnEnvironment() } : {}) };
   let child;
   if (plan.kind === "python") {
     child = spawn(plan.file, [plan.mainPy, "--port", String(port), "--listen", "127.0.0.1"], options);
@@ -803,7 +831,7 @@ async function quarantineTeManData(comfyRoot) {
 }
 
 function spawnGateway(cfg, comfyUrl, workflowsDir) {
-  ensureAssistantRuntime(ROOT);
+  if (!cfg.desktop) ensureAssistantRuntime(ROOT);
   const serverEntry = path.join(cfg.gatewayDir, "src", "server.js");
   if (!isFile(serverEntry)) {
     throw new Error(`找不到网关入口：${serverEntry}`);
@@ -818,6 +846,7 @@ function spawnGateway(cfg, comfyUrl, workflowsDir) {
     ...(cfg.comfyDir ? { COMFYUI_DIR: cfg.comfyDir } : {}),
     ...(cfg.launcherControlUrl ? { LAUNCHER_CONTROL_URL: cfg.launcherControlUrl } : {}),
     CANVAS_DIST: cfg.canvasDist,
+    ...(cfg.desktop ? { DISABLE_NODE_BOOTSTRAP: "1", ALLOW_REMOTE: "0", PUBLIC_BASE_URL: cfg.gatewayUrl } : {}),
   };
   if (workflowsDir) env.COMFY_WORKFLOWS_DIR = workflowsDir;
   const child = spawn(process.execPath, [serverEntry], {
@@ -825,6 +854,7 @@ function spawnGateway(cfg, comfyUrl, workflowsDir) {
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+    ...(cfg.desktop && process.platform !== "win32" ? { detached: true } : {}),
   });
   child.stdout.on("data", (d) => forwardLines(d, "gateway"));
   child.stderr.on("data", (d) => forwardLines(d, "gateway"));
@@ -1895,9 +1925,168 @@ async function main() {
   await shutdown(0);
 }
 
+/* --------------------------------------------------------- Desktop IPC */
+
+// Separate orchestration keeps the historical CLI (including its watchdog and
+// explicit restart controls) unchanged. Desktop owns no adopted PID or port.
+async function desktopMain(session) {
+  if (DRY_RUN) throw new Error("--desktop 不支持 --dry-run；请使用 --connect-only");
+  session.assertRunning();
+  const cfg = loadConfig();
+  cfg.comfyUrl = desktopLocalUrl(cfg.comfyUrl);
+  const get = (url, timeoutMs = 2500) => desktopGet(url, { signal: session.signal, timeoutMs });
+  const probeGateway = async () => {
+    const response = await get(`${cfg.gatewayUrl}/health`);
+    session.assertRunning();
+    if (process.env.DESKTOP_DISTRIBUTION === "1" && response.json?.desktopDistribution !== true) return null;
+    return response.ok && isDesktopGatewayHealth(response.json) ? response.json : null;
+  };
+  const probeDesktopComfy = async () => {
+    const response = await get(`${cfg.comfyUrl}/system_stats`, 900);
+    session.assertRunning();
+    return response.ok && isComfySystemStats(response.json);
+  };
+  const waitDesktop = async (label, probe, timeoutSec, child) => {
+    const deadline = Date.now() + timeoutSec * 1000;
+    while (Date.now() < deadline) {
+      session.assertRunning();
+      const ready = await probe();
+      session.assertRunning();
+      if (child && (!child.pid || child.exitCode !== null || child.signalCode !== null)) {
+        throw new Error(`${label} 子进程在就绪前退出`);
+      }
+      if (ready) return true;
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          session.signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, 300);
+        session.signal.addEventListener("abort", done, { once: true });
+      });
+      session.assertRunning();
+    }
+    return false;
+  };
+
+  // listen(0) deliberately ignores the persisted CLI control port. Desktop's
+  // private endpoint is read-only: no adopted Comfy restart or config writes.
+  const control = session.ownServer(http.createServer((req, res) => {
+    const health = req.method === "GET" && req.url === "/health";
+    res.writeHead(health ? 200 : 403, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(health ? { ok: true, desktop: true, restarting: false } :
+      { ok: false, error: "Desktop 模式不提供 HTTP 修改/重启接口" }));
+  }));
+  await new Promise((resolve, reject) => {
+    control.once("error", reject);
+    control.listen(0, "127.0.0.1", resolve);
+  });
+  session.assertRunning();
+  cfg.controlPort = control.address().port;
+  cfg.controlUrl = `http://127.0.0.1:${cfg.controlPort}`;
+  cfg.launcherControlUrl = cfg.controlUrl;
+  log(`Desktop 私有控制接口：${cfg.controlUrl}（只读）`);
+  log(`Desktop 启动：${CONNECT_ONLY ? "connect-only" : "managed"}，禁用安装、自愈、配置写盘和会话 watchdog`);
+
+  const gatewayHealth = await probeGateway();
+  let gateway = gatewayHealth ? { url: cfg.gatewayUrl, mode: "adopt" } : null;
+  session.assertRunning();
+  if (gatewayHealth) {
+    // An adopted gateway's actual binding is authoritative. Never launch a
+    // second configured Comfy instance, or implicitly repair an external stack.
+    cfg.comfyUrl = desktopLocalUrl(gatewayHealth.comfy.url);
+  }
+  if (!gateway) {
+    if (CONNECT_ONLY) throw new Error(`--connect-only 缺少通过身份校验的网关：${cfg.gatewayUrl}`);
+    // Fail closed on somebody else's listener, even if its /health is generic.
+    await assertDesktopPortAvailable(cfg.gatewayPort, session);
+    session.assertRunning();
+  }
+
+  let comfy = { url: cfg.comfyUrl, mode: await probeDesktopComfy() ? "adopt" : "missing" };
+  session.assertRunning();
+  if (comfy.mode === "missing" && !CONNECT_ONLY && !gateway) {
+    const install = cfg.comfyDir ? comfyInstallInfo(cfg.comfyDir)
+      : process.env.DESKTOP_DISTRIBUTION === "1" ? null : findComfyInstall(cfg);
+    // Installation discovery contains synchronous filesystem/Python probes.
+    // Drain queued IPC/disconnect before spawning anything after that work.
+    await new Promise(setImmediate);
+    session.assertRunning();
+    const plan = resolveLaunchPlan(install);
+    if (plan) {
+      cfg.comfyDir ||= install.dir;
+      cfg.comfyWorkflowsDir ||= install.workflowsDir;
+      log(`Desktop 启动 ComfyUI：${plan.file}`);
+      // Configured port only: do not accidentally adopt a different installation.
+      const child = session.ownChild(spawnComfy(plan, portFromUrl(cfg.comfyUrl) || COMFY_PORT_FIRST));
+      const ready = await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child);
+      session.assertRunning();
+      if (ready) comfy = { url: cfg.comfyUrl, mode: "started" };
+    }
+  }
+  if (comfy.mode === "missing") log("ComfyUI 未就绪，desktop 以 missing 状态继续（connect-only 不启动 ComfyUI）", "WARN");
+
+  if (!gateway) {
+    // No ensureGatewayDeps/installBundledNodes/quarantine/assistant extraction:
+    // missing dependencies are a startup error, never an implicit installation.
+    session.assertRunning();
+    cfg.corsOrigins += `,${new URL(cfg.comfyUrl).origin}`;
+    log(`Desktop 启动网关：${cfg.gatewayUrl}（DISABLE_NODE_BOOTSTRAP=1）`);
+    const child = session.ownChild(spawnGateway(cfg, comfy.url, cfg.comfyWorkflowsDir));
+    const ready = await waitDesktop("网关", probeGateway, cfg.gatewayStartTimeoutSec, child);
+    session.assertRunning();
+    if (!ready) throw new Error(`网关未在 ${cfg.gatewayStartTimeoutSec}s 内通过身份校验`);
+    gateway = { url: cfg.gatewayUrl, mode: "started" };
+  }
+
+  const [remoteIndex, remoteConfig] = await Promise.all([
+    get(`${cfg.canvasUrl}/index.html`), get(`${cfg.canvasUrl}/config.js`),
+  ]);
+  session.assertRunning();
+  let canvas;
+  if (remoteIndex.ok && remoteConfig.ok && isDesktopCanvasIndex(remoteIndex.text) &&
+      isDesktopCanvasConfig(remoteConfig.text, cfg.gatewayUrl)) {
+    canvas = { url: cfg.canvasUrl, mode: "adopt" };
+  } else {
+    const indexPath = path.join(cfg.canvasDist, "index.html");
+    if (!isFile(indexPath) || !isDesktopCanvasIndex(fs.readFileSync(indexPath, "utf8"))) {
+      throw new Error(`画布静态产物缺失或身份不符：${cfg.canvasDist}`);
+    }
+    session.assertRunning();
+    const listen = await listenCanvasServer(cfg, cfg.canvasPort, session);
+    session.assertRunning();
+    if (listen.port !== cfg.canvasPort) log(`画布端口 ${cfg.canvasPort} 已占用，回退到 ${listen.port}`);
+    cfg.canvasPort = listen.port;
+    cfg.canvasUrl = `http://127.0.0.1:${listen.port}`;
+    canvas = { url: cfg.canvasUrl, mode: "started" };
+  }
+  session.assertRunning();
+  log(`Desktop 就绪：canvas=${canvas.mode} gateway=${gateway.mode} comfy=${comfy.mode}`);
+  await sendDesktop({ type: "desktop:ready", services: { canvas, gateway, comfy } });
+  session.assertRunning();
+}
+
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
-  main().catch(async (err) => {
+  if (DESKTOP) {
+    let session;
+    try {
+      session = createDesktopSession({ logger: log });
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+    }
+    if (session) desktopMain(session).catch(async (error) => {
+      if (session.signal.aborted) return;
+      log(`Desktop 启动失败：${error.message}`, "ERROR");
+      await sendDesktop({ type: "desktop:error", message: error.message });
+      await session.shutdown(1);
+    });
+  } else if (CONNECT_ONLY) {
+    console.error("--connect-only 必须与 --desktop 一起使用");
+    process.exitCode = 1;
+  } else main().catch(async (err) => {
     log(`启动器异常：${err?.stack || err}`, "ERROR");
     try {
       await shutdown(1);

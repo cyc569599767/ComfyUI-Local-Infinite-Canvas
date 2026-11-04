@@ -816,7 +816,7 @@ test("krea2 and four-view packs keep the base workflow and standalone resource e
     ]);
     assert.equal(index.resources.some((item) => item.id === "krea2_darkbrush_lora"), false);
     assert.equal(index.resources.some((item) => item.id === "krea2_retroanime_lora"), false);
-    assert.equal(index.resources.length, 73);
+    assert.equal(index.resources.length, 74);
 });
 
 test("moss pack no longer ships Balanced workflows or the local bake resource", () => {
@@ -906,6 +906,14 @@ test("upscale pack ships the node with the app and downloads ESRGAN/SeedVR2 weig
         assert.equal(resource.target.startsWith("upscale_models/"), true, `${id} target`);
         assert.ok(resource.sha256);
     }
+    // 插帧走 ComfyUI 0.43 的核心节点，只需要权重；权重缺失时 /v1/videos/interpolate 会给出中文提示。
+    const rife = index.resources.find((item) => item.id === "rife_v426");
+    assert.ok(rife, "RIFE interpolation weights are missing from the index");
+    assert.equal(rife.type, "model");
+    assert.equal(rife.target, "frame_interpolation/rife_v4.26.safetensors");
+    assert.match(rife.sha256, /^[0-9a-f]{64}$/);
+    assert.ok(Number(rife.size) > 0);
+    assert.ok(rife.sources.some((source) => /Comfy-Org\/frame_interpolation/.test(source.url || "")));
 });
 
 test("h3 pack exposes only noVDN workflows while keeping VDN runtime dependencies", () => {

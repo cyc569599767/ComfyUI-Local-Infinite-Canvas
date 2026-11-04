@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>ComfyUI · 本地无限画布桌面端</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <nav class="toolbar" aria-label="桌面导航">
+      <strong>INFINITE CANVAS <small>DESKTOP</small></strong>
+      <div class="tabs">
+        <button data-page="dashboard" class="active">服务面板</button>
+        <button data-page="canvas" disabled>无界工作台</button>
+        <button data-page="gateway" disabled>网关管理</button>
+        <button data-page="comfy" disabled>ComfyUI</button>
+      </div>
+      <button id="reload" title="重新加载当前页面">刷新页面</button>
+      <button id="devtools" title="仅开发模式可用">开发工具</button>
+    </nav>
+    <main>
+      <header><p class="eyebrow">LOCAL FIRST · CONNECTED WORKSPACE</p><span id="status" role="status">正在读取运行环境…</span></header>
+      <section class="hero"><h1>你的本地创作环境。</h1><p>复用现有画布与网关，按需启动缺失服务。桌面端只管理自己启动的后台进程。</p></section>
+      <section class="services" aria-label="服务状态">
+        <article><h2>无限画布 <span id="canvas-status">待检测</span></h2><p id="canvas-url">—</p><small id="canvas-owner">等待连接</small></article>
+        <article><h2>本地网关 <span id="gateway-status">待检测</span></h2><p id="gateway-url">—</p><small id="gateway-owner">等待连接</small></article>
+        <article><h2>ComfyUI <span id="comfy-status">待检测</span></h2><p id="comfy-url">—</p><small id="comfy-owner">等待连接</small></article>
+      </section>
+      <section class="actions"><p id="connection-message" aria-live="polite">准备连接…</p><button id="refresh">检查状态</button><button id="connect" class="primary">连接 / 启动缺失服务</button></section>
+      <details id="settings-panel"><summary>桌面设置 <span>保存后重启生效</span></summary>
+        <form id="settings-form">
+          <label>ComfyUI 地址<input id="setting-comfy-url" type="url" required /></label>
+          <label>ComfyUI 安装目录（可选；留空只连接，不自动启动）<div class="input-row"><input id="setting-comfy-dir" type="text" /><button id="choose-comfy" type="button">选择目录</button></div></label>
+          <div class="input-row"><label>画布端口<input id="setting-canvas-port" type="number" min="1024" max="65525" required /></label><label>网关端口<input id="setting-gateway-port" type="number" min="1024" max="65525" required /></label></div>
+          <p id="data-location"></p>
+          <div class="input-row"><button type="submit" class="primary">保存设置</button><button id="restart-app" type="button">重启应用</button><button id="open-data" type="button">打开数据目录</button></div>
+          <p id="settings-result" role="status"></p>
+        </form>
+      </details>
+      <aside>应用内置画布与网关，配置和项目存储在用户数据目录。ComfyUI 与大模型由你单独安装。浏览器已有项目请通过 ZIP 导出后导入。复用外部服务时，其生命周期仍由原启动器控制。</aside>
+      <details open><summary>服务日志 <span>最近 100 条</span></summary><pre id="logs" aria-live="off">尚无启动日志。服务已运行时不会重复启动。</pre></details>
+      <footer><span id="app-version">应用版本 —</span><span>Electron <b id="electron-version">—</b> · Node.js <b id="node-version">—</b> · Chromium <b id="chrome-version">—</b></span></footer>
+    </main>
+  </body>
+</html>

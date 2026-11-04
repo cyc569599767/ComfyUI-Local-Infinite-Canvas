@@ -487,8 +487,8 @@ export async function createGatewayApp(overrides = {}) {
   const logger = createLogger(overrides.logPrefix || "gateway");
   const assistant = createAssistantManager({ config, logger, idleMs: config.assistantIdleMs });
   try {
-    const recovery = await recoverWorkflowBackups(config);
-    const interruptedUpdate = await detectInterruptedUpdate(config).catch(() => ({ pending: false }));
+    const recovery = config.desktopDistribution ? { restored: [] } : await recoverWorkflowBackups(config);
+    const interruptedUpdate = config.desktopDistribution ? { pending: false } : await detectInterruptedUpdate(config).catch(() => ({ pending: false }));
     if (interruptedUpdate.pending) {
       logger.warn(`检测到未完成的更新 v${interruptedUpdate.version}（当前 v${interruptedUpdate.currentVersion}）；可调用 POST /api/update/recovery/restore 回滚，或重新应用完整包。`);
     }
@@ -501,6 +501,7 @@ export async function createGatewayApp(overrides = {}) {
   const previewHub = createPreviewHub({ comfyUrl: () => comfy.baseUrl(), logger });
   const comfy = createComfyClient({
     baseUrl: config.comfyUrl,
+    autoDiscover: !config.desktopDistribution,
     timeoutMs: config.requestTimeoutMs,
     retryAttempts: config.comfyRetryAttempts,
     retryDelayMs: config.comfyRetryDelayMs,
@@ -743,9 +744,10 @@ export async function createGatewayApp(overrides = {}) {
   app.get("/health", async (_req, res) => {
     const reachable = await Promise.race([comfy.isReachable(), sleep(1500).then(() => false)]);
     const setupStatus = setup.status();
-    const interrupted = await detectInterruptedUpdate(config).catch(() => ({ pending: false }));
+    const interrupted = config.desktopDistribution ? { pending: false } : await detectInterruptedUpdate(config).catch(() => ({ pending: false }));
     res.json({
       status: "ok",
+      desktopDistribution: config.desktopDistribution === true,
       version: config.version,
       updateRecovery: interrupted.pending ? { pending: true, version: interrupted.version, files: interrupted.files?.length || 0 } : null,
       comfy: { url: comfy.baseUrl(), reachable },
@@ -1002,6 +1004,16 @@ export async function createGatewayApp(overrides = {}) {
     });
   });
 
+  app.use("/api/update", (req, res, next) => {
+    if (!config.desktopDistribution) return next();
+    if (req.method === "GET") return res.json({
+      ok: true, enabled: false, updateAvailable: false, canApply: false, forceAvailable: false,
+      currentVersion: config.version, pending: false, progress: null,
+      applyReason: "桌面安装版请通过新的安装包升级，不使用源码补丁更新。",
+    });
+    res.status(409).json({ ok: false, error: { code: "desktop_update_disabled", message: "桌面安装版不允许源码补丁更新或恢复，请通过安装包升级。" } });
+  });
+
   app.get("/api/update/check", async (req, res) => {
     const fetchRemote = req.query.fetch === "1" || req.query.fetch === "true";
     res.json(await checkForUpdate(config, { fetchRemote }));
@@ -1093,7 +1105,7 @@ export async function createGatewayApp(overrides = {}) {
       }
     }
     try {
-      const file = path.join(config.appRoot, "launcher", "config.json");
+      const file = config.launcherConfigPath || path.join(config.appRoot, "launcher", "config.json");
       const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")) : {};
       data.comfyDir = dir;
       fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`, "utf8");
@@ -1217,7 +1229,9 @@ export async function createGatewayApp(overrides = {}) {
   });
 
   app.get("/admin", (_req, res) => {
-    res.sendFile(path.join(config.rootDir, "src", "admin.html"));
+    // Use a fixed relative filename: desktop development lives below .build,
+    // which sendFile otherwise treats as a forbidden dotfile path component.
+    res.sendFile("admin.html", { root: path.join(config.rootDir, "src"), dotfiles: "deny" });
   });
 
   app.get("/api/tasks", (_req, res) => {
@@ -2187,7 +2201,7 @@ export async function createGatewayApp(overrides = {}) {
     if (!task) throw new HttpError("视频任务不存在", { status: 404, code: "video_not_found" });
     const file = tasks.contentPath(req.params.id);
     if (!file) throw new HttpError("视频文件还没有生成完成", { status: 409, code: "video_not_ready" });
-    res.sendFile(file);
+    res.sendFile(path.basename(file), { root: path.dirname(file), dotfiles: "deny" });
   });
 
   app.post("/v1/videos/:id/cancel", async (req, res) => {
@@ -2207,7 +2221,7 @@ export async function createGatewayApp(overrides = {}) {
     const filename = safeFileName(req.params.name);
     const file = path.join(config.outputDir, filename);
     if (!filename || !fs.existsSync(file)) throw new HttpError("文件不存在", { status: 404, code: "file_not_found" });
-    res.sendFile(file);
+    res.sendFile(filename, { root: config.outputDir, dotfiles: "deny" });
   });
 
   app.use((req, res) => {

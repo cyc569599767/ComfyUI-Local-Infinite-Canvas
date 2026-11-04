@@ -115,7 +115,7 @@
       "shift_video": 12,
       "shift_audio": 3,
       "model": [
-        "34",
+        "113",
         0
       ]
     },
@@ -345,6 +345,27 @@
     "class_type": "H3SigmaRefiner",
     "_meta": {
       "title": "H3 Sigma Refiner"
+    }
+  },
+  "113": {
+    "inputs": {
+      "chunk_tokens": 8192,
+      "auto_halve_on_oom": true,
+      "verbose": true,
+      "mlp_chunk_tokens": 4096,
+      "disable_dynamic_prefetch": "实验功能已移除",
+      "reuse_mlp_weights": true,
+      "attention_backend": "existing",
+      "model": [
+        "34",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ActivationChunkStar7",
+    "_meta": {
+      "title": "MiniMax H3 显存分块加速 · Star7（RoPE + MLP）",
+      "cnr_id": "minimax-h3-chunk-star7",
+      "ver": "eefb9c60ef67c72d7ef2b1c710eefc1498427b84"
     }
   }
 }

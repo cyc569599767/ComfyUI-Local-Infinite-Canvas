@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": "2026.11.01-33",
+  "version": "2026.11.03-34",
   "channel": "stable",
-  "updatedAt": "2026-11-01",
+  "updatedAt": "2026-11-03",
   "packs": [
     {
       "id": "core",
@@ -476,7 +476,7 @@
     {
       "id": "upscale",
       "label": "超分",
-      "description": "快速放大（ESRGAN）与 SeedVR2 图片/视频超分。节点随包自动安装，运行库与权重按工作流下载；3B/7B DiT 是选下内容。",
+      "description": "快速放大（ESRGAN）、RIFE 视频插帧与 SeedVR2 图片/视频超分。节点随包自动安装，运行库与权重按工作流下载；3B/7B DiT 是选下内容。",
       "resources": [
         "esrgan_x2plus",
         "esrgan_x4plus",
@@ -488,7 +488,8 @@
         "seedvr2_dep_rotary",
         "seedvr2_dep_omegaconf",
         "seedvr2_dep_opencv",
-        "seedvr2_dep_einops"
+        "seedvr2_dep_einops",
+        "rife_v426"
       ],
       "optionalResources": [
         "esrgan_x2plus",
@@ -501,7 +502,8 @@
         "seedvr2_dep_rotary",
         "seedvr2_dep_omegaconf",
         "seedvr2_dep_opencv",
-        "seedvr2_dep_einops"
+        "seedvr2_dep_einops",
+        "rife_v426"
       ],
       "workflows": [
         "image-esrgan-upscale",
@@ -515,7 +517,7 @@
       "autoRecommend": false,
       "requirements": {
         "vramFloorGb": 8,
-        "weightsGb": 12.5,
+        "weightsGb": 12.7,
         "ramBaseGb": 16,
         "recommendVramGb": 16
       },
@@ -1794,6 +1796,26 @@
         }
       ],
       "autoInstall": false
+    },
+    {
+      "id": "rife_v426",
+      "type": "model",
+      "label": "RIFE 4.26 插帧模型",
+      "target": "frame_interpolation/rife_v4.26.safetensors",
+      "size": 22674688,
+      "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94",
+      "license": "MIT",
+      "note": "视频插帧（2x/3x）使用的 RIFE 4.26 权重，ComfyUI 0.43+ 核心插帧节点加载。",
+      "sources": [
+        {
+          "url": "https://hf-mirror.com/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors",
+          "label": "HF 镜像"
+        },
+        {
+          "url": "https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors",
+          "label": "Hugging Face"
+        }
+      ]
     }
   ]
 }

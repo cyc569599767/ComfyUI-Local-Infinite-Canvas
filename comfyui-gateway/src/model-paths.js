@@ -10,6 +10,7 @@ export const MODEL_DIR_KEYS = {
     checkpoints: ["checkpoints"],
     upscale_models: ["upscale_models"],
     latent_upscale_models: ["latent_upscale_models"],
+    frame_interpolation: ["frame_interpolation"],
     vdn: ["vdn"],
     clip_vision: ["clip_vision"],
     LLM: ["LLM", "llm"],

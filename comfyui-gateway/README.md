@@ -23,6 +23,7 @@ Infinite Canvas :3000
 - `POST /v1/images/upscale`
 - `POST /v1/videos`
 - `POST /v1/videos/upscale`
+- `POST /v1/videos/interpolate`（RIFE 2×/3×）
 - `GET /v1/videos/:id`、`GET /v1/videos/:id/content`、`POST /v1/videos/:id/cancel`
 - `POST /v1/prompts/optimize`、`POST /v1/prompts/optimize-image`
 - `GET /api/setup/status`、`GET /api/workflows`、`GET /api/workflows/:id/schema`
@@ -38,6 +39,7 @@ Infinite Canvas :3000
 - 图像生成：Z-Image Turbo、Krea2 Turbo / Aesthetics、MOSS SFT 8 步 / 50 步、MOSS INT8 8 步 / 50 步、Qwen Image 2.1（t2i / edit / inpaint / outpaint，多角度隐藏）。
 - 视频：MiniMax-H3 文生、首尾帧、多参三个入口（VDN / 无 VDN 各一套），以及角色替换。
 - 放大/超分：ESRGAN、SeedVR2 图片、SeedVR2 视频。
+- 插帧（内嵌、不进注册表）：`video-rife`，走 ComfyUI 0.43+ 核心 `FrameInterpolationModelLoader` + `FrameInterpolate`，权重在 `models/frame_interpolation`。
 - 自动发现的诊断工作流标记为 hidden，不进入 `/v1/models`。
 
 **模型权重、LoRA、自定义节点和 ComfyUI 本体不随仓库分发。** 缺少模型/节点的工作流会在扫描时标记不可用，不会出现在 `/v1/models`。
@@ -62,6 +64,8 @@ node src/server.js
 | `LAUNCHER_CONTROL_URL` | 空 | 启动器控制地址，由 `start-local.bat` 注入 |
 | `REQUEST_TIMEOUT_MS` | `600000` | 图片请求超时 |
 | `VIDEO_TIMEOUT_MS` | `0` | 视频超时；0 表示不设上限 |
+| `INTERPOLATION_MODEL` | 空 | 固定插帧权重文件名（`models/frame_interpolation` 下的名字）；留空则按 ComfyUI 实际选项自动挑选，优先 `rife_v4.26` |
+| `INTERPOLATION_TIMEOUT_MS` | `1800000` | 插帧超时；超时会取消 ComfyUI 中的任务 |
 | `POLL_INTERVAL_MS` | `750` | `/history` 轮询间隔 |
 | `SCAN_ON_START` | `1` | 启动后后台扫描工作流 |
 | `WATCH_WORKFLOWS` | `1` | 监听工作流目录热刷新 |

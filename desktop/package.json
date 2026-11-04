@@ -1,0 +1,30 @@
+{
+  "name": "comfyui-local-infinite-canvas-desktop",
+  "version": "0.1.2",
+  "private": true,
+  "description": "ComfyUI 本地无限画布桌面应用",
+  "author": "1314521gjy",
+  "license": "MIT",
+  "main": "src/main/index.cjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node scripts/launch.cjs",
+    "dev": "node scripts/launch.cjs --dev",
+    "build": "node scripts/build-runtime.cjs",
+    "verify:runtime": "node scripts/verify-runtime.cjs",
+    "pack": "npm run build && electron-builder --config electron-builder.cjs --dir --win --x64",
+    "dist:win": "npm run build && electron-builder --config electron-builder.cjs --win nsis --x64",
+    "test:packaged": "node scripts/test-packaged.cjs",
+    "check": "node --check src/main/application.cjs && node --check src/main/index.cjs && node --check src/main/services.cjs && node --check src/main/content-policy.cjs && node --check src/main/runtime.cjs && node --check src/preload/index.cjs && node --check src/renderer/app.js && node --check scripts/launch.cjs",
+    "test": "node --test test/*.test.cjs",
+    "test:smoke": "node scripts/launch.cjs --smoke-test",
+    "test:integration": "node test/integration-fixture.mjs && node test/managed-integration-fixture.mjs",
+    "test:live": "node scripts/launch.cjs --integration-smoke"
+  },
+  "devDependencies": {
+    "electron": "41.0.3",
+    "electron-builder": "26.18.0"
+  }
+}

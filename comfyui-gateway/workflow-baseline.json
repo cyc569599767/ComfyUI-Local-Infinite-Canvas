@@ -66,7 +66,7 @@
   "current": {
     "comfyui-gateway/workflows/h3-character-swap-vdn.json": "55fb6d9b341b47862ab610541fa9bcf3fd5ed96138b166d497f4ca8f399019f5",
     "comfyui-gateway/workflows/h3-ref2va-drama-vdn.json": "3e92bb313b2675ac080a5ab4790354e4f28c59dd45d862afe56ac3e293fa2900",
-    "comfyui-gateway/workflows/h3-ref2va-drama.json": "b0a79682b4edea2a437538204f5b6f35ad6d7c6424a6c0a9eee1b5f7bdd4d9c8",
+    "comfyui-gateway/workflows/h3-ref2va-drama.json": "dd42653172ecf8d765e6a628e60843cbeed0697b41681961791c05afb79d1464",
     "comfyui-gateway/workflows/image-esrgan-upscale.json": "6086d9c86b94708267419540b1fca3f036a2e6545d52df6540119842353a96eb",
     "comfyui-gateway/workflows/image-krea2-aesthetics.json": "1110539cdd373ed8a6c98d7697025099b67b1ba4c0f3a2b3ba5192c427bc2ee0",
     "comfyui-gateway/workflows/image-krea2-four-view.json": "e69e1a5e0e7a63cb92e852157fe85fae2c776126f9ec3de465a713e333478718",

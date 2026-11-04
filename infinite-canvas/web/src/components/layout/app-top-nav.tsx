@@ -70,6 +70,7 @@ export function AppTopNav() {
                                         <Link
                                             key={tool.slug}
                                             to={`/${tool.slug}`}
+                                            aria-current={active ? "page" : undefined}
                                             className={cn(
                                                 "relative flex h-14 shrink-0 items-center gap-2 text-sm leading-6 transition after:absolute after:inset-x-0 after:bottom-0 after:h-px",
                                                 active

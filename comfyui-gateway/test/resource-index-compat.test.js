@@ -258,7 +258,8 @@ test("C2 new remote index matches old-index behavior without duplicating packs",
         assert.equal(manager.status().indexVersion, "2026.10.31-31");
         payload.value = readIndex();
         const status = await manager.refresh();
-        assert.equal(status.indexVersion, "2026.11.01-33");
+        // 跟着已发布索引的版本走，避免每次更新索引都要改测试。
+        assert.equal(status.indexVersion, readIndex().version);
         assert.equal(status.indexSource, "remote");
         const fourViews = status.packs.filter((pack) => pack.id === "krea2-four-view");
         assert.equal(fourViews.length, 1);

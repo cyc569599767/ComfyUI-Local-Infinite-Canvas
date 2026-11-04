@@ -14,7 +14,7 @@ import { findSimilarModel, FUZZY_MODEL_EXTENSIONS } from "./model-match.js";
 import { collectModelRoots, clearExtraModelPathsCache } from "./model-paths.js";
 import { nowIso, truncate, writeJsonAtomic } from "./util.js";
 
-const MODEL_DIRS = new Set(["diffusion_models", "text_encoders", "vae", "vae_approx", "loras", "checkpoints", "upscale_models", "latent_upscale_models", "vdn", "clip_vision", "LLM", "SEEDVR2"]);
+const MODEL_DIRS = new Set(["diffusion_models", "text_encoders", "vae", "vae_approx", "loras", "checkpoints", "upscale_models", "latent_upscale_models", "frame_interpolation", "vdn", "clip_vision", "LLM", "SEEDVR2"]);
 const VDN_STAGE_RESOURCE_PREFIX = "h3_vdn_stage_";
 const RETIRED_RESOURCE_IDS = new Set(["h3_character_swap_lora", "h3_vdn_node"]);
 const H3_PACK_ID = "h3";
@@ -30,6 +30,7 @@ const LOADER_BY_DIR = {
     loras: { classType: "LoraLoaderModelOnly", input: "lora_name" },
     checkpoints: { classType: "CheckpointLoaderSimple", input: "ckpt_name" },
     upscale_models: { classType: "UpscaleModelLoader", input: "model_name" },
+    frame_interpolation: { classType: "FrameInterpolationModelLoader", input: "model_name" },
     clip_vision: { classType: "CLIPVisionLoader", input: "clip_name" },
 };
 const JOB_LIMIT = 20;

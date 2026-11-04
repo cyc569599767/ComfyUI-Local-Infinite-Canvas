@@ -2,6 +2,10 @@
 
 ## v0.24.6 - 2026-11-02
 
++ [修复] 插帧不再报「Node 'RIFE VFI' not found. The custom node may not be installed.」：内嵌插帧工作流改用 ComfyUI 0.43+ 核心节点 `FrameInterpolationModelLoader` + `FrameInterpolate`，不再依赖未随包安装的第三方 Frame-Interpolation 插件。
++ [修复] 插帧权重按 `FrameInterpolationModelLoader.model_name` 的实际选项自动挑选（优先 `rife_v4.26`，可用 `INTERPOLATION_MODEL` 固定）；资源中心「超分」新增 RIFE 4.26 插帧模型（HF 镜像，固定 SHA256），缺权重或 ComfyUI 版本过低时在网关侧就给出中文可行动提示，不再把 ComfyUI 原始校验错误丢给用户。
++ [维护] 资源索引更新到 `2026.11.03-34`：新增 `rife_v426` 资源，`frame_interpolation` 加入资源安装与扫描目录表。
+
 + [修复] 自由工作流保存目录失效时自动找回 ComfyUI 的真实工作流目录，选择器重新列出并可导入已保存的工作流。
 + [修复] Qwen 2.1 多图编辑取消或重试时不再重复带上同一张参考图，避免误报「最多 4 张参考图」。
 + [修复] 长提示词输入框在聚焦、框选、滚动和输入时的光标与高亮错位；框选时不再被高亮层遮挡。

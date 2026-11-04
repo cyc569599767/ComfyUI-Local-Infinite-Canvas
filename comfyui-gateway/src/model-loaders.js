@@ -3,6 +3,7 @@ export const MODEL_LOADER_SPECS = [
     { classType: "CheckpointLoaderSimple", input: "ckpt_name", key: "checkpoints", dirs: ["checkpoints"] },
     { classType: "UNETLoader", input: "unet_name", key: "unets", dirs: ["diffusion_models"] },
     { classType: "UpscaleModelLoader", input: "model_name", key: "upscaleModels", dirs: ["upscale_models"] },
+    { classType: "FrameInterpolationModelLoader", input: "model_name", key: "frameInterpolation", dirs: ["frame_interpolation"] },
     { classType: "SeedVR2LoadDiTModel", input: "model", key: "seedvr2Dit", dirs: ["upscale_models"] },
     { classType: "SeedVR2LoadVAEModel", input: "model", key: "seedvr2Vae", dirs: ["upscale_models"] },
     { classType: "CLIPLoader", input: "clip_name", key: "clips", dirs: ["text_encoders"] },

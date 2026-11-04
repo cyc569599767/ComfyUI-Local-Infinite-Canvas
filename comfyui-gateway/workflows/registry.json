@@ -3156,6 +3156,44 @@
           "SinoXvision_Krea2_Aesthetics_fp8_scale.safetensors": "aesthetics"
         }
       }
+    },
+    {
+      "id": "video-h3_referenceimage_songvideo_fulllength_api",
+      "name": "video-H3_ReferenceImage_SongVideo_FullLength_API",
+      "type": "video",
+      "description": "",
+      "file": "video-h3_referenceimage_songvideo_fulllength_api.json",
+      "bindings": {
+        "image": {
+          "node": "6",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "width": {
+          "node": "10",
+          "input": "width",
+          "from": "size.width",
+          "default": 1024,
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "10",
+          "input": "height",
+          "from": "size.height",
+          "default": 768,
+          "transform": "snap32"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-03T08:37:08.280Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\H3_ReferenceImage_SongVideo_FullLength_API.json"
+      }
     }
   ]
 }

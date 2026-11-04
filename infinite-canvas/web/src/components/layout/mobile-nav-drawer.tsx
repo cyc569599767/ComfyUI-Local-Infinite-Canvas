@@ -26,6 +26,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDraw
                         <Link
                             key={tool.slug}
                             to={`/${tool.slug}`}
+                            aria-current={active ? "page" : undefined}
                             onClick={onClose}
                             className={cn(
                                 "flex items-center gap-3 rounded-lg px-3 py-3 text-base transition",

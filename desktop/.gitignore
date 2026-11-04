@@ -1,0 +1,11 @@
+node_modules/
+.build/
+dist/
+out/
+release/
+coverage/
+test/artifacts/
+*.log
+.env
+.env.*
+!.env.example

@@ -25,7 +25,7 @@ function formatNodeErrors(nodeErrors) {
   return messages.slice(0, 8).join("；");
 }
 
-export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub } = {}) {
+export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   if (!base) throw new Error("ComfyUI baseUrl 不能为空");
   let activeBase = base;
@@ -76,7 +76,7 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
   // 启动器可能还没探测到 ComfyUI，或整合包自己换了端口；
   // 连不上时扫一遍本机常见端口，避免画布永久停在“离线/识别不到”。
   async function discoverBase({ force = false } = {}) {
-    if (!loopbackHost()) return "";
+    if (!autoDiscover || !loopbackHost()) return "";
     if (discovery) return discovery;
     if (!force && Date.now() - lastDiscoverAt < 15000) return "";
     discovery = (async () => {
@@ -262,7 +262,7 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
       timeout: 15000,
     });
 
-  const objectInfo = () => request("/object_info", { timeout: 30000 });
+  const objectInfo = ({ signal } = {}) => request("/object_info", { timeout: 30000, signal });
   const systemStats = () => request("/system_stats", { timeout: 3000 });
   // ComfyUI 会把 extra_model_paths.yaml / 目录映射后的真实路径都列出来；
   // 老版本没有这个接口时返回空对象，由调用方回退到 models/<类型>。

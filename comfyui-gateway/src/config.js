@@ -47,6 +47,8 @@ export function loadConfig(overrides = {}) {
   const config = {
     rootDir,
     appRoot,
+    desktopDistribution: overrides.desktopDistribution ?? process.env.DESKTOP_DISTRIBUTION === "1",
+    launcherConfigPath: path.resolve(overrides.launcherConfigPath ?? process.env.GATEWAY_LAUNCHER_CONFIG ?? path.join(appRoot, "launcher", "config.json")),
     port,
     host,
     comfyUrl: String(overrides.comfyUrl ?? process.env.COMFY_URL ?? "http://127.0.0.1:8188").replace(/\/+$/, ""),
@@ -66,6 +68,8 @@ export function loadConfig(overrides = {}) {
     requestTimeoutMs: num(overrides.requestTimeoutMs ?? process.env.REQUEST_TIMEOUT_MS, 10 * 60 * 1000),
     videoTimeoutMs: num(overrides.videoTimeoutMs ?? process.env.VIDEO_TIMEOUT_MS, 0),
     interpolationTimeoutMs: num(overrides.interpolationTimeoutMs ?? process.env.INTERPOLATION_TIMEOUT_MS, 30 * 60 * 1000),
+    // 留空则按 frame_interpolation 目录里实际存在的权重自动挑一个。
+    interpolationModel: String(overrides.interpolationModel ?? process.env.INTERPOLATION_MODEL ?? "").trim(),
     pollIntervalMs: num(overrides.pollIntervalMs ?? process.env.POLL_INTERVAL_MS, 750),
     comfyRetryAttempts: num(overrides.comfyRetryAttempts ?? process.env.COMFY_RETRY_ATTEMPTS, 3),
     comfyRetryDelayMs: num(overrides.comfyRetryDelayMs ?? process.env.COMFY_RETRY_DELAY_MS, 500),
