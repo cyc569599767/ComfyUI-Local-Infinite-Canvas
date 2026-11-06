@@ -46,8 +46,20 @@ function readRuntimeConfig(appRoot) {
     return {
         url: typeof value.url === "string" ? value.url.trim() : "",
         sha256: typeof value.sha256 === "string" ? value.sha256.trim().toLowerCase() : "",
+        runtimeVersion: typeof value.runtimeVersion === "string" ? value.runtimeVersion.trim() : "",
         fullPackageUrl: typeof value.fullPackageUrl === "string" ? value.fullPackageUrl.trim() : "",
     };
+}
+
+function compareRuntimeVersions(left, right) {
+    const parse = (value) => String(value || "").replace(/^v/i, "").split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0);
+    const a = parse(left);
+    const b = parse(right);
+    for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+        const diff = (a[index] || 0) - (b[index] || 0);
+        if (diff) return diff < 0 ? -1 : 1;
+    }
+    return 0;
 }
 
 async function freePort() {
@@ -125,6 +137,7 @@ export function createAssistantManager({
         port: 0,
         startedAt: "",
         error: "",
+        runtimeUpdateError: "",
         stderrTail: [],
         stopping: false,
     };
@@ -133,8 +146,17 @@ export function createAssistantManager({
     function availability() {
         const runtimePackagePresent = Boolean(runtimePackagePath());
         const runtimeConfig = readRuntimeConfig(config.appRoot);
-        const canDownload =
-            !runtimePackagePresent && Boolean(runtimeConfig.url && runtimeConfig.sha256 && config.launcherControlUrl);
+        const runtimeVersion =
+            readVersion(path.join(paths.workspace, "VERSION")) ||
+            readVersion(path.join(paths.workspace, "infinite-canvas", "VERSION")) ||
+            "";
+        const runtimeTargetVersion = runtimeConfig.runtimeVersion;
+        const runtimeUpdateAvailable = Boolean(
+            runtimePackagePresent && runtimeVersion && runtimeTargetVersion && compareRuntimeVersions(runtimeVersion, runtimeTargetVersion) < 0,
+        );
+        const canDownload = Boolean(
+            runtimeConfig.url && runtimeConfig.sha256 && config.launcherControlUrl && (!runtimePackagePresent || runtimeUpdateAvailable),
+        );
         if (process.env.ASSISTANT_ENABLED === "0") {
             return {
                 available: false,
@@ -142,6 +164,9 @@ export function createAssistantManager({
                 canRepair: false,
                 canDownload: false,
                 runtimePackagePresent,
+                runtimeVersion,
+                runtimeTargetVersion,
+                runtimeUpdateAvailable,
                 fullPackageUrl: runtimeConfig.fullPackageUrl,
                 runtimeState: runtimePackagePresent ? "disabled" : "disabled-without-package",
                 reason: "Agent 已被环境变量关闭",
@@ -160,8 +185,11 @@ export function createAssistantManager({
                 available: true,
                 needFullPackage: false,
                 canRepair: false,
-                canDownload: false,
+                canDownload,
                 runtimePackagePresent,
+                runtimeVersion,
+                runtimeTargetVersion,
+                runtimeUpdateAvailable,
                 fullPackageUrl: runtimeConfig.fullPackageUrl,
                 runtimeState: runtimePackagePresent ? "ready" : "ready-without-package",
                 reason: "",
@@ -175,6 +203,9 @@ export function createAssistantManager({
             canRepair,
             canDownload,
             runtimePackagePresent,
+            runtimeVersion,
+            runtimeTargetVersion,
+            runtimeUpdateAvailable,
             fullPackageUrl: runtimeConfig.fullPackageUrl,
             runtimeState: runtimePackagePresent ? "needs-repair" : "package-missing",
             reason: `缺少 ${missing.join("、")}`,
@@ -194,10 +225,11 @@ export function createAssistantManager({
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), 840_000);
                 try {
+                    const runtimeConfig = readRuntimeConfig(config.appRoot);
                     const response = await fetchFn(`${config.launcherControlUrl}/ensure-assistant`, {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ download: download === true }),
+                        body: JSON.stringify({ download: download === true, mirrorUrl: runtimeConfig.url, mirrorSha256: runtimeConfig.sha256 }),
                         signal: controller.signal,
                     });
                     const data = await response.json().catch(() => ({}));
@@ -328,8 +360,12 @@ export function createAssistantManager({
 
     async function ensure(options = {}) {
         let info = availability();
-        const wantsDownload = options.download === true && !info.runtimePackagePresent;
-        if (!info.available && (info.canRepair || (wantsDownload && info.canDownload))) {
+        let updateError = "";
+        const wantsDownload = options.download === true && (!info.runtimePackagePresent || info.runtimeUpdateAvailable);
+        const needsUpdate = info.runtimeUpdateAvailable === true;
+        const canUpdate = needsUpdate && wantsDownload && info.canDownload;
+        if ((!info.available && (info.canRepair || (wantsDownload && info.canDownload))) || canUpdate) {
+            if (state.child) await stop("runtime-update");
             const repair = await repairRuntime({ download: wantsDownload });
             info = availability();
             if (!repair.ok && !info.available) {
@@ -341,9 +377,20 @@ export function createAssistantManager({
                     canRepair: info.canRepair,
                     canDownload: info.canDownload,
                     runtimePackagePresent: info.runtimePackagePresent,
+                    runtimeVersion: info.runtimeVersion,
+                    runtimeTargetVersion: info.runtimeTargetVersion,
+                    runtimeUpdateAvailable: info.runtimeUpdateAvailable,
+                    runtimeVersionMismatch: info.runtimeUpdateAvailable === true,
                     fullPackageUrl: info.fullPackageUrl,
                     runtimeState: info.runtimeState,
                 };
+            }
+            if (!repair.ok && needsUpdate) {
+                updateError = repair.error || "Agent 运行时更新失败，继续使用旧版本";
+                state.runtimeUpdateError = updateError;
+                state.error = updateError;
+            } else if (repair.ok && needsUpdate) {
+                state.runtimeUpdateError = "";
             }
         }
         if (!info.available) {
@@ -381,7 +428,8 @@ export function createAssistantManager({
         })().finally(() => {
             ensurePromise = null;
         });
-        return ensurePromise;
+        const result = await ensurePromise;
+        return updateError ? { ...result, updateError, runtimeUpdateAvailable: true } : result;
     }
 
     async function stop(reason = "requested") {
@@ -440,6 +488,10 @@ export function createAssistantManager({
             canRepair: info.canRepair === true,
             canDownload: info.canDownload === true,
             runtimePackagePresent: info.runtimePackagePresent === true,
+            runtimeVersion: info.runtimeVersion || "",
+            runtimeTargetVersion: info.runtimeTargetVersion || "",
+            runtimeUpdateAvailable: info.runtimeUpdateAvailable === true,
+            runtimeVersionMismatch: info.runtimeUpdateAvailable === true,
             fullPackageUrl: info.fullPackageUrl || "",
             runtimeState: info.runtimeState || "",
             reason: info.reason,
@@ -450,6 +502,7 @@ export function createAssistantManager({
             pid: state.child?.pid || 0,
             startedAt: state.startedAt,
             lastError: state.error,
+            runtimeUpdateError: state.runtimeUpdateError,
             idleMs,
             workspaceVersion:
                 readVersion(path.join(paths.workspace, "VERSION")) ||

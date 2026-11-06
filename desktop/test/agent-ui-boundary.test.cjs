@@ -14,4 +14,5 @@ test('cloud preferences own URL/key/protocol and retain optional secret persiste
  const store=fs.readFileSync(path.join(root,'stores/use-config-store.ts'),'utf8');
  assert.match(store,/persistedPromptCloudConfig\(state.config\)/);
  assert.match(store,/promptCloudApiFormat: normalizeAgentApiFormat/);
+ assert.equal(/syncAgentProvider\s*\(/.test(store),false,'cloud profile changes must not persist keys to the optional pi runtime');
 });

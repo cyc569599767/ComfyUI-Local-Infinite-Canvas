@@ -905,3 +905,8 @@ export function withLocalProxy(url: string) {
     if (!base || url.startsWith(`${base}/`)) return url;
     return `${base}/${url}`;
 }
+
+// This fork uses native-protocol cloud Agent requests via the gateway. Do not
+// auto-persist the selected cloud profile into the optional pi runtime: that
+// runtime assumes OpenAI chat and would also violate rememberKey=false. Its
+// explicit provider/runtime APIs remain available for opt-in integrations.

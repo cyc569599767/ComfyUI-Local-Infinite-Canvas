@@ -260,6 +260,11 @@ test("C2 new remote index matches old-index behavior without duplicating packs",
         const status = await manager.refresh();
         assert.equal(status.indexVersion, payload.value.version);
         assert.equal(status.indexSource, "remote");
+        const agentPack = status.packs.find((pack) => pack.id === "agent");
+        assert.equal(agentPack?.kind, "runtime");
+        assert.equal(agentPack?.runtime?.sha256, "759f93fdedf60696d351abbae7ca4515ceb37470475b345a6e6b664ad09a0ce3");
+        assert.deepEqual(agentPack?.resourceIds, []);
+        assert.equal(status.resources.some((item) => item.id === "agent_runtime"), false);
         const fourViews = status.packs.filter((pack) => pack.id === "krea2-four-view");
         assert.equal(fourViews.length, 1);
         assert.equal(fourViews[0].standalone, true);

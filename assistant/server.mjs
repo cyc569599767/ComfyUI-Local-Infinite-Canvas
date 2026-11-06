@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { Agent } from "@mariozechner/pi-agent-core";
+import { Type } from "@mariozechner/pi-ai";
 
 import { createDiagnosticTools, collectSnapshot, normalizeGatewayUrl } from "./diagnostics.mjs";
 import { applyProposalFiles, createAsyncMutex, createRepairTools, resolveInside, rollbackProposalFiles } from "./repair-tools.mjs";
@@ -23,6 +24,7 @@ const WORKSPACE_ROOT = path.resolve(process.env.ASSISTANT_WORKSPACE || path.join
 const WORKSPACE_WEB = path.join(WORKSPACE_ROOT, "infinite-canvas", "web");
 const WEB_DIST = path.resolve(process.env.ASSISTANT_WEB_DIST || path.join(APP_ROOT, "infinite-canvas", "web", "dist"));
 const DATA_DIR = path.resolve(process.env.ASSISTANT_DATA_DIR || path.join(ROOT, "data"));
+const PROVIDER_FILE = path.resolve(process.env.ASSISTANT_PROVIDER_FILE || path.join(ROOT, "agent-provider.json"));
 const BACKUP_ROOT = path.join(DATA_DIR, "backups");
 const FIXES_FILE = path.join(DATA_DIR, "fixes.json");
 const PROPOSALS_FILE = path.join(DATA_DIR, "proposals.json");
@@ -49,6 +51,88 @@ let shuttingDown = false;
 let recoveryReport = { state: "running", reapplied: 0, conflicts: [], build: null, at: Date.now() };
 let recoveryPromise = Promise.resolve();
 const repairOperation = createAsyncMutex();
+const READ_ONLY_DIAGNOSTIC_TOOLS = new Set(["gateway_health", "setup_status", "workflow_status", "resource_status", "directory_settings", "system_stats"]);
+const READ_ONLY_REPAIR_TOOLS = new Set(["list_workspace", "read_source", "search_source", "read_remote_source"]);
+const CANVAS_TOOL_NAMES = new Set(["canvas_get_state", "canvas_get_features", "canvas_apply_ops", "site_navigate"]);
+const pendingCanvasCalls = new Map();
+
+function normalizeMode(value) {
+    return value === "developer" ? "developer" : "normal";
+}
+
+function modeInstruction(mode) {
+    return mode === "developer"
+        ? "当前会话权限（优先于上文）：开发者模式已开启。你可以读写工作区文件、运行只读检查并提供修复方案，也可以调用画布工具。"
+        : "当前会话权限（优先于上文）：普通模式。只能调用画布工具和只读源码/诊断工具；不能写文件、不能生成修复方案、不能执行检查或命令。用户要求改代码、写文件或运行命令时，请明确告诉用户打开 Agent 设置里的「开发者模式」，不要声称已经修改。";
+}
+
+export function createCanvasTools(sendCanvas, threadId) {
+    const callCanvas = (name, input) =>
+        new Promise((resolve, reject) => {
+            const callId = randomUUID();
+            let sent = false;
+            try {
+                sent = typeof sendCanvas === "function" && sendCanvas({ callId, name, args: input || {} }) === true;
+            } catch {
+                sent = false;
+            }
+            if (!sent) {
+                reject(new Error("画布页面未连接，无法执行画布工具。请打开一个画布后重试。"));
+                return;
+            }
+            const timer = setTimeout(() => {
+                pendingCanvasCalls.delete(callId);
+                reject(new Error("画布工具超时：请确认画布页面已打开并保持连接。"));
+            }, 120_000);
+            pendingCanvasCalls.set(callId, { resolve, reject, timer, threadId });
+        });
+    const tool = (name, label, description, parameters) => ({
+        name,
+        label,
+        description,
+        parameters,
+        execute: async (_id, params) => {
+            const result = await callCanvas(name, params);
+            return {
+                content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result) }],
+                details: result && typeof result === "object" ? result : {},
+            };
+        },
+    });
+    return [
+        tool("canvas_get_state", "读取画布", "读取当前网页画布的节点、连线、选区和视口。", Type.Object({})),
+        tool("canvas_get_features", "查询画布功能", "查询画布功能目录、入口、限制和可用模型。", Type.Object({})),
+        tool(
+            "canvas_apply_ops",
+            "操作画布",
+            "批量操作当前网页画布。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。",
+            Type.Object({ ops: Type.Array(Type.Any()) }),
+        ),
+        tool("site_navigate", "打开页面", "跳转到画布、图片、视频、提示词、资产或配置页面。", Type.Object({ path: Type.String() })),
+    ];
+}
+
+export function resolveCanvasToolCall(callId, result) {
+    const pending = pendingCanvasCalls.get(callId);
+    if (!pending) return false;
+    pendingCanvasCalls.delete(callId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+    return true;
+}
+
+function gateTools(tools, mode) {
+    if (mode === "developer") return tools;
+    return tools.map((tool) => {
+        if (READ_ONLY_DIAGNOSTIC_TOOLS.has(tool.name) || READ_ONLY_REPAIR_TOOLS.has(tool.name)) return tool;
+        return {
+            ...tool,
+            execute: async () => {
+                throw new Error("普通模式不能写文件、生成修复方案或执行检查/命令。请打开 Agent 设置里的「开发者模式」后重试。");
+            },
+        };
+    });
+}
 
 function readText(file) {
     try {
@@ -184,14 +268,24 @@ function normalizeBaseUrl(value) {
 }
 
 function validateProfile(api) {
-    if (!api || typeof api !== "object") return { error: "缺少 API 配置" };
+    if (!api || typeof api !== "object") return { error: "还没有配置 API，请先在设置 → 云端 API 配置一个文本 API。" };
     const baseUrl = normalizeBaseUrl(api.baseUrl);
     const apiKey = String(api.apiKey || "").trim();
     const model = String(api.model || "").trim();
     if (!baseUrl) return { error: "API 地址无效（只支持 http/https）" };
-    if (!apiKey) return { error: "API Key 为空，请先在画布设置里配置" };
+    if (!apiKey) return { error: "API Key 为空，请先在设置 → 云端 API 中补全" };
     if (!model) return { error: "API 模型为空" };
-    return { ok: true, baseUrl, apiKey, model, name: String(api.name || "").trim() };
+    return { ok: true, baseUrl, apiKey, model, name: String(api.name || api.label || "").trim() };
+}
+
+function readProviderProfile() {
+    try {
+        const value = JSON.parse(fs.readFileSync(PROVIDER_FILE, "utf8"));
+        if (!value || typeof value !== "object") return null;
+        return { baseUrl: value.baseUrl, apiKey: value.apiKey, model: value.model, name: value.label || value.name || "" };
+    } catch {
+        return null;
+    }
 }
 
 function buildModel(profile) {
@@ -295,10 +389,10 @@ function lastAssistantUsage(messages) {
     return null;
 }
 
-function buildTools(gatewayUrl) {
-    return [
-        ...createDiagnosticTools({ gatewayUrl }),
-        ...createRepairTools({
+function buildTools(gatewayUrl, mode, sendCanvas, threadId) {
+    const diagnostics = gateTools(createDiagnosticTools({ gatewayUrl }), mode);
+    const repairs = gateTools(
+        createRepairTools({
             workspaceRoot: WORKSPACE_ROOT,
             proposals,
             webDir: WORKSPACE_WEB,
@@ -306,11 +400,22 @@ function buildTools(gatewayUrl) {
             runTask: runBuildTask,
             operationLock: repairOperation,
         }),
-    ];
+        mode,
+    );
+    return [...diagnostics, ...repairs, ...createCanvasTools(sendCanvas, threadId)];
 }
 
-function createThread({ id, systemPrompt, model, profile, history }) {
-    const tools = buildTools(profile.gatewayUrl);
+export function toolsForMode({ gatewayUrl = "http://127.0.0.1:9", mode = "normal", sendCanvas = () => false, threadId = "tool-test" } = {}) {
+    return buildTools(gatewayUrl, normalizeMode(mode), sendCanvas, threadId);
+}
+
+function createThread({ id, systemPrompt, model, profile, history, mode = "normal" }) {
+    const holder = { record: null };
+    const tools = buildTools(profile.gatewayUrl, mode, (payload) => {
+        if (!holder.record?.subscriber) return false;
+        holder.record.subscriber("canvas_tool", payload);
+        return true;
+    }, id);
     const agent = new Agent({
         initialState: {
             systemPrompt,
@@ -327,27 +432,36 @@ function createThread({ id, systemPrompt, model, profile, history }) {
         agent,
         signature: profileSignature(profile),
         gatewayUrl: profile.gatewayUrl,
+        mode,
         model: profile.model,
         apiKey: profile.apiKey,
         running: false,
         subscriber: null,
         lastActive: Date.now(),
     };
+    holder.record = record;
     threads.set(id, record);
     return record;
 }
 
-function updateThreadContext(record, { systemPrompt, profile }) {
+function updateThreadContext(record, { systemPrompt, profile, mode }) {
     record.agent.state.systemPrompt = systemPrompt;
     if (record.signature !== profileSignature(profile)) {
         record.signature = profileSignature(profile);
         record.model = profile.model;
         record.apiKey = profile.apiKey;
         record.agent.state.model = buildModel(profile);
+        record.agent.getApiKey = () => profile.apiKey;
     }
-    if (record.gatewayUrl !== profile.gatewayUrl) {
+    const nextMode = normalizeMode(mode);
+    if (record.gatewayUrl !== profile.gatewayUrl || record.mode !== nextMode) {
         record.gatewayUrl = profile.gatewayUrl;
-        record.agent.state.tools = buildTools(profile.gatewayUrl);
+        record.mode = nextMode;
+        record.agent.state.tools = buildTools(profile.gatewayUrl, nextMode, (payload) => {
+            if (!record.subscriber) return false;
+            record.subscriber("canvas_tool", payload);
+            return true;
+        }, record.id);
     }
     record.lastActive = Date.now();
 }
@@ -793,7 +907,8 @@ function handleChat(req, res, origin) {
             sendJson(res, 400, { ok: false, error: `消息过长（上限 ${MAX_MESSAGE_CHARS} 字）` }, origin);
             return;
         }
-        const validated = validateProfile(body.api);
+        const apiInput = body.api && typeof body.api === "object" ? body.api : readProviderProfile();
+        const validated = validateProfile(apiInput);
         if (!validated.ok) {
             endActivity();
             sendJson(res, 400, { ok: false, error: validated.error }, origin);
@@ -806,17 +921,18 @@ function handleChat(req, res, origin) {
         const threadId = String(body.threadId || "").trim() || randomUUID();
         const history = Array.isArray(body.history) ? body.history : [];
         const context = body.context && typeof body.context === "object" ? body.context : null;
+        const mode = normalizeMode(body.mode);
         await recoveryPromise;
-        const systemPrompt = buildSystemPrompt({ context, gatewayUrl: profile.gatewayUrl, workspaceRoot: WORKSPACE_ROOT });
+        const systemPrompt = `${buildSystemPrompt({ context, gatewayUrl: profile.gatewayUrl, workspaceRoot: WORKSPACE_ROOT })}\n\n${modeInstruction(mode)}`;
         const model = buildModel(profile);
 
         let record = threads.get(threadId);
         let recreated = false;
         if (!record) {
-            record = createThread({ id: threadId, systemPrompt, model, profile, history });
+            record = createThread({ id: threadId, systemPrompt, model, profile, history, mode });
             recreated = history.length > 0;
         } else {
-            updateThreadContext(record, { systemPrompt, profile });
+            updateThreadContext(record, { systemPrompt, profile, mode });
         }
         if (record.running) {
             endActivity();
@@ -860,7 +976,7 @@ function handleChat(req, res, origin) {
             serviceVersion: SERVICE_VERSION,
             appVersion: APP_VERSION,
             workspaceVersion: workspaceVersion(),
-            permission: "L0",
+            permission: mode === "developer" ? "L0-read-only + L1-source + L2-propose + L3-apply/actions" : "L0-read-only + canvas + developer-mode-required",
             model: profile.model,
             gatewayUrl: profile.gatewayUrl,
             recreated: recreated || record.agent.state.messages.length === 0,
@@ -882,10 +998,12 @@ function handleChat(req, res, origin) {
                 return;
             }
             if (event.type === "tool_execution_start") {
+                if (CANVAS_TOOL_NAMES.has(event.toolName)) return;
                 send("tool_start", { id: event.toolCallId, name: event.toolName, label: toolLabel(event.toolName), args: compactArgs(event.args) });
                 return;
             }
             if (event.type === "tool_execution_end") {
+                if (CANVAS_TOOL_NAMES.has(event.toolName)) return;
                 send("tool_end", { id: event.toolCallId, name: event.toolName, ok: !event.isError, summary: extractToolSummary(event.toolName, event.result) });
                 const details = event.result?.details;
                 if (event.toolName === "propose_edit" && details?.proposalId) {
@@ -915,6 +1033,12 @@ function handleChat(req, res, origin) {
         } finally {
             unsubscribe();
             record.subscriber = null;
+            for (const [callId, pending] of pendingCanvasCalls) {
+                if (pending.threadId !== record.id) continue;
+                clearTimeout(pending.timer);
+                pending.reject(new Error("本轮对话已结束，画布操作未完成。"));
+                pendingCanvasCalls.delete(callId);
+            }
             record.running = false;
             record.lastActive = Date.now();
             ended = true;
@@ -1144,6 +1268,27 @@ const server = http.createServer((req, res) => {
         void collectSnapshot(url.searchParams.get("gateway") || GATEWAY_URL).then((snapshot) => sendJson(res, 200, snapshot, origin));
         return;
     }
+    if (req.method === "POST" && url.pathname === "/api/assistant/tool-result") {
+        void (async () => {
+            try {
+                const body = await readBody(req);
+                const callId = String(body.callId || "").trim();
+                const pending = pendingCanvasCalls.get(callId);
+                if (!pending) {
+                    sendJson(res, 404, { ok: false, error: "画布调用不存在或已结束" }, origin);
+                    return;
+                }
+                pendingCanvasCalls.delete(callId);
+                clearTimeout(pending.timer);
+                if (body.error) pending.reject(new Error(String(body.error)));
+                else pending.resolve(body.result ?? {});
+                sendJson(res, 200, { ok: true }, origin);
+            } catch (error) {
+                sendJson(res, 400, { ok: false, error: String(error?.message || error) }, origin);
+            }
+        })();
+        return;
+    }
     if (req.method === "POST" && url.pathname === "/api/assistant/chat") {
         handleChat(req, res, origin);
         return;
@@ -1179,14 +1324,23 @@ const server = http.createServer((req, res) => {
         void (async () => {
             try {
                 const body = await readBody(req);
-                const validated = validateProfile(body.api);
+                const apiInput = body.api && typeof body.api === "object" ? body.api : readProviderProfile();
+                const validated = validateProfile(apiInput);
                 if (!validated.ok) {
                     sendJson(res, 400, { ok: false, error: validated.error }, origin);
                     return;
                 }
                 const profile = { ...validated, gatewayUrl: normalizeGatewayUrl(body.gatewayUrl || GATEWAY_URL) };
                 const id = randomUUID();
-                createThread({ id, systemPrompt: buildSystemPrompt({ gatewayUrl: profile.gatewayUrl, workspaceRoot: WORKSPACE_ROOT }), model: buildModel(profile), profile, history: [] });
+                const mode = normalizeMode(body.mode);
+                createThread({
+                    id,
+                    systemPrompt: `${buildSystemPrompt({ gatewayUrl: profile.gatewayUrl, workspaceRoot: WORKSPACE_ROOT })}\n\n${modeInstruction(mode)}`,
+                    model: buildModel(profile),
+                    profile,
+                    history: [],
+                    mode,
+                });
                 sendJson(res, 200, { ok: true, threadId: id }, origin);
             } catch (error) {
                 sendJson(res, 400, { ok: false, error: String(error?.message || error) }, origin);

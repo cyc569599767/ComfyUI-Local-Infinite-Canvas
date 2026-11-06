@@ -376,7 +376,9 @@ export function AgentCloudChat() {
     const runChat = async (userText: string, userAttachments: CloudAttachment[], replaceHistory?: AgentChatMessageItem[]) => {
         if (sendingRef.current || !mountedRef.current) return;
         let runtime: AgentRuntime;
-        // This chat is cloud-only, including when an older local-pi preference remains saved.
+        // Keep the centralized native-protocol cloud path independent of the optional pi runtime.
+        // Local runtime discovery/provider injection lives in the runtime/config services; a saved
+        // local-pi preference must not reroute this panel or grant it developer-mode tools.
         try { runtime = resolveAgentRuntime({ ...useDevAgentStore.getState(), transport: "cloud" }, activePromptCloudApi(useConfigStore.getState().config)); }
         catch (err) { setError(err instanceof Error ? err.message : String(err)); return; }
         if (replaceHistory) {

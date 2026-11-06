@@ -28,6 +28,7 @@ import { createPromptOptimizer } from "./prompt-optimizer.js";
 import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } from "./qwen-edit.js";
 import { createVideoInterpolator } from "./video-interpolation.js";
 import { createPreviewHub } from "./preview-hub.js";
+import { absoluteTaskUrl } from "./public-url.js";
 import { createFreeWorkflowStore, applyFreeInputs } from "./free-workflows.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
 import { runImage, runVideo, runWorkflow } from "./runner.js";
@@ -520,12 +521,15 @@ export async function createGatewayApp(overrides = {}) {
   await registry.load();
   const tasks = createTaskStore({
     dataDir: config.dataDir,
-    publicBaseUrl: config.publicBaseUrl,
     logger,
     retentionDays: config.taskRetentionDays,
     maxTasks: config.maxStoredTasks,
   });
   await tasks.load();
+  const taskResponse = (req, task) => {
+    const data = tasks.publicTask(task);
+    return { ...data, url: data.url ? absoluteTaskUrl(config, req, data.url) : null };
+  };
   const freeWorkflows = createFreeWorkflowStore({
     dataDir: config.dataDir,
     comfyWorkflowsDir: config.comfyWorkflowsDir,
@@ -621,6 +625,7 @@ export async function createGatewayApp(overrides = {}) {
       const installed = await installBundledNodes({
         root: packageRoot,
         comfyRoot: comfyDir,
+        comfyUrl: config.comfyUrl,
         customNodesDirs: manualCustomNodeRoots(setup?.getDirectorySettings?.() || null),
         log: (message, level) => (level === "WARN" ? logger.warn(message) : logger.info(message)),
       });
@@ -1076,6 +1081,49 @@ export async function createGatewayApp(overrides = {}) {
     setTimeout(() => app.locals.requestShutdown(), 30);
   });
 
+  app.post("/api/agent/provider", (req, res) => {
+    if (!isLoopbackPeer(req.socket.remoteAddress)) {
+      throw new HttpError("仅允许本机同步 Agent API", { status: 403, code: "provider_forbidden" });
+    }
+    const origin = String(req.headers.origin || "");
+    if (origin) {
+      let host = "";
+      try {
+        host = new URL(origin).hostname.toLowerCase();
+      } catch {}
+      if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) {
+        throw new HttpError("仅允许本机 origin 同步 Agent API", { status: 403, code: "provider_origin_forbidden" });
+      }
+    }
+    const value = req.body && typeof req.body === "object" ? req.body : {};
+    const providerFile = path.join(config.appRoot, "assistant", "agent-provider.json");
+    if (value.clear === true) {
+      fs.rmSync(providerFile, { force: true });
+      logger.info?.("Agent provider cleared");
+      res.json({ ok: true, cleared: true });
+      return;
+    }
+    let baseUrl = "";
+    try {
+      const parsed = new URL(String(value.baseUrl || "").trim());
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error();
+      baseUrl = parsed.toString().replace(/\/+$/, "");
+    } catch {
+      throw new HttpError("API 地址无效（只支持 http/https）", { status: 400, code: "provider_base_url_invalid" });
+    }
+    const apiKey = String(value.apiKey || "").trim();
+    const model = String(value.model || "").trim();
+    const label = String(value.label || "").trim();
+    if (!apiKey) throw new HttpError("缺少 API Key", { status: 400, code: "provider_key_missing" });
+    if (!model) throw new HttpError("缺少 API 模型", { status: 400, code: "provider_model_missing" });
+    fs.mkdirSync(path.dirname(providerFile), { recursive: true });
+    const temp = `${providerFile}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify({ baseUrl, apiKey, model, label, updatedAt: new Date().toISOString() }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temp, providerFile);
+    logger.info?.("Agent provider updated (key redacted)");
+    res.json({ ok: true, model, label });
+  });
+
   app.get("/api/assistant/status", async (_req, res) => {
     res.json(await assistant.status());
   });
@@ -1238,8 +1286,13 @@ export async function createGatewayApp(overrides = {}) {
     res.sendFile("admin.html", { root: path.join(config.rootDir, "src"), dotfiles: "deny" });
   });
 
-  app.get("/api/tasks", (_req, res) => {
-    res.json({ tasks: tasks.list().slice(0, 50) });
+  app.get("/api/tasks", (req, res) => {
+    res.json({
+      tasks: tasks.list().slice(0, 50).map((task) => ({
+        ...task,
+        url: task.url ? absoluteTaskUrl(config, req, task.url) : null,
+      })),
+    });
   });
 
   app.get("/api/models/events", (req, res) => {
@@ -1503,7 +1556,7 @@ export async function createGatewayApp(overrides = {}) {
     for (const file of files) {
       if (responseFormat === "url") {
         const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
-        data.push({ url: saved.url });
+        data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
       }
@@ -1624,7 +1677,7 @@ export async function createGatewayApp(overrides = {}) {
     for (const file of result.files) {
       if (responseFormat === "url") {
         const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
-        data.push({ url: saved.url });
+        data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
       }
@@ -1681,7 +1734,7 @@ export async function createGatewayApp(overrides = {}) {
     for (const file of result.files) {
       if (responseFormat === "url") {
         const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
-        data.push({ url: saved.url });
+        data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
       }
@@ -1747,9 +1800,9 @@ export async function createGatewayApp(overrides = {}) {
       prompt_id: result.promptId,
       seed: result.usedSeed ?? null,
       mode: params.idolMode,
-      model: { url: savedModel.url, bytes: savedModel.bytes, filename: model.filename },
-      video: savedVideo ? { url: savedVideo.url, bytes: savedVideo.bytes, filename: video.filename } : null,
-      preview: savedPreview ? { url: savedPreview.url, bytes: savedPreview.bytes, filename: preview.filename } : null,
+      model: { url: absoluteTaskUrl(config, req, savedModel.url), bytes: savedModel.bytes, filename: model.filename },
+      video: savedVideo ? { url: absoluteTaskUrl(config, req, savedVideo.url), bytes: savedVideo.bytes, filename: video.filename } : null,
+      preview: savedPreview ? { url: absoluteTaskUrl(config, req, savedPreview.url), bytes: savedPreview.bytes, filename: preview.filename } : null,
     });
   });
 
@@ -1806,9 +1859,9 @@ export async function createGatewayApp(overrides = {}) {
       created: Math.floor(Date.now() / 1000),
       prompt_id: result.promptId,
       resolution: params.mogeResolution ?? 6,
-      model: { url: savedModel.url, bytes: savedModel.bytes, filename: model.filename, format: "glb" },
-      preview: savedPreview ? { url: savedPreview.url, bytes: savedPreview.bytes, filename: preview.filename } : null,
-      depth: savedDepth ? { url: savedDepth.url, bytes: savedDepth.bytes, filename: depth.filename } : null,
+      model: { url: absoluteTaskUrl(config, req, savedModel.url), bytes: savedModel.bytes, filename: model.filename, format: "glb" },
+      preview: savedPreview ? { url: absoluteTaskUrl(config, req, savedPreview.url), bytes: savedPreview.bytes, filename: preview.filename } : null,
+      depth: savedDepth ? { url: absoluteTaskUrl(config, req, savedDepth.url), bytes: savedDepth.bytes, filename: depth.filename } : null,
     });
   });
 
@@ -1827,8 +1880,11 @@ export async function createGatewayApp(overrides = {}) {
       if (mode === "inpaint" && files.length !== 2) {
         throw new HttpError("Qwen 局部重绘需要 2 张图：原图 + 二值蒙版", { status: 400, code: "invalid_inpaint_media" });
       }
-      if (mode === "edit" && files.length > 4) {
-        throw new HttpError("Qwen 多图编辑最多 4 张参考图", { status: 400, code: "too_many_reference_images" });
+      if (mode === "remove" && files.length !== 2) {
+        throw new HttpError("Qwen 元素移除需要 2 张图：原图 + 二值蒙版", { status: 400, code: "invalid_inpaint_media" });
+      }
+      if (mode === "edit" && files.length > 3) {
+        throw new HttpError("Qwen 多图编辑最多 3 张参考图", { status: 400, code: "too_many_reference_images" });
       }
       if (mode === "outpaint" && files.length !== 1) {
         throw new HttpError("Qwen 扩图需要且只接收 1 张原图", { status: 400, code: "invalid_outpaint_media" });
@@ -1849,7 +1905,7 @@ export async function createGatewayApp(overrides = {}) {
     // 同一张卡上重绘/扩图并发出多张只会互抢显存，统一收敛为单张；
     // 扩图采样像素按配置封顶，避免 16MP 在 16GB 卡上必 OOM。
     const editParams = parseParams(body.params);
-    const singleShot = mode === "inpaint" || mode === "outpaint";
+    const singleShot = mode === "inpaint" || mode === "outpaint" || mode === "remove";
     if (mode === "outpaint" && Number.isFinite(Number(editParams.megapixels))) {
       editParams.megapixels = Math.max(0.1, Math.min(Number(editParams.megapixels), config.outpaintMaxMegapixels));
     }
@@ -1898,7 +1954,7 @@ export async function createGatewayApp(overrides = {}) {
     for (const file of result.files) {
       if (responseFormat === "url") {
         const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
-        data.push({ url: saved.url });
+        data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
       }
@@ -2281,7 +2337,7 @@ export async function createGatewayApp(overrides = {}) {
   app.get("/v1/videos/:id", (req, res) => {
     const task = tasks.get(req.params.id);
     if (!task) throw new HttpError("视频任务不存在", { status: 404, code: "video_not_found" });
-    const data = tasks.publicTask(task);
+    const data = taskResponse(req, task);
     const preview = task.promptId ? previewHub.get(task.promptId) : null;
     const stepProgress = task.promptId ? previewHub.getProgress(task.promptId) : null;
     res.json({
@@ -2339,13 +2395,13 @@ export async function createGatewayApp(overrides = {}) {
     const task = tasks.get(req.params.id);
     if (!task) throw new HttpError("视频任务不存在", { status: 404, code: "video_not_found" });
     const result = await tasks.cancel(req.params.id, comfy);
-    res.json(result);
+    res.json({ ...result, url: result.url ? absoluteTaskUrl(config, req, result.url) : null });
   });
 
   app.get("/v1/tasks/:id", (req, res) => {
     const task = tasks.get(req.params.id);
     if (!task) throw new HttpError("任务不存在", { status: 404, code: "task_not_found" });
-    res.json(tasks.publicTask(task));
+    res.json(taskResponse(req, task));
   });
 
   app.get("/files/:name", (req, res) => {

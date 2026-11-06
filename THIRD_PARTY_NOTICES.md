@@ -10,6 +10,12 @@
 - **FFmpeg** — 由 ComfyUI 节点或本机环境提供；按 FFmpeg 的许可证使用。
 - **three.js** — MIT；随前端 dist 分发（`three.webgpu` 独立 chunk 约 715KB，以及 GaussianSplat / PLY / GLTF 加载器）；上游 https://github.com/mrdoob/three.js 。
 
+## 内置助手运行时（assistant-runtime）
+
+- **assistant-runtime.zip** — 本项目 MIT；包含 `assistant/server.mjs`、`skill.mjs`、诊断/修复工具、`@mariozechner/pi-agent-core@0.73.1` / `@mariozechner/pi-ai@0.73.1` 及其依赖，以及画布前端工作区源码和随包 `node_modules`；不包含 Node.js 可执行文件，运行依赖应用自带 Node。pi Agent 库为 MIT，作者 Mario Zechner，上游 https://github.com/badlogic/pi-mono ；随包根目录附 `LICENSE` 与 `NOTICE`。
+- 随包 npm 依赖以 MIT / Apache-2.0 / BSD / ISC 为主；另含 MPL-2.0（lightningcss）、CC-BY-4.0（caniuse-lite）、Python-2.0、BlueOak、Unlicense 等许可。完整许可文本随包内 1,365 个 license/notice 文件提供；未发现 GPL/AGPL/SSPL/LGPL。
+- 本运行时是画布助手桥，不是 pi Agent / OpenClaw；本项目不包含、也不提供 pi Agent / OpenClaw 的下载。
+
 ## 随包分发的第三方节点
 
 以下节点允许随工作台一起分发，安装时复制到 ComfyUI 的 `custom_nodes`：
@@ -22,6 +28,13 @@
 - **ComfyUI-SeedVR2_VideoUpscaler** — Apache-2.0；上游 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler ；随工作台提供预解压目录，未改动源码。
 - **comfystreamerh3** — MIT，Copyright (c) 2026 Comfy Org；上游 https://github.com/Comfy-Org/comfystreamerh3 ；随工作台提供预解压目录，未改动源码。
 - **ComfyUI-ClipProj** — MIT，Copyright (c) 2026 nicolab28；上游 https://github.com/nicolab28/ComfyUI-ClipProj ；随工作台提供预解压目录，未改动源码。
+- **Goohaitools-comfyui** — GPL-3.0；上游 https://github.com/goohai/Goohaitools-comfyui ；随工作台提供预解压目录，未改动源码。
+
+## 自托管的 Qwen 2.1 LoRA（资源卡下载）
+
+以下 LoRA 由本项目镜像到 ModelScope 数据集 `shensanshu/ComfyUI-Local-Infinite-Canvas` 供资源卡下载，不进入主程序包：
+
+- **Qwen 2.1 一致性无偏移 / 万物移除 / GH 扩图** — 社区开源，作者 GooHAI，上游 https://huggingface.co/GooHAI/Qwen-image-2.1_loras ；未改动权重。
 
 ## 按需下载的第三方运行库
 
