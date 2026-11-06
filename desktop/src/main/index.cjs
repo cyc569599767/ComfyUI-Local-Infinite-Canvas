@@ -7,7 +7,7 @@ const { app, BrowserWindow, WebContentsView, ipcMain, session, dialog, shell } =
 const { getRuntimeInfo, isTrustedSender } = require('./runtime.cjs');
 const { ServiceManager, request } = require('./services.cjs');
 const { createApplication } = require('./application.cjs');
-const { isAllowedNavigation, isExternalLink, sessionResponse } = require('./content-policy.cjs');
+const { isAllowedNavigation, isExternalLink, resolveGatewayAssetUrl, sessionResponse } = require('./content-policy.cjs');
 
 const rendererPath = path.join(__dirname, '../renderer/index.html');
 const rendererUrl = pathToFileURL(rendererPath).href;
@@ -41,6 +41,8 @@ const pageViews = new Map();
 const trustedContents = new Set();
 
 function currentOrigins() {
+  // Test-only URL normalizer is available only on the privileged dashboard
+  // document; renderer content pages have no preload bridge.
   return new Set(Object.values(manager.state.services || {}).map((service) => service.url));
 }
 
@@ -277,7 +279,10 @@ async function captureTestImage(contents, file) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try { fs.writeFileSync(file, (await contents.capturePage()).toPNG()); return; }
     catch (error) {
-      if (attempt === 2) throw new Error(`Screenshot capture failed (${path.basename(file)}): ${error.message}`);
+      if (attempt === 2) {
+        try { application?.log(`Optional smoke screenshot unavailable (${path.basename(file)}): ${error.message}`); } catch { /* test artifact only */ }
+        return false;
+      }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
@@ -292,11 +297,18 @@ async function runSmokeTest() {
       await new Promise(resolve => setTimeout(resolve, 25));
     }
     return { info, nodeIsolated: typeof process === 'undefined' && typeof require === 'undefined',
-      displayedElectron: document.getElementById('electron-version').textContent };
+      displayedElectron: document.getElementById('electron-version').textContent,
+      desktopTabs: [...document.querySelectorAll('.tabs [data-page]')].map(button => ({ page: button.dataset.page, label: button.textContent.trim() })) };
   })()`);
+  const expectedTabs = [
+    { page: 'canvas', label: '无界工作台' }, { page: 'comfy', label: 'ComfyUI' },
+    { page: 'dashboard', label: '服务面板' }, { page: 'gateway', label: '网关管理' },
+  ];
+  if (JSON.stringify(result.desktopTabs) !== JSON.stringify(expectedTabs)) throw new Error('Desktop toolbar order mismatch');
   if (result.info.electron !== '41.0.3' || !result.nodeIsolated || result.displayedElectron !== '41.0.3') {
     throw new Error(`Smoke test failed: ${JSON.stringify(result)}`);
   }
+  result.serviceLogs = await require('./log-smoke.cjs').verifyServiceLogView(mainWindow.webContents, manager);
   if (isIntegrationTest) {
     await connect(!isManagedTest); // Managed integration uses an explicitly isolated test workspace.
     const url = manager.state.services.gateway.url;
@@ -359,12 +371,12 @@ async function runSmokeTest() {
     await canvasContents.loadURL(`${manager.state.services.canvas.url}/canvas?mode=recent`);
     result.project = await canvasContents.executeJavaScript(`(async () => {
       const deadline = Date.now() + 15000;
-      while (!document.querySelector('[data-canvas-bottom-toolbar]')) {
-        if (Date.now() > deadline) throw new Error('Canvas editor did not mount');
+      while (!(location.pathname.startsWith('/canvas/') && document.querySelector('main.flex.min-h-0.overflow-hidden'))) {
+        if (Date.now() > deadline) throw new Error('Canvas editor did not mount: ' + location.href + '; ' + (document.querySelector('main')?.outerHTML.slice(0,600) || document.body.innerText.slice(0,300)));
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       window.__desktopTestMarker = 'preserved';
-      return { path: location.pathname, toolbar: true };
+      return { path: location.pathname, toolbar: true, projectId: location.pathname.split('/').pop() };
     })()`);
     if (isDistributionTest) {
       await canvasContents.executeJavaScript(`(async () => {
@@ -395,7 +407,7 @@ async function runSmokeTest() {
           await new Promise(resolve => setTimeout(resolve, 50));
         }
         title.closest('button').click();
-        while (!document.querySelector('[data-canvas-bottom-toolbar]')) {
+        while (!(location.pathname.startsWith('/canvas/') && document.querySelector('main.flex.min-h-0.overflow-hidden'))) {
           if (Date.now() > deadline) throw new Error('Opening project from library failed');
           await new Promise(resolve => setTimeout(resolve, 50));
         }
@@ -404,8 +416,19 @@ async function runSmokeTest() {
       })()`);
       result.navigation.projectOpen = true;
     }
-    const adminResponse = await request(`${url}/admin`);
+    const [adminResponse, workflowResponse, loraResponse] = await Promise.all([
+      request(`${url}/admin`), request(`${url}/api/workflows`), request(`${url}/api/loras`),
+    ]);
+    if (isDistributionTest) {
+      const localAsset = resolveGatewayAssetUrl('/files/3d-model.ply', manager.state.services.gateway.url);
+      if (localAsset !== `${manager.state.services.gateway.url}/files/3d-model.ply`) throw new Error(`Gateway asset URL resolution failed: ${localAsset}`);
+      result.gatewayAssetRouting = 'ok';
+    }
     if (!adminResponse?.text.includes('id="workflows"')) throw new Error('Gateway /admin did not serve the HTML management page');
+    if (!Array.isArray(workflowResponse?.json?.workflows)) throw new Error('Updated gateway workflow API failed');
+    if (!Array.isArray(loraResponse?.json?.loras)) throw new Error('Updated gateway LoRA catalog API failed');
+    result.gatewayWorkflowCount = workflowResponse.json.workflows.length;
+    result.loraCatalog = 'ok';
     await showPage('gateway');
     result.gatewayPage = await contentView.webContents.executeJavaScript(`(async () => {
       if (document.title !== 'ComfyUI Gateway' || !document.getElementById('workflows')) {
@@ -441,6 +464,7 @@ async function runSmokeTest() {
       result.comfyPage = await contentView.webContents.executeJavaScript('document.body.children.length > 0');
     }
     await showPage('canvas');
+
     result.projectPreserved = contentView.webContents.id === canvasContents.id
       && await canvasContents.executeJavaScript("window.__desktopTestMarker === 'preserved'");
     if (!result.projectPreserved) throw new Error('Switching tabs reloaded the canvas');

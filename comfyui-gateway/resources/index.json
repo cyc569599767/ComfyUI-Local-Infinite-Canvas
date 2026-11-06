@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "2026.11.05-35",
+  "version": "2026.11.06-36",
   "channel": "stable",
   "updatedAt": "2026-11-03",
   "packs": [
@@ -599,38 +599,47 @@
     {
       "id": "h3-fast",
       "label": "H3 极速草稿",
-      "description": "H3 极速草稿：4B 文本编码器 + ClipProj 投影 + FastH3 4 步采样，约 448 长边快速出片；依赖 H3 极速草稿工作流与对应节点。",
+      "description": "H3 极速草稿：FL2VA INT8 + Turbo 4 步、4B + ClipProj，448 长边输出音画 MP4；支持文生/首尾帧，不依赖旧 FastH3 实验运行时或 TRT VAE。",
       "family": "h3",
       "tier": "quality",
       "optional": true,
       "autoRecommend": false,
       "resources": [
-        "h3_fasth3_node",
+        "h3_draft_fl2va_int8",
+        "h3_draft_turbo4_v12",
+        "h3_draft_video_vae_fp16",
         "h3_clipproj_node",
         "h3_clipproj_4b_mlp",
-        "h3_video_vae_int8",
         "qwen3vl_4b_fp8_scaled",
-        "h3_audio_vae_fp32"
+        "h3_audio_vae_fp32",
+        "h3_vhs_node",
+        "kjnodes",
+        "sage_h3"
       ],
       "optionalResources": [
-        "h3_fasth3_node",
+        "h3_draft_fl2va_int8",
+        "h3_draft_turbo4_v12",
+        "h3_draft_video_vae_fp16",
         "h3_clipproj_node",
         "h3_clipproj_4b_mlp",
-        "h3_video_vae_int8",
         "qwen3vl_4b_fp8_scaled",
-        "h3_audio_vae_fp32"
+        "h3_audio_vae_fp32",
+        "h3_vhs_node",
+        "kjnodes",
+        "sage_h3"
       ],
       "workflows": [
         "video-h3-fast"
       ],
       "workflowDependencies": {
         "video-h3-fast": [
-          "h3_fasth3_node",
-          "h3_clipproj_node",
+          "h3_draft_fl2va_int8",
+          "h3_draft_turbo4_v12",
+          "h3_draft_video_vae_fp16",
           "h3_clipproj_4b_mlp",
-          "h3_video_vae_int8",
           "qwen3vl_4b_fp8_scaled",
-          "h3_audio_vae_fp32"
+          "h3_audio_vae_fp32",
+          "sage_h3"
         ]
       },
       "optionalLabel": "H3 极速草稿"
@@ -811,15 +820,16 @@
     {
       "id": "kjnodes",
       "type": "node",
-      "label": "KJNodes（扩图蒙版节点）",
+      "label": "KJNodes（蒙版与 H3 注意力补丁）",
       "target": "custom_nodes/comfyui-kjnodes",
       "autoInstall": true,
       "bundleDir": "resources/nodes/unpacked/comfyui-kjnodes",
       "size": 2634717,
       "license": "GPL-3.0",
-      "note": "仅扩图的 DrawMaskOnImage 使用；无需额外 pip 依赖；安装后需重启 ComfyUI。",
+      "note": "扩图蒙版及 H3 内存高效注意力补丁；H3 路径另需 SageAttention 运行库；安装后重启 ComfyUI。",
       "provides": [
-        "DrawMaskOnImage"
+        "DrawMaskOnImage",
+        "MiniMaxH3MemoryEfficientSageAttentionPatch"
       ],
       "sources": []
     },
@@ -1950,6 +1960,24 @@
       ]
     },
     {
+      "id": "h3_draft_fl2va_int8", "type": "model", "label": "H3 草稿 FL2VA INT8（剪枝）",
+      "target": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "size": 20970379616,
+      "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a", "license": "MiniMax H3 Community License",
+      "sources": ["https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"]
+    },
+    {
+      "id": "h3_draft_turbo4_v12", "type": "model", "label": "H3 草稿 FL2V Turbo 4步 v1.2 LoRA",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors", "size": 1956193000,
+      "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8", "license": "见 LightX2V / MiniMax H3 上游许可",
+      "sources": ["https://hf-mirror.com/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors", "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors"]
+    },
+    {
+      "id": "h3_draft_video_vae_fp16", "type": "model", "label": "H3 草稿原生视频 VAE fp16",
+      "target": "vae/minimax_h3_video_vae_fp16.safetensors", "size": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522", "license": "MiniMax H3 Community License",
+      "sources": ["https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors", "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"]
+    },
+    {
       "id": "h3_video_vae_int8",
       "type": "model",
       "label": "H3 视频 VAE int8（原生）",
@@ -2017,7 +2045,8 @@
       "license": "MIT",
       "note": "极速草稿用 4B 文本编码器替换 32B 编码器；随包内置但需用户手动安装，安装后重启 ComfyUI。",
       "provides": [
-        "ClipProjApply"
+        "ClipProjApply",
+        "ClipProjLoader"
       ],
       "sources": [
         {

@@ -1,0 +1,595 @@
+{
+  "llama_cpp_model_loader": {
+    "input": {
+      "required": {
+        "model": [
+          [
+            "Qwen3.5-9B-Q4_K_M.gguf"
+          ]
+        ],
+        "mmproj": [
+          [
+            "None",
+            "mmproj-BF16.gguf"
+          ],
+          {
+            "default": "None"
+          }
+        ],
+        "chat_handler": [
+          [
+            "None",
+            "LLaVA-1.5",
+            "LLaVA-1.6",
+            "Moondream2",
+            "nanoLLaVA",
+            "llama3-Vision-Alpha",
+            "MiniCPM-v2.6",
+            "DeepSeek-OCR",
+            "Gemma3",
+            "Gemma4",
+            "Qwen2.5-VL",
+            "MinerU2.5-Pro",
+            "Qwen3-VL",
+            "Qwen3-VL-Thinking",
+            "Qwen3.5",
+            "Qwen3.5-Thinking",
+            "Qwen3.6",
+            "Qwen3.6-Thinking",
+            "Qwen3.8",
+            "Qwen3.8-Thinking",
+            "GLM-4.6V",
+            "GLM-4.6V-Thinking",
+            "GLM-4.1V-Thinking",
+            "LFM2-VL",
+            "LFM2.5-VL",
+            "Granite-Docling",
+            "MiniCPM-v4.5",
+            "MiniCPM-v4.5-Thinking",
+            "MiniCPM-v4.6",
+            "MiniCPM-v4.6-Thinking",
+            "PaddleOCR-VL-1.5",
+            "Qwen3-ASR",
+            "Step3-VL"
+          ],
+          {
+            "default": "None"
+          }
+        ],
+        "n_ctx": [
+          "INT",
+          {
+            "default": 8192,
+            "min": 1024,
+            "max": 327680,
+            "step": 128,
+            "tooltip": "Context length limit."
+          }
+        ],
+        "vram_limit": [
+          "INT",
+          {
+            "default": -1,
+            "min": -1,
+            "max": 1024,
+            "step": 1,
+            "tooltip": "VRAM usage limit in GB (-1 = no limit)\nReference range; actual usage may slightly exceed."
+          }
+        ],
+        "image_min_tokens": [
+          "INT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 4096,
+            "step": 32
+          }
+        ],
+        "image_max_tokens": [
+          "INT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 4096,
+            "step": 32
+          }
+        ],
+        "load_mtp": [
+          "BOOLEAN",
+          {
+            "default": false
+          }
+        ]
+      }
+    },
+    "output": [
+      "LLAMACPPMODEL"
+    ],
+    "output_is_list": [
+      false
+    ]
+  },
+  "llama_cpp_instruct_adv": {
+    "input": {
+      "required": {
+        "llama_model": [
+          "LLAMACPPMODEL"
+        ],
+        "preset_prompt": [
+          [
+            "Empty - Nothing",
+            "Normal - Describe",
+            "Prompt Style - Tags",
+            "Prompt Style - Simple",
+            "Prompt Style - Detailed",
+            "Prompt Style - Extreme Detailed",
+            "Prompt Style - Cinematic",
+            "Creative - Detailed Analysis",
+            "Creative - Summarize Video",
+            "Creative - Short Story",
+            "Creative - Refine & Expand Prompt",
+            "Vision - *Bounding Box"
+          ],
+          {
+            "default": "Normal - Describe"
+          }
+        ],
+        "custom_prompt": [
+          "STRING",
+          {
+            "default": "",
+            "multiline": true,
+            "placeholder": "user_prompt\n\nFor preset hints marked with an \"*\", this will be used to fill the placeholder (e.g., Object names in BBox detection)\nOtherwise, this will override the preset prompts."
+          }
+        ],
+        "system_prompt": [
+          "STRING",
+          {
+            "multiline": true,
+            "default": ""
+          }
+        ],
+        "inference_mode": [
+          [
+            "one by one",
+            "images",
+            "video"
+          ],
+          {
+            "default": "one by one",
+            "tooltip": "one by one: Process each item in the input list one by one (multi-image batch inside an item will be inferred together)\nimages:  \tCombine ALL images across all list items into 1 single prompt\nvideo:  \tTreat each image item in the list as a separate video clip"
+          }
+        ],
+        "max_frames": [
+          "INT",
+          {
+            "default": 24,
+            "min": 2,
+            "max": 1024,
+            "step": 1,
+            "tooltip": "Number of frames to sample evenly from input video.\n(for \"video\" mode only)"
+          }
+        ],
+        "max_size": [
+          "INT",
+          {
+            "default": 256,
+            "min": 128,
+            "max": 16384,
+            "step": 64,
+            "tooltip": "Max size of input images in \"images\" and \"video\" modes."
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 18446744073709552000,
+            "step": 1
+          }
+        ],
+        "force_offload": [
+          "BOOLEAN",
+          {
+            "default": false,
+            "tooltip": "Unload the model after inference."
+          }
+        ],
+        "save_states": [
+          "BOOLEAN",
+          {
+            "default": false,
+            "tooltip": "Preserve the context of this conversation in RAM."
+          }
+        ]
+      },
+      "hidden": {
+        "unique_id": "UNIQUE_ID"
+      },
+      "optional": {
+        "parameters": [
+          "LLAMACPPARAMS"
+        ],
+        "images": [
+          "IMAGE"
+        ],
+        "queue_handler": [
+          "*",
+          {
+            "tooltip": "Used to control the execution order of instruct nodes."
+          }
+        ]
+      }
+    },
+    "output": [
+      "STRING",
+      "STRING",
+      "INT"
+    ],
+    "output_is_list": [
+      false,
+      true,
+      false
+    ]
+  },
+  "llama_cpp_parameters": {
+    "input": {
+      "required": {
+        "max_tokens": [
+          "INT",
+          {
+            "default": 1024,
+            "min": 0,
+            "max": 4096,
+            "step": 1
+          }
+        ],
+        "top_k": [
+          "INT",
+          {
+            "default": 30,
+            "min": 0,
+            "max": 1000,
+            "step": 1
+          }
+        ],
+        "top_p": [
+          "FLOAT",
+          {
+            "default": 0.9,
+            "min": 0,
+            "max": 1,
+            "step": 0.01
+          }
+        ],
+        "min_p": [
+          "FLOAT",
+          {
+            "default": 0.05,
+            "min": 0,
+            "max": 1,
+            "step": 0.01
+          }
+        ],
+        "typical_p": [
+          "FLOAT",
+          {
+            "default": 1,
+            "min": 0,
+            "max": 1,
+            "step": 0.01
+          }
+        ],
+        "temperature": [
+          "FLOAT",
+          {
+            "default": 0.8,
+            "min": 0,
+            "max": 2,
+            "step": 0.01
+          }
+        ],
+        "repeat_penalty": [
+          "FLOAT",
+          {
+            "default": 1,
+            "min": 0,
+            "max": 10,
+            "step": 0.01
+          }
+        ],
+        "frequency_penalty": [
+          "FLOAT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 1,
+            "step": 0.01
+          }
+        ],
+        "present_penalty": [
+          "FLOAT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 2,
+            "step": 0.01
+          }
+        ],
+        "mirostat_mode": [
+          "INT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1
+          }
+        ],
+        "mirostat_eta": [
+          "FLOAT",
+          {
+            "default": 0.1,
+            "min": 0,
+            "max": 1,
+            "step": 0.01
+          }
+        ],
+        "mirostat_tau": [
+          "FLOAT",
+          {
+            "default": 5,
+            "min": 0,
+            "max": 10,
+            "step": 0.01
+          }
+        ],
+        "state_uid": [
+          "INT",
+          {
+            "default": -1,
+            "min": -1,
+            "max": 999999,
+            "step": 1,
+            "tooltip": "Use a specific ID to save the conversation state.\n(-1 = use node's unique_id)"
+          }
+        ]
+      }
+    },
+    "output": [
+      "LLAMACPPARAMS"
+    ],
+    "output_is_list": [
+      false
+    ]
+  },
+  "TE_H3_Prompt_Enhancer": {
+    "input": {
+      "required": {
+        "输入提示词": [
+          "STRING",
+          {
+            "default": "",
+            "multiline": true,
+            "tooltip": "输入剧情、动作、运镜、对白和引用标签，例如 <Picture 1>。"
+          }
+        ],
+        "任务类型": [
+          [
+            "全参考模式(Reference to Video)",
+            "文生视频(T2VA)",
+            "首帧图生视频(I2VA)",
+            "首尾帧视频(FL2VA)",
+            "尾帧图生视频(L2VA)"
+          ],
+          {
+            "default": "全参考模式(Reference to Video)",
+            "tooltip": "按实际使用的 MiniMax H3 节点和首尾帧连接状态选择。"
+          }
+        ],
+        "视频时长": [
+          "FLOAT",
+          {
+            "default": 5,
+            "min": 1,
+            "max": 150,
+            "step": 0.5,
+            "tooltip": "用于规划镜头时间戳；H3 推荐生成时长约 5-15 秒。"
+          }
+        ],
+        "参考素材说明": [
+          "STRING",
+          {
+            "default": "",
+            "multiline": true,
+            "tooltip": "可选。按标签说明素材内容和用途；未说明时 AI 不会臆造素材细节。"
+          }
+        ],
+        "增强方式": [
+          [
+            "本地模板",
+            "API增强"
+          ],
+          {
+            "default": "本地模板",
+            "tooltip": "本地模板不调用接口；API增强直接输出可用于 H3 的中文提示词。"
+          }
+        ],
+        "api_key": [
+          "STRING",
+          {
+            "default": "",
+            "multiline": false,
+            "tooltip": "API Key；留空则读取 config.ini。"
+          }
+        ],
+        "api_base_url": [
+          "STRING",
+          {
+            "default": "https://teynex.com",
+            "multiline": false,
+            "tooltip": "Responses API 服务地址，可填写到域名、/v1 或 /v1/responses。"
+          }
+        ],
+        "model": [
+          "STRING",
+          {
+            "default": "gpt-5.6-sol",
+            "multiline": false,
+            "tooltip": "服务端支持的 Responses API 模型名称。"
+          }
+        ],
+        "max_output_tokens": [
+          "INT",
+          {
+            "default": 4096,
+            "min": 512,
+            "max": 32768,
+            "step": 256
+          }
+        ],
+        "temperature": [
+          "FLOAT",
+          {
+            "default": 0.6,
+            "min": 0,
+            "max": 2,
+            "step": 0.05
+          }
+        ]
+      },
+      "optional": {
+        "H3参考素材": [
+          "TE_H3_REFERENCES",
+          {
+            "tooltip": "连接 TE MAN MiniMaxH3增强提示词Prompt TEXT 的 H3参考素材输出。"
+          }
+        ],
+        "timeout_s": [
+          "INT",
+          {
+            "default": 300,
+            "min": 30,
+            "max": 1800,
+            "tooltip": "API 请求超时时间（秒）。"
+          }
+        ],
+        "绕过代理": [
+          "BOOLEAN",
+          {
+            "default": false,
+            "tooltip": "需要忽略系统代理时开启。"
+          }
+        ]
+      }
+    },
+    "output": [
+      "STRING",
+      "STRING"
+    ],
+    "output_is_list": [
+      false,
+      false
+    ]
+  },
+  "TE_text_display": {
+    "input": {
+      "required": {
+        "text": [
+          "STRING",
+          {
+            "multiline": true,
+            "default": "",
+            "tooltip": "节点内文本。未连接 input_text 时会作为输出文本。"
+          }
+        ]
+      },
+      "optional": {
+        "input_text": [
+          "STRING",
+          {
+            "forceInput": true,
+            "tooltip": "可选上游文本。连接后优先显示并输出这里的内容。"
+          }
+        ],
+        "use_edited_text": [
+          "BOOLEAN",
+          {
+            "default": false
+          }
+        ],
+        "edited_from_text": [
+          "STRING",
+          {
+            "default": ""
+          }
+        ]
+      },
+      "hidden": {
+        "unique_id": "UNIQUE_ID",
+        "extra_pnginfo": "EXTRA_PNGINFO"
+      }
+    },
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ]
+  },
+  "LoadImage": {
+    "input": {
+      "required": {
+        "image": [
+          [
+            "cat.png",
+            "a.png",
+            "b.png",
+            "folder/c.png"
+          ],
+          {
+            "image_upload": true
+          }
+        ]
+      }
+    },
+    "output": [
+      "IMAGE",
+      "MASK"
+    ],
+    "output_is_list": [
+      false,
+      false
+    ]
+  },
+  "CreateList": {
+    "input": {
+      "required": {
+        "inputs": [
+          "COMFY_AUTOGROW_V3",
+          {
+            "template": {
+              "input": {
+                "required": {
+                  "input": [
+                    "*",
+                    {}
+                  ]
+                }
+              },
+              "prefix": "input",
+              "min": 1,
+              "max": 10
+            }
+          }
+        ]
+      }
+    },
+    "output": [
+      "*"
+    ],
+    "output_is_list": [
+      true
+    ]
+  }
+}

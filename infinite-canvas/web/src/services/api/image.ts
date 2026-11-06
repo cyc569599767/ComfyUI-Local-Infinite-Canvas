@@ -11,6 +11,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
 import { publishStepProgress } from "@/services/api/step-progress";
 import { noteGatewayError } from "@/services/api/gateway-status";
+import { resolveGatewayAssetUrl } from "@/services/api/gateway-assets";
 import type { ReferenceImage } from "@/types/image";
 
 // 本地网关断线时把错误汇总给统一重连提示，避免每个节点各弹一条。
@@ -1049,10 +1050,10 @@ export async function requestImageTo3D(config: AiConfig, file: File, params: Ima
         const model = response.data?.model;
         if (!model?.url) throw new Error(apiText("no3dReturned"));
         return {
-            modelUrl: model.url,
+            modelUrl: resolveGatewayAssetUrl(model.url) || model.url,
             modelBytes: Number(model.bytes) || 0,
             fileName: model.filename || "model.ply",
-            previewUrl: response.data?.preview?.url,
+            previewUrl: resolveGatewayAssetUrl(response.data?.preview?.url),
             seed: typeof response.data?.seed === "number" ? response.data.seed : null,
             mode: response.data?.mode === "real" ? "real" : "synthetic",
         };
@@ -1105,11 +1106,11 @@ export async function requestSceneTo3D(config: AiConfig, file: File, params: Sce
         const model = response.data?.model;
         if (!model?.url) throw new Error(apiText("noSceneReturned"));
         return {
-            modelUrl: model.url,
+            modelUrl: resolveGatewayAssetUrl(model.url) || model.url,
             modelBytes: Number(model.bytes) || 0,
             fileName: model.filename || "scene.glb",
-            previewUrl: response.data?.preview?.url,
-            depthUrl: response.data?.depth?.url,
+            previewUrl: resolveGatewayAssetUrl(response.data?.preview?.url),
+            depthUrl: resolveGatewayAssetUrl(response.data?.depth?.url),
             resolution: Number(response.data?.resolution) || params.resolution || 6,
         };
     } catch (error) {
@@ -1123,7 +1124,7 @@ export type PromptOptimizeResult = { prompt: string; mode: string; duration: num
 
 export async function requestPromptOptimize(
     config: AiConfig,
-    params: { prompt: string; mode: PromptOptimizeMode; duration?: number; referenceNote?: string; language?: "zh" | "en"; images?: ReferenceImage[]; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string } },
+    params: { prompt: string; mode: PromptOptimizeMode; duration?: number; referenceNote?: string; language?: "zh" | "en"; images?: ReferenceImage[]; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string } },
     options?: RequestOptions,
 ): Promise<PromptOptimizeResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
@@ -1139,6 +1140,7 @@ export async function requestPromptOptimize(
     if (params.cloud?.baseUrl) formData.set("cloudBaseUrl", params.cloud.baseUrl);
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
+    formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
     const images = params.images || [];
     const files = await Promise.all(images.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file, index) => formData.append(index === 0 ? "image" : `image${index + 1}`, file));
@@ -1159,7 +1161,7 @@ export type ImagePromptOptimizeResult = { prompt: string; mode: string };
 
 export async function requestImagePromptOptimize(
     config: AiConfig,
-    params: { prompt: string; mode?: "text" | "image"; language?: "zh" | "en"; images?: ReferenceImage[]; imageCount?: number; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string } },
+    params: { prompt: string; mode?: "text" | "image"; language?: "zh" | "en"; images?: ReferenceImage[]; imageCount?: number; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string } },
     options?: RequestOptions,
 ): Promise<ImagePromptOptimizeResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
@@ -1173,6 +1175,7 @@ export async function requestImagePromptOptimize(
     if (params.cloud?.baseUrl) formData.set("cloudBaseUrl", params.cloud.baseUrl);
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
+    formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
     const images = params.images || [];
     formData.set("imageCount", String(params.imageCount ?? images.length));
     if (params.engine !== "cloud") {
@@ -1195,7 +1198,7 @@ export async function requestImagePromptOptimize(
 export type ImageCaptionEngine = "qwen35" | "florence" | "cloud";
 export type ImageCaptionResult = { prompt: string; engine?: ImageCaptionEngine; promptId?: string; elapsedMs?: number };
 
-export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; cloud?: { baseUrl: string; apiKey: string; model: string } }, options?: RequestOptions): Promise<ImageCaptionResult> {
+export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; cloud?: { baseUrl: string; apiKey: string; model: string; apiFormat?: string } }, options?: RequestOptions): Promise<ImageCaptionResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const root = localGatewayRoot(requestConfig.baseUrl);
     if (!root) throw new Error(apiText("promptOptimizeLocalOnly"));
@@ -1208,6 +1211,7 @@ export async function requestImageCaption(config: AiConfig, params: { images: Re
     if (params.cloud?.baseUrl) formData.set("cloudBaseUrl", params.cloud.baseUrl);
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
+    formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
     const file = await dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) });
     formData.append("image", file);
     try {

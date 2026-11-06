@@ -93,6 +93,30 @@ test("changing only the key on the same provider preserves the saved model and t
     expect(ready({ ...selected, channels: [{ ...config.channels[0], apiKey: "" }] }, selected.model)).toBe(false);
 });
 
+test("draft task mode follows the source node before global defaults", async () => {
+    const { resolveDraftSourcePlan } = await import('../src/lib/canvas/draft-source-plan');
+    const refs = [{ id: 'pic', name: 'pic.png', type: 'image/png', dataUrl: 'data:image/png;base64,eA==' }];
+    for (const mode of ['text', 'frames', 'reference']) {
+        const node = videoNode('replacement::video-a');
+        node.metadata = { ...node.metadata, videoMode: mode, frameMode: 'last' };
+        const resolved = buildGenerationConfig({ ...config, videoMode: mode === 'text' ? 'frames' : 'text', frameMode: 'both' }, node, 'video');
+        const draft = resolveDraftSourcePlan(resolved.videoMode, resolved.frameMode, refs);
+        expect(draft.mode).toBe(mode);
+        expect(draft.images.length).toBe(mode === 'text' ? 0 : 1);
+        expect(node.metadata.videoMode).toBe(mode);
+        if (mode === 'frames') expect(draft.frameMode).toBe('last');
+    }
+});
+
+test("a source node with no mode follows its effective configured default without image-based switching", async () => {
+    const { resolveDraftSourcePlan } = await import('../src/lib/canvas/draft-source-plan');
+    const refs = [{ id: 'pic', name: 'pic.png', type: 'image/png', dataUrl: 'data:image/png;base64,eA==' }];
+    for (const mode of ['text', 'frames', 'reference']) {
+        const resolved = buildGenerationConfig({ ...config, videoMode: mode }, videoNode('replacement::video-a'), 'video');
+        expect(resolveDraftSourcePlan(resolved.videoMode, resolved.frameMode, refs).mode).toBe(mode);
+    }
+});
+
 test("unavailable explicit selections are preserved for every generation capability", () => {
     for (const capability of ["image", "video", "text", "audio"] as ModelCapability[]) {
         expect(resolveModelForCapability(config, `removed::${capability}`, capability)).toBe(`removed::${capability}`);

@@ -19,6 +19,19 @@ export function baseVideoWorkflowId(workflowId: string) {
     return String(workflowId || "").replace(/-novdn$/, "");
 }
 
+/** Fixed H3 workflows define their input contract even if a saved card carries
+ * a stale mode. Fast draft and other providers remain user-configurable.
+ * Resolve metadata before stripping the no-VDN suffix (base-model variants may
+ * have a different model name while sharing this workflow ID).
+ */
+export function resolveVideoWorkflowMode(config: AiConfig, model: string, mode: string) {
+    const id = baseVideoWorkflowId(videoWorkflowId(config, model));
+    if (id === "video-h3-ref2va" || id === "video-h3-character-swap") return "reference";
+    if (id === "video-h3-frames") return "frames";
+    if (id === "video-h3-t2v") return "text";
+    return mode;
+}
+
 export function videoModelForWorkflow(config: AiConfig, workflowId: string, options?: { noVdn?: boolean }) {
     const optionsList = workflowModelOptions(config, "video");
     const target = options?.noVdn ? `${workflowId}${NO_VDN_SUFFIX}` : workflowId;

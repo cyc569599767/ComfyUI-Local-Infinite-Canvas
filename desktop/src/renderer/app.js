@@ -4,8 +4,15 @@ const $ = (id) => document.getElementById(id);
 let busy = false;
 let state = null;
 let config = null;
+const logView = window.DesktopLogView.createLogView({
+  element: $('logs'), followToggle: $('logs-follow'), latestButton: $('logs-latest'),
+  status: $('logs-follow-status'), details: $('logs-panel'),
+});
+window.addEventListener('resize', () => logView.refresh());
+window.addEventListener('pagehide', () => logView.dispose(), { once: true });
 
 function render(next) {
+  const previousPage = state?.activePage;
   state = next;
   const pending = busy || ['connecting', 'stopping'].includes(state.phase);
   $('connection-message').textContent = state.message;
@@ -25,7 +32,8 @@ function render(next) {
     button.disabled = button.dataset.page !== 'dashboard' && !state.services?.[button.dataset.page]?.ready;
     button.classList.toggle('active', button.dataset.page === (state.activePage || 'dashboard'));
   }
-  $('logs').textContent = state.logs.length ? state.logs.join('\n') : '暂无启动日志；已就绪服务直接复用。';
+  logView.update(state.logs, state.logsVersion);
+  if (state.activePage === 'dashboard' && previousPage !== 'dashboard') logView.refresh();
 }
 
 async function perform(action) {

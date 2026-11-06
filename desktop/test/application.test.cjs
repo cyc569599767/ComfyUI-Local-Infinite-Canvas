@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApplication, seedWorkflows, validateConfig, DEFAULTS } = require('../src/main/application.cjs');
+const { resolveGatewayAssetUrl } = require('../../infinite-canvas/web/src/lib/gateway-asset-url.ts');
 
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-app-test-'));
@@ -21,10 +22,24 @@ test('workflow upgrades replace unchanged defaults but preserve user edits', t =
   seedWorkflows(source, target, baseline);
   file(target, 'registry.json', 'user changed'); file(target, 'custom.json', 'custom');
   file(source, 'registry.json', 'new default'); file(source, '_internal/tool.json', 'new');
-  assert.deepEqual(seedWorkflows(source, target, baseline), ['registry.json']);
+  assert.ok(seedWorkflows(source, target, baseline).some(item => item.startsWith('registry.json')));
   assert.equal(fs.readFileSync(path.join(target, 'registry.json'), 'utf8'), 'user changed');
   assert.equal(fs.readFileSync(path.join(target, '_internal/tool.json'), 'utf8'), 'new');
   assert.equal(fs.readFileSync(path.join(target, 'custom.json'), 'utf8'), 'custom');
+});
+
+test('workflow upgrade merges new upstream registry IDs while preserving existing user entries', t => {
+  const root = temporary(t); const source = path.join(root, 'source'); const target = path.join(root, 'user');
+  const baseline = path.join(root, 'baseline.json');
+  const write = (filePath, data) => { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`); };
+  write(path.join(source, 'registry.json'), { version: 1, workflows: [{ id: 'existing', label: 'updated upstream' }, { id: 'new-3d', label: '3D workflow' }] });
+  write(path.join(target, 'registry.json'), { version: 1, workflows: [{ id: 'existing', label: 'user local label' }, { id: 'local-import', label: 'Local workflow' }] });
+  const conflicts = seedWorkflows(source, target, baseline);
+  const result = JSON.parse(fs.readFileSync(path.join(target, 'registry.json'), 'utf8'));
+  assert.equal(result.workflows[0].label, 'user local label');
+  assert.equal(result.workflows[1].id, 'local-import');
+  assert.equal(result.workflows[2].id, 'new-3d');
+  assert.ok(conflicts.some(item => item.startsWith('registry.json')));
 });
 
 test('application isolates installed resources from config, data, outputs and workflows', t => {
@@ -40,6 +55,16 @@ test('application isolates installed resources from config, data, outputs and wo
   assert.equal(fs.existsSync(path.join(runtime, 'launcher/config.json')), false);
   app.saveConfig({ ...DEFAULTS, gatewayPort: 24001 });
   assert.equal(app.readConfig().gatewayPort, 24001);
+});
+
+test('3D gateway asset URLs follow the separate local gateway port', () => {
+  const gateway = 'http://127.0.0.1:23111';
+  assert.equal(resolveGatewayAssetUrl('/files/model3d_model.ply', gateway), `${gateway}/files/model3d_model.ply`);
+  assert.equal(resolveGatewayAssetUrl('/files/model3d_preview.png', gateway), `${gateway}/files/model3d_preview.png`);
+  assert.equal(resolveGatewayAssetUrl('/files/scene3d_depth.png', gateway), `${gateway}/files/scene3d_depth.png`);
+  assert.equal(resolveGatewayAssetUrl(`${gateway}/files/model.glb`, gateway), `${gateway}/files/model.glb`);
+  assert.equal(resolveGatewayAssetUrl('https://cdn.example/model.glb', gateway), 'https://cdn.example/model.glb');
+  assert.equal(resolveGatewayAssetUrl('/files/model.glb', 'http://example.com'), '/files/model.glb');
 });
 
 test('configuration rejects remote URLs, port conflicts and nonexistent directories', () => {

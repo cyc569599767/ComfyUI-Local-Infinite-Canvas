@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { App, Button, Popconfirm, Popover, Tooltip } from "antd";
-import { Bot, Gauge, LoaderCircle, MessagesSquare, Plus, RefreshCw, ShieldCheck, Terminal, Trash2, Wifi, WifiOff } from "lucide-react";
+import { App, Button, Popconfirm, Popover, Select, Tooltip } from "antd";
+import { Bot, Gauge, LoaderCircle, MessagesSquare, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AgentChatComposer } from "./agent-chat-composer";
@@ -12,13 +12,16 @@ import { useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
 import { readImageMeta } from "@/lib/image-utils";
 import { useAgentChatStore } from "@/stores/use-agent-chat-store";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { PI_AGENT_BASE_URL, PI_AGENT_DEV_MODEL, PI_AGENT_NORMAL_MODEL, useDevAgentStore } from "@/stores/use-dev-agent-store";
-import { activePromptCloudApi, modelOptionLabel, modelOptionName, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
+import { useDevAgentStore } from "@/stores/use-dev-agent-store";
+import { activePromptCloudApi, modelOptionLabel, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { resolveAgentRuntime, type AgentRuntime } from "@/lib/agent-cloud-config";
+import { readAgentChatResponse, redactAgentError, type StreamDelta } from "@/lib/agent-chat-stream";
+import { requestAgentChat } from "@/services/api/agent-cloud";
+import { deleteHistoryMessage, rebuildChatHistory, regenerationPlan, requiresUnavailableAttachments } from "@/lib/agent-chat-history";
 
 type CloudAttachment = AgentChatAttachment & { dataUrl: string; mimeType: string; size: number };
-type ApiMessage = { role: "system" | "user" | "assistant" | "tool"; content?: unknown; tool_calls?: unknown[]; tool_call_id?: string; name?: string };
-type ToolCall = { id?: string; function?: { name?: string; arguments?: string } };
+type ApiMessage = { role: "system" | "user" | "assistant" | "tool"; content?: unknown; tool_calls?: unknown[]; tool_call_id?: string; name?: string; provider_metadata?: unknown };
 
 const MAX_ATTACHMENTS = 6;
 const MAX_PAYLOAD_BYTES = 30 * 1024 * 1024;
@@ -33,130 +36,15 @@ function readFileDataUrl(file: File) {
     });
 }
 
-function chatEndpoint(baseUrl: string) {
-    const base = baseUrl.trim().replace(/\/+$/, "");
-    return /\/chat\/completions$/i.test(base) ? base : `${base}/chat/completions`;
-}
-
-function devChatBase(baseUrl: string) {
-    const base = baseUrl.trim().replace(/\/+$/, "");
-    return /\/v1$/i.test(base) ? base : `${base}/v1`;
-}
-
-function messageContentText(value: unknown) {
-    if (typeof value === "string") return value;
-    if (!Array.isArray(value)) return "";
-    return value.map((part) => (part && typeof part === "object" && "text" in part ? String((part as { text?: unknown }).text || "") : "")).join("");
-}
-
-function replyReasoningText(message: { reasoning_content?: unknown; reasoning?: unknown } | undefined) {
-    const raw = message?.reasoning_content ?? message?.reasoning;
-    return typeof raw === "string" ? raw : "";
-}
-
-type StreamDelta = { reasoning?: string; content?: string };
-type ChatReply = { content: string; reasoning: string; toolCalls: ToolCall[] };
-
 async function requestChatStream(params: {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    messages: ApiMessage[];
-    signal: AbortSignal;
+    runtime: AgentRuntime; messages: ApiMessage[]; signal: AbortSignal;
     onDelta?: (delta: StreamDelta) => void;
-}): Promise<ChatReply> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (params.apiKey) headers.Authorization = `Bearer ${params.apiKey}`;
-    const body: Record<string, unknown> = { model: params.model, messages: params.messages, tools: cloudTools(), tool_choice: "auto", temperature: 0.4, stream: true };
-    const response = await fetch(chatEndpoint(params.baseUrl), {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: params.signal,
-    });
-    if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-    const contentType = response.headers.get("content-type") || "";
-    if (!response.body || !contentType.includes("text/event-stream")) {
-        const text = await response.text();
-        const data = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: ToolCall[] } }> };
-        const reply = data.choices?.[0]?.message;
-        if (!reply) throw new Error("API 没有返回消息。");
-        const reasoning = replyReasoningText(reply);
-        const content = messageContentText(reply.content);
-        if (reasoning) params.onDelta?.({ reasoning });
-        if (content) params.onDelta?.({ content });
-        return { content, reasoning, toolCalls: Array.isArray(reply.tool_calls) ? reply.tool_calls : [] };
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let content = "";
-    let reasoning = "";
-    const drafts: Array<{ id?: string; name: string; arguments: string }> = [];
-    let fallback: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: ToolCall[] } | null = null;
-    while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-            let json: {
-                error?: { message?: string };
-                choices?: Array<{
-                    delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> };
-                    message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: ToolCall[] };
-                }>;
-            };
-            try {
-                json = JSON.parse(payload);
-            } catch {
-                continue;
-            }
-            if (json.error?.message) throw new Error(json.error.message);
-            const choice = json.choices?.[0];
-            const delta = choice?.delta;
-            if (delta) {
-                const nextReasoning = typeof delta.reasoning_content === "string" ? delta.reasoning_content : typeof delta.reasoning === "string" ? delta.reasoning : "";
-                if (nextReasoning) {
-                    reasoning += nextReasoning;
-                    params.onDelta?.({ reasoning: nextReasoning });
-                }
-                const nextContent = messageContentText(delta.content);
-                if (nextContent) {
-                    content += nextContent;
-                    params.onDelta?.({ content: nextContent });
-                }
-                if (Array.isArray(delta.tool_calls)) {
-                    delta.tool_calls.forEach((call, fallbackIndex) => {
-                        const index = typeof call.index === "number" ? call.index : fallbackIndex;
-                        const draft = drafts[index] || (drafts[index] = { name: "", arguments: "" });
-                        if (call.id) draft.id = call.id;
-                        if (call.function?.name) draft.name += call.function.name;
-                        if (call.function?.arguments) draft.arguments += call.function.arguments;
-                    });
-                }
-            }
-            if (!delta && choice?.message) fallback = choice.message;
-        }
-    }
-    if (!content && !reasoning && !drafts.length && fallback) {
-        content = messageContentText(fallback.content);
-        reasoning = replyReasoningText(fallback);
-        if (reasoning) params.onDelta?.({ reasoning });
-        if (content) params.onDelta?.({ content });
-        return { content, reasoning, toolCalls: Array.isArray(fallback.tool_calls) ? fallback.tool_calls : [] };
-    }
-    return {
-        content,
-        reasoning,
-        toolCalls: drafts.filter((draft) => draft.name || draft.arguments).map((draft) => ({ id: draft.id, function: { name: draft.name, arguments: draft.arguments || "{}" } })),
-    };
+}) {
+    const response = await requestAgentChat(params.runtime, {
+        model: params.runtime.model, messages: params.messages,
+        tools: cloudTools(), tool_choice: "auto", stream: true,
+    }, params.signal);
+    return readAgentChatResponse(response, { signal: params.signal, onDelta: params.onDelta, apiKey: params.runtime.apiKey });
 }
 
 function canvasFeatureCatalog() {
@@ -264,6 +152,7 @@ function compactCanvasState() {
             position: node.position,
             width: node.width,
             height: node.height,
+            content: typeof node.metadata?.content === "string" ? node.metadata.content.slice(0, 2000) : "",
             prompt: typeof node.metadata?.prompt === "string" ? node.metadata.prompt.slice(0, 500) : "",
             model: node.metadata?.model || "",
             status: node.metadata?.status || "",
@@ -312,15 +201,17 @@ function AgentSettingToggle({ icon, title, description, checked, theme, onChange
     );
 }
 
-export function AgentCloudChat() {    const { t } = useTranslation();
+export function AgentCloudChat() {
+    const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const navigate = useNavigate();
     const location = useLocation();
     const config = useConfigStore((state) => state.config);
     const api = activePromptCloudApi(config);
     const conversations = useAgentChatStore((state) => state.conversations);
     const activeId = useAgentChatStore((state) => state.activeId);
+    const hydrated = useAgentChatStore((state) => state.hydrated);
     const activeConversation = conversations.find((conversation) => conversation.id === activeId);
     const loadedConversationRef = useRef<string | null>(null);
     const lastSavedActiveIdRef = useRef(activeId);
@@ -328,6 +219,13 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     const [attachments, setAttachments] = useState<CloudAttachment[]>([]);
     const [messages, setMessages] = useState<AgentChatMessageItem[]>([]);
     const [sending, setSending] = useState(false);
+    const sendingRef = useRef(false);
+    const mountedRef = useRef(true);
+    const historyAttachmentsRef = useRef(new Map<string, CloudAttachment[]>());
+    const messagesRef = useRef<AgentChatMessageItem[]>([]);
+    messagesRef.current = messages;
+    const activeIdRef = useRef(activeId);
+    activeIdRef.current = activeId;
     const [pending, setPending] = useState<{ summary: string; resolve: (approved: boolean) => void } | null>(null);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [error, setError] = useState("");
@@ -341,13 +239,15 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     const [queueCount, setQueueCount] = useState(0);
     const confirmTools = useAgentStore((state) => state.confirmTools);
     const skin = useEffectiveCardSkin() as string;
-    const devAgent = useDevAgentStore();
-    const devEnabled = devAgent.enabled;
 
     useEffect(() => {
+        mountedRef.current = true;
         const state = useAgentStore.getState();
         if (state.canvasReferences.length || state.attachments.length) state.setAgentState({ canvasReferences: [], attachments: [] });
         return () => {
+            mountedRef.current = false;
+            queueRef.current = [];
+            historyAttachmentsRef.current.clear();
             pendingRef.current?.resolve(false);
             pendingRef.current = null;
             abortRef.current?.abort();
@@ -360,23 +260,25 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     useEffect(() => {
         const state = useAgentChatStore.getState();
         const active = state.conversations.find((conversation) => conversation.id === state.activeId);
-        if (!active || loadedConversationRef.current === active.id) return;
+        if (!hydrated || !active || loadedConversationRef.current === active.id) return;
         loadedConversationRef.current = active.id;
         setMessages(active.messages);
-        apiMessagesRef.current = active.messages.flatMap((item) => (item.role === "user" || item.role === "assistant" ? [{ role: item.role, content: item.text }] : []));
+        messagesRef.current = active.messages;
+        apiMessagesRef.current = rebuildChatHistory(active.messages, id => historyAttachmentsRef.current.get(id));
         setError("");
-    }, [conversations, activeId]);
+    }, [conversations, activeId, hydrated]);
     useEffect(() => {
-        if (sending || loadedConversationRef.current !== activeId) return;
+        if (!hydrated || sending || loadedConversationRef.current !== activeId || messagesRef.current !== messages) return;
         if (lastSavedActiveIdRef.current !== activeId) {
             lastSavedActiveIdRef.current = activeId;
             return;
         }
         useAgentChatStore.getState().saveMessages(activeId, messages);
-    }, [messages, sending, activeId]);
+    }, [messages, sending, activeId, hydrated]);
     useEffect(() => {
-        void testDevConnection();
-    }, []);
+        // Switching a configured profile never probes the provider.
+        setError("");
+    }, [api?.id, api?.baseUrl, api?.apiKey, api?.model, api?.apiFormat]);
     useEffect(() => {
         if (scrollTimerRef.current !== null) return;
         scrollTimerRef.current = window.setTimeout(() => {
@@ -440,23 +342,12 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         useAgentStore.getState().setAgentState({ confirmTools: next });
     };
 
-    const testDevConnection = async () => {
-        const store = useDevAgentStore.getState();
-        store.setStatus("checking");
-        try {
-            const response = await fetch(`${devChatBase(PI_AGENT_BASE_URL)}/models`);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            store.setStatus("connected");
-        } catch (err) {
-            store.setStatus("error", err instanceof Error ? err.message : String(err));
-        }
-    };
-
     const executeTool = async (name: string, input: Record<string, unknown>) => {
         if (name === "canvas_get_state") return compactCanvasState();
         if (name === "canvas_get_features") return canvasFeatureCatalog();
         if (name === "site_navigate") {
             const path = typeof input.path === "string" ? input.path : "/";
+            if (!/^\/(?:$|projects$|canvas(?:\/[^/?#]+)?$|image$|video$|assets$|config$)/.test(path)) return { error: "只允许打开已知站内页面。" };
             navigate(path);
             return { ok: true, path };
         }
@@ -482,10 +373,19 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         return { error: `未知工具：${name}` };
     };
 
-    const runChat = async (userText: string, userAttachments: CloudAttachment[]) => {
-        const devState = useDevAgentStore.getState();
-        const useDev = devState.enabled;
-        const runtime = { baseUrl: devChatBase(PI_AGENT_BASE_URL), apiKey: "", model: useDev ? PI_AGENT_DEV_MODEL : PI_AGENT_NORMAL_MODEL };
+    const runChat = async (userText: string, userAttachments: CloudAttachment[], replaceHistory?: AgentChatMessageItem[]) => {
+        if (sendingRef.current || !mountedRef.current) return;
+        let runtime: AgentRuntime;
+        // This chat is cloud-only, including when an older local-pi preference remains saved.
+        try { runtime = resolveAgentRuntime({ ...useDevAgentStore.getState(), transport: "cloud" }, activePromptCloudApi(useConfigStore.getState().config)); }
+        catch (err) { setError(err instanceof Error ? err.message : String(err)); return; }
+        if (replaceHistory) {
+            messagesRef.current = replaceHistory;
+            setMessages(replaceHistory);
+            apiMessagesRef.current = rebuildChatHistory(replaceHistory, id => historyAttachmentsRef.current.get(id));
+        }
+        sendingRef.current = true;
+        const turnId = `cloud-user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         setError("");
         setSending(true);
         const controller = new AbortController();
@@ -499,9 +399,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             : skin === "angel"
               ? "角色设定：你当前使用皮肤角色「天使娘」，是用户的画布助手。用户打招呼、问你是谁或需要自我介绍时，用天使娘的口吻回答，例如“我是天使娘，你的画布助手。想做点什么？”不要自称通用 AI 助手。"
               : "角色设定：当前没有角色皮肤。用户打招呼、问你是谁或需要自我介绍时，自称“无界画布的 AI 助手”。";
-        const boundaryRule = useDev
-            ? "当前已打开开发者模式：你运行在外挂 pi Agent 上，工作区是画布项目仓库。你可以直接读写仓库文件、运行命令，也可以调用画布工具。用户要求新增卡片类型、修改卡片 UI、增加参数控件或改前端架构时，直接读源码并修改，不要说“没有权限”。先读再改，只改必要文件；改完按需运行 typecheck/build（用户说不用则跳过）。"
-            : "当前是普通模式：你运行在 pi Agent 上，只有画布操作和只读能力，不能写文件或运行命令。用户要求改代码、新增卡片类型、修改卡片 UI 或增加参数控件时，告诉用户打开「开发者模式」，不要声称已经修改代码。区域布局、局部编辑、四视图、提示词优化/反推、超分/插帧是独立 UI，说明入口即可，不要声称已执行。";
+        const boundaryRule = "当前使用用户配置的云端大模型。你可以调用这里提供的画布工具，但不能读取或修改本机代码、执行终端命令。不能通过提示词获得未提供的能力，不要声称已修改本机代码。";
         const systemPrompt = [
             "你是「无界画布」的画布助手，不是只做修复的工具。你可以读取和修改当前画布，也可以调用卡片生成。",
             personaRule,
@@ -509,13 +407,14 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             "读取画布用 canvas_get_state；查询画布功能、入口和限制用 canvas_get_features；修改画布用 canvas_apply_ops。",
             "canvas_apply_ops 的 ops 支持：add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。",
             "add_node 示例：{\"type\":\"add_node\",\"id\":\"agent-img-1\",\"nodeType\":\"image\",\"metadata\":{\"prompt\":\"...\",\"model\":\"...\",\"size\":\"1:1\",\"count\":1,\"generationMode\":\"image\"}}，随后用 {\"type\":\"run_generation\",\"nodeId\":\"agent-img-1\"} 触发生成。",
+            "文本卡正文使用 metadata.content，不是 metadata.text 或顶层 text。示例：{\"type\":\"add_node\",\"nodeType\":\"text\",\"title\":\"笔记\",\"metadata\":{\"content\":\"正文\"}}；修改正文用 update_node 的 metadata.content。",
             "修改已有卡片提示词用 update_node：{\"type\":\"update_node\",\"id\":\"节点ID\",\"metadata\":{\"prompt\":\"...\"}}；重跑用 run_generation。",
             "生成卡默认新建：用户说“用 X 模型生成 Y”时，先调用 canvas_get_features 取 models.image 的 value/label，匹配用户说的模型（如 Z Image → label 含 Z-Image 的项），然后 add_node 新建一张图片卡（metadata.prompt=Y、metadata.model=对应的 value、metadata.generationMode=\"image\"），再 run_generation 指向新卡。不要复用旧卡，不要改旧卡模型后重跑，也不要把旧生成结果接成参考图。",
             "只有用户明确说“重跑/再生成/用这张卡”时才复用已有卡。用户指出模型用错时，新建一张正确模型的新卡，保留旧卡；旧结果不要作为新卡参考，除非用户明确要求。",
             "模型必须严格匹配用户指定：Z Image 不能用 Krea2 或默认模型；列表里没有精确匹配时先问，不要自动替换。",
             "画布权限已放开：自动确认模式下 canvas_apply_ops 直接执行，不要用“没有权限”推辞画布内操作。除提示词外，你还可以改标题、位置、尺寸、模型，以及 metadata 里的生成参数（size、count、seed、seconds、vquality、videoMode、frameMode、imageMode、aspectRatio、params.loras 等）；先 canvas_get_state 读取 params，再 update_node 写回。",
             "可创建的卡片：文本、图片、配置、视频、音频、分组、自由卡片（free-card）、LoRA 卡（comfyui-lora:lora）。新建图片/视频卡后可用 connect_nodes 接 LoRA/参考/配置卡，再 run_generation。",
-            useDev ? "步数控件可以作为前端改动直接实现：先确认要覆盖哪些模型，再改卡片 UI 和生成参数链路。" : "步数由模型型号或档位决定，不是所有卡片都能通过 metadata 改；不要承诺给任意图片卡增加步数控件。",
+            "步数由模型型号或档位决定，不是所有卡片都能通过 metadata 改；不要承诺给任意图片卡增加步数控件。",
             "执行任何画布写入前先调用 canvas_get_state 获取真实节点 ID，不要编造 ID。",
             "画布功能索引（用户问具体功能时先调用 canvas_get_features 获取入口、步骤和限制，不要凭记忆说不知道或编造）：MOSS 区域布局、局部编辑（蒙版）、四视图、提示词优化/反推、裁剪、切图、放大、AI 超分、多角度、替换图片；视频首尾帧/全能参考、视频超分、RIFE 插帧、角色替换、极速草稿；风格配方、LoRA 叠层、自由卡片、资产库、提示词库。",
             "关键区分：MOSS 区域布局是在 MOSS 图上画多个区域并分别写提示词，背景先画、主体/文字后画，仅 MOSS 模型；局部编辑是用蒙版只改图片的一块区域。四视图是从角色图生成一张四视图设定图（固定 image-krea2-four-view），不是四张普通图，也不是多角度。",
@@ -530,21 +429,24 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             "生成任务只是触发，未返回结果前不要声称已经生成完成。",
             "回答风格（重要）：语气可以轻松可爱，但必须简短、直接。默认 1-3 句话；复杂操作最多 3 个短点。不要复述用户的话，不要解释原理，不要列通用建议清单；只有用户明确说“详细/展开”才展开。功能问题只答入口+一句用法；操作完成只报结果和下一步。canvas_get_features 是给你自己查的，不要把整段贴给用户。",
         ].join("\n");
-        apiMessagesRef.current[0] = { role: "system", content: systemPrompt };
+        const systemMessage: ApiMessage = { role: "system", content: systemPrompt };
+        if (apiMessagesRef.current[0]?.role === "system") apiMessagesRef.current[0] = systemMessage;
+        else apiMessagesRef.current.unshift(systemMessage);
         const content: unknown = userAttachments.length
             ? [{ type: "text", text: userText || "请查看这些图片。" }, ...userAttachments.map((item) => ({ type: "image_url", image_url: { url: item.dataUrl } }))]
             : userText;
         apiMessagesRef.current.push({ role: "user", content });
-        appendMessage({ role: "user", text: userText || (userAttachments.length ? `发送了 ${userAttachments.length} 张图片` : ""), attachments: userAttachments.map(({ id, name, url }) => ({ id, name, url })) });
-        setPrompt("");
-        setAttachments([]);
+        if (userAttachments.length) historyAttachmentsRef.current.set(turnId, userAttachments);
+        setMessages(current => [...current, { id: turnId, turnId, role: "user", text: userText || (userAttachments.length ? `发送了 ${userAttachments.length} 张图片` : ""), promptText: userText, hasAttachments: userAttachments.length > 0, attachments: userAttachments.map(({ id, name, url }) => ({ id, name, url })) }]);
+        // Regenerating must not erase an unrelated draft currently in the composer.
+        if (!replaceHistory) { setPrompt(""); setAttachments([]); }
         let liveId: string | null = null;
         let allReasoning = "";
         const ensureLive = () => {
             if (liveId) return liveId;
             liveId = `cloud-live-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             const id = liveId;
-            setMessages((current) => [...current, { id, role: "assistant", text: "", reasoning: "", streamId: id }]);
+            setMessages((current) => [...current, { id, turnId, role: "assistant", text: "", reasoning: "", streamId: id }]);
             return id;
         };
         const patchLive = (patch: Partial<AgentChatMessageItem>) => {
@@ -557,9 +459,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 let roundContent = "";
                 let roundReasoning = "";
                 const reply = await requestChatStream({
-                    baseUrl: runtime.baseUrl,
-                    apiKey: runtime.apiKey,
-                    model: runtime.model,
+                    runtime,
                     messages: apiMessagesRef.current,
                     signal: controller.signal,
                     onDelta: (delta) => {
@@ -588,14 +488,15 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 }
                 const toolCalls = reply.toolCalls;
                 if (toolCalls.length) {
-                    apiMessagesRef.current.push({ role: "assistant", content: reply.content || null, tool_calls: toolCalls });
+                    apiMessagesRef.current.push({ role: "assistant", content: reply.content || null, provider_metadata: reply.providerMetadata, ...(reply.reasoning ? { reasoning_content: reply.reasoning } : {}), tool_calls: toolCalls.map(call => ({ ...call, type: "function" })) });
                     patchLive({ text: "" });
                     for (const call of toolCalls) {
                         const name = call.function?.name || "";
                         let input: Record<string, unknown> = {};
                         try {
                             input = JSON.parse(call.function?.arguments || "{}") as Record<string, unknown>;
-                        } catch {}
+                        } catch { input = {}; }
+                        if (controller.signal.aborted) throw new DOMException("Canceled", "AbortError");
                         const result = await executeTool(name, input);
                         apiMessagesRef.current.push({ role: "tool", tool_call_id: call.id || "", content: JSON.stringify(result) });
                     }
@@ -603,7 +504,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 }
                 const answer = reply.content.trim();
                 if (!answer) throw new Error("API 返回了空消息。");
-                apiMessagesRef.current.push({ role: "assistant", content: answer });
+                apiMessagesRef.current.push({ role: "assistant", content: answer, provider_metadata: reply.providerMetadata });
                 ensureLive();
                 patchLive({ text: answer, reasoning: allReasoning || undefined, streamId: undefined });
                 liveId = null;
@@ -620,13 +521,18 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             if (controller.signal.aborted) {
                 appendMessage({ role: "system", text: t("agent.runtime.taskStopped") });
             } else {
-                const text = err instanceof Error ? err.message : String(err);
+                const text = redactAgentError(err instanceof Error ? err.message : String(err), runtime.apiKey);
                 setError(text);
                 appendMessage({ role: "error", text });
             }
+            // Partial tool-call turns are not valid inputs for the next API call.
+            // Keep the existing visible history but drop incomplete assistant/tool pairs.
+            apiMessagesRef.current = apiMessagesRef.current.filter(item => item.role !== "tool" && !item.tool_calls);
         } finally {
             abortRef.current = null;
-            const next = queueRef.current.shift();
+            sendingRef.current = false;
+            if (!mountedRef.current) return;
+            const next = controller.signal.aborted ? undefined : queueRef.current.shift();
             setQueueCount(queueRef.current.length);
             if (next) {
                 void runChat(next.text, next.attachments);
@@ -636,8 +542,10 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         }
     };
 
-    const canUse = devAgent.status !== "error";
-    const modelLabel = api?.model || "deepseek-flash";
+    let runtimeForDisplay: AgentRuntime | null = null;
+    try { runtimeForDisplay = resolveAgentRuntime({ ...useDevAgentStore.getState(), transport: "cloud" }, api); } catch { /* The empty-state text points to central configuration. */ }
+    const canUse = runtimeForDisplay !== null && hydrated;
+    const modelLabel = runtimeForDisplay?.model || t("agent.cloud.notConfigured");
     const contextChars = messages.reduce((total, item) => total + item.text.length + (item.reasoning?.length || 0), 0) + prompt.length;
     const contextTokens = Math.ceil(contextChars / 4);
     const snapshot = useAgentStore((state) => state.canvasContext?.snapshot);
@@ -646,7 +554,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         if (!canUse) return;
         const text = prompt.trim();
         if (!text && !attachments.length) return;
-        if (sending) {
+        if (sendingRef.current) {
             queueRef.current.push({ text, attachments });
             setQueueCount(queueRef.current.length);
             setPrompt("");
@@ -657,21 +565,78 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         void runChat(text, attachments);
     };
     const stop = () => {
+        queueRef.current = [];
+        setQueueCount(0);
         pendingRef.current?.resolve(false);
         pendingRef.current = null;
         setPending(null);
         abortRef.current?.abort();
     };
+    const editDialogRef = useRef(false);
+    const replaceMessages = (next: AgentChatMessageItem[]) => {
+        messagesRef.current = next;
+        setMessages(next);
+        apiMessagesRef.current = rebuildChatHistory(next, id => historyAttachmentsRef.current.get(id));
+        useAgentChatStore.getState().saveMessages(activeIdRef.current, next);
+        setError("");
+    };
+    const deleteMessage = (id: string) => {
+        if (sendingRef.current || pendingRef.current || editDialogRef.current) return;
+        const conversationId = activeIdRef.current;
+        editDialogRef.current = true;
+        modal.confirm({
+            title: t("agent.message.deleteMessageConfirm"), content: t("agent.message.deleteMessageDescription"),
+            okText: t("agent.message.deleteMessage"), cancelText: t("common.cancel"), okButtonProps: { danger: true },
+            afterClose: () => { editDialogRef.current = false; },
+            onOk: () => {
+                if (sendingRef.current || conversationId !== activeIdRef.current || !mountedRef.current) return;
+                const current = messagesRef.current;
+                const next = deleteHistoryMessage(current, id);
+                if (next === current) return; // A stale selector must not delete any history.
+                for (const removed of current.slice(next.length)) {
+                    historyAttachmentsRef.current.delete(removed.id);
+                }
+                queueRef.current = [];
+                setQueueCount(0);
+                replaceMessages(next);
+            },
+        });
+    };
+    const regenerateMessage = (id: string) => {
+        if (sendingRef.current || pendingRef.current || editDialogRef.current || !canUse) return;
+        const initial = regenerationPlan(messagesRef.current, id);
+        if (!initial) { message.warning(t("agent.message.noUserPrompt")); return; }
+        if (requiresUnavailableAttachments(initial.user, historyAttachmentsRef.current.get(initial.user.id))) {
+            message.warning(t("agent.message.attachmentsExpired")); return;
+        }
+        const conversationId = activeIdRef.current;
+        editDialogRef.current = true;
+        modal.confirm({
+            title: t("agent.message.regenerateConfirm"), content: t("agent.message.regenerateDescription"),
+            okText: t("agent.message.regenerate"), cancelText: t("common.cancel"),
+            afterClose: () => { editDialogRef.current = false; },
+            onOk: () => {
+                if (sendingRef.current || conversationId !== activeIdRef.current || !mountedRef.current) return;
+                const plan = regenerationPlan(messagesRef.current, id);
+                if (!plan) return;
+                const images = historyAttachmentsRef.current.get(plan.user.id) || [];
+                if (requiresUnavailableAttachments(plan.user, images)) { message.warning(t("agent.message.attachmentsExpired")); return; }
+                queueRef.current = [];
+                setQueueCount(0);
+                void runChat(plan.user.promptText ?? (images.length && /^发送了 \d+ 张图片$/.test(plan.user.text) ? "" : plan.user.text), images, plan.prefix);
+            },
+        });
+    };
     const newConversation = () => {
-        if (sending) return;
+        if (sendingRef.current) return;
         useAgentChatStore.getState().createConversation();
     };
     const switchConversation = (id: string) => {
-        if (sending) return;
+        if (sendingRef.current) return;
         useAgentChatStore.getState().selectConversation(id);
     };
     const deleteConversation = (id: string) => {
-        if (sending) return;
+        if (sendingRef.current) return;
         useAgentChatStore.getState().deleteConversation(id);
     };
 
@@ -710,13 +675,13 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     const contextPanel = (
         <div className="w-64 space-y-1.5 text-xs" style={{ color: theme.node.text }}>
             {[
-                [t("agent.dev.contextAgent"), "pi Agent"],
+                [t("agent.dev.contextAgent"), t("agent.cloud.mode")],
                 [t("agent.dev.contextModel"), modelLabel],
-                [t("agent.dev.contextMode"), devEnabled ? t("agent.dev.title") : t("agent.dev.normalMode")],
+                [t("config.cloudApi.apiFormat"), t(`config.cloudApi.formats.${api?.apiFormat || "openai"}`)],
                 [t("agent.dev.contextSession"), `${activeConversation?.title || t("agent.dev.newChat")} · ${t("agent.dev.messages", { count: messages.length })}`],
                 [t("agent.dev.contextCanvas"), `${snapshot?.nodes.length || 0} ${t("agent.dev.nodes")} · ${snapshot?.connections.length || 0} ${t("agent.dev.connections")}`],
                 [t("agent.dev.contextTokens"), t("agent.dev.tokens", { count: contextTokens.toLocaleString() })],
-                [t("agent.dev.contextSkills"), devEnabled ? t("agent.dev.skillsDev") : t("agent.dev.skillsNormal")],
+                [t("agent.dev.contextSkills"), t("agent.cloud.skills")],
             ].map(([label, value]) => (
                 <div key={String(label)} className="flex items-start justify-between gap-3">
                     <span className="shrink-0" style={{ color: theme.node.muted }}>{label}</span>
@@ -724,14 +689,8 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 </div>
             ))}
             <div className="pt-1 text-[11px] leading-5" style={{ color: theme.node.muted }}>{t("agent.dev.contextNote")}</div>
-            {devAgent.status === "error" ? (
-                <Button size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void testDevConnection()}>
-                    {t("agent.dev.retry")}
-                </Button>
-            ) : null}
         </div>
     );
-    const connectionLabel = devAgent.status === "checking" ? t("agent.dev.checking") : devAgent.status === "connected" ? t("agent.dev.connected") : devAgent.status === "error" ? `${t("agent.dev.error")}${devAgent.error ? `：${devAgent.error}` : ""}` : t("agent.dev.idle");
 
     return (
         <div className="flex h-full min-h-0 flex-col" style={{ color: theme.node.text }}>
@@ -739,13 +698,12 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 <span className="grid size-7 place-items-center rounded-full" style={{ background: theme.toolbar.activeBg, color: theme.toolbar.activeText }}>
                     <Bot className="size-4" />
                 </span>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1" data-agent-drag-handle style={{ touchAction: "none", userSelect: "none", cursor: "grab" }} title={t("agent.cloud.dragTitle")} aria-label={t("agent.cloud.dragTitle")}>
                     <div className="flex items-center gap-1.5 text-sm font-semibold leading-5">
-                        <span>pi Agent</span>
-                        {devAgent.status === "connected" ? <Wifi className="size-3 text-green-600" /> : <WifiOff className="size-3" style={{ color: theme.node.muted }} />}
+                        <span>{t("agent.cloud.mode")}</span>
                     </div>
                     <div className="truncate text-[10px] leading-4" style={{ color: theme.node.muted }}>
-                        {activeConversation?.title || t("agent.dev.newChat")} · {devEnabled ? t("agent.dev.title") : t("agent.dev.normalMode")}
+                        {modelLabel} · {activeConversation?.title || t("agent.dev.newChat")}
                     </div>
                 </div>
                 <Popover trigger="click" placement="bottomRight" content={conversationMenu}>
@@ -762,30 +720,33 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                     <Button type="text" size="small" className="!h-7 !w-7 !min-w-7 !px-0" icon={<ShieldCheck className="size-4" />} onClick={() => setSettingsOpen((open) => !open)} aria-label={t("agent.permissions.title")} />
                 </Tooltip>
             </div>
+            <div className="shrink-0 border-b px-3 py-2" style={{ borderColor: theme.node.stroke }}>
+                <Select
+                    className="w-full"
+                    value={api?.id}
+                    placeholder={t("agent.cloud.selectModel")}
+                    disabled={sending}
+                    aria-label={t("agent.cloud.selectModel")}
+                    notFoundContent={t("agent.cloud.configurationHint")}
+                    options={(config.promptCloudApis || []).map((item) => ({
+                        value: item.id,
+                        label: `${item.name || t("config.cloudApi.unnamed")} · ${item.model || "—"} · ${t(`config.cloudApi.formats.${item.apiFormat || "openai"}`)}`,
+                    }))}
+                    onChange={(id) => useConfigStore.getState().selectPromptCloudApi(id)}
+                />
+                {!canUse ? <p className="mt-1.5 text-[11px] leading-5" style={{ color: theme.node.muted }}>{t("agent.cloud.configurationHint")}</p> : null}
+            </div>
             {settingsOpen ? (
                 <div className="shrink-0 border-b px-4 py-2.5 text-xs" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
                     <AgentSettingToggle
-                        icon={<Terminal className="size-4" />}
-                        title={t("agent.dev.title")}
-                        description={t("agent.dev.description")}
-                        checked={devEnabled}
+                        icon={<ShieldCheck className="size-4" />}
+                        title={t("agent.permissions.canvasTitle")}
+                        description={t("agent.permissions.canvasDescription")}
+                        checked={confirmTools}
                         theme={theme}
-                        onChange={() => devAgent.setEnabled(!devEnabled)}
+                        onChange={() => updateConfirmTools(!confirmTools)}
                     />
-                    <div className="mt-1.5 text-[11px] leading-5" style={{ color: theme.node.muted }}>
-                        <span style={{ color: devAgent.status === "error" ? "#dc2626" : devAgent.status === "connected" ? "#16a34a" : theme.node.muted }}>{connectionLabel}</span>
-                        {` · ${devEnabled ? t("agent.dev.skillsDev") : t("agent.dev.skillsNormal")}`}
-                    </div>
-                    <div className="mt-2">
-                        <AgentSettingToggle
-                            icon={<ShieldCheck className="size-4" />}
-                            title={t("agent.permissions.canvasTitle")}
-                            description={t("agent.permissions.canvasDescription")}
-                            checked={confirmTools}
-                            theme={theme}
-                            onChange={() => updateConfirmTools(!confirmTools)}
-                        />
-                    </div>
+                    <p className="mt-2 text-[11px] leading-5" style={{ color: theme.node.muted }}>{t("agent.cloud.privacy")}</p>
                 </div>
             ) : null}
             <div ref={listRef} className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -793,16 +754,14 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                     <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                         <Bot className="size-8 opacity-35" />
                         <div className="text-sm font-medium">{t("agent.cloud.emptyTitle")}</div>
-                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t("agent.cloud.emptyHint")}</div>
-                        {!canUse ? (
-                            <Button type="primary" size="small" className="mt-2" onClick={() => void testDevConnection()}>
-                                {t("agent.dev.retry")}
-                            </Button>
-                        ) : null}
+                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t(canUse ? "agent.cloud.emptyHint" : "agent.cloud.configurationHint")}</div>
                     </div>
                 ) : null}
                 <div className="space-y-4">
-                    {messages.map((item) => <AgentChatMessage key={item.id} item={item} theme={theme} />)}
+                    {messages.map((item) => <AgentChatMessage key={item.id} item={item} theme={theme}
+                        onRegenerate={regenerateMessage} onDelete={deleteMessage}
+                        actionsDisabled={sending || Boolean(pending)}
+                        regenerateDisabled={!canUse || !regenerationPlan(messages, item.id)} />)}
                     {pending ? <AgentPendingToolCard summary={pending.summary} theme={theme} onReject={() => { pending.resolve(false); pendingRef.current = null; setPending(null); }} onApprove={() => { pending.resolve(true); pendingRef.current = null; setPending(null); }} /> : null}
                     {sending ? (
                         <div className="flex items-center gap-2 text-xs" style={{ color: theme.node.muted }}>
@@ -821,7 +780,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 attachments={attachments.map(({ id, name, url }) => ({ id, name, url }))}
                 disabled={!canUse}
                 sending={sending}
-                placeholder={canUse ? (devEnabled ? t("agent.dev.placeholder") : t("agent.dev.placeholderNormal")) : t("agent.dev.disconnected")}
+                placeholder={canUse ? t("agent.cloud.placeholder") : t("agent.cloud.notConfigured")}
                 theme={theme}
                 onPromptChange={setPrompt}
                 onSubmit={submit}
@@ -857,7 +816,7 @@ function cloudTools() {
             type: "function",
             function: {
                 name: "canvas_apply_ops",
-                description: "对当前画布批量执行操作。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。新建生成卡时给 add_node 指定 id，再用 run_generation 指向该 id。",
+                description: "对当前画布批量执行操作。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。新建生成卡时给 add_node 指定 id，再用 run_generation 指向该 id。文本卡用 nodeType=text、metadata.content 填写正文。",
                 parameters: {
                     type: "object",
                     properties: {
@@ -871,9 +830,22 @@ function cloudTools() {
                                     id: { type: "string" },
                                     ids: { type: "array", items: { type: "string" } },
                                     nodeId: { type: "string" },
-                                    nodeType: { type: "string" },
+                                    nodeType: { type: "string", description: "卡片类型，如 text、image、config、video、audio、group、free-card、comfyui-lora:lora" },
                                     title: { type: "string" },
-                                    metadata: { type: "object", additionalProperties: true },
+                                    position: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
+                                    x: { type: "number" },
+                                    y: { type: "number" },
+                                    width: { type: "number" },
+                                    height: { type: "number" },
+                                    metadata: {
+                                        type: "object",
+                                        properties: {
+                                            content: { type: "string", description: "文本卡的正文；新建或更新文本卡时填写此字段，不是 text" },
+                                            prompt: { type: "string", description: "生成提示词" },
+                                            model: { type: "string", description: "canvas_get_features 返回的模型 value" },
+                                        },
+                                        additionalProperties: true,
+                                    },
                                     patch: { type: "object", additionalProperties: true },
                                     fromNodeId: { type: "string" },
                                     toNodeId: { type: "string" },

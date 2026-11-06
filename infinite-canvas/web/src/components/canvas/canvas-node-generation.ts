@@ -5,6 +5,7 @@ import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
+import { appendGenerationText } from "@/lib/canvas/generation-prompt";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 
 export type NodeLora = { name: string; strength: number };
@@ -50,14 +51,14 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
 
     const resourceInputs = flattenGenerationInputs(inputs);
     let textIndex = 0;
-    const upstreamText = resourceInputs.flatMap((input) => (input.text ? [textBlock(generationLabel("text", textIndex++), input.text)] : [])).join("\n\n");
+    const upstreamText = resourceInputs.flatMap((input) => (input.text ? [{ label: generationLabel("text", textIndex++), text: input.text }] : []));
     const referenceImages = resourceInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
     const referenceVideos = resourceInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = resourceInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
     const loras = resourceInputs.flatMap((input) => (input.type === "lora" ? input.loras || [] : []));
 
     return {
-        prompt: upstreamText ? `${prompt}\n\n${upstreamText}` : prompt,
+        prompt: appendGenerationText(prompt, upstreamText),
         referenceImages,
         referenceVideos,
         referenceAudios,

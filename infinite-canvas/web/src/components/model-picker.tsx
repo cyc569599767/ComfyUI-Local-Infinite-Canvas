@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { workflowPickerSelection } from "@/lib/workflow-picker-options";
 import { fetchSetupDiagnostics, modelPickerEmptyActions, pickerOpenPlan, requestGatewayRescan, resolveModelPickerEmptyKind, type ModelPickerEmptyKind } from "@/lib/local-gateway-sync";
 import {
     baseModelOptions,
@@ -14,8 +15,6 @@ import {
     modelOptionName,
     selectableModelsByCapability,
     useConfigStore,
-    workflowModelOptions,
-    workflowModelValue,
     type AiConfig,
     type LocalGatewaySyncStatus,
     type ModelCapability,
@@ -331,14 +330,12 @@ type LevelPickerProps = {
 
 /** 一级下拉：只选工作流；变体归到其所属工作流下。 */
 export function WorkflowModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, onMissingConfig }: LevelPickerProps & { capability?: ModelCapability }) {
+    const selection = useMemo(() => workflowPickerSelection(config, value, capability), [config, value, capability]);
     const options = useMemo<LevelOption[]>(
-        () =>
-            workflowModelOptions(config, capability)
-                .filter((model) => channelModelOf(config, model)?.model.workflowId !== "video-h3-fast")
-                .map((model) => ({ value: model, label: modelOptionLabel(config, model) })),
-        [config, capability],
+        () => selection.options.map((model) => ({ value: model, label: modelOptionLabel(config, model) })),
+        [config, selection],
     );
-    const selected = useMemo(() => workflowModelValue(config, value) || value, [config, value]);
+    const selected = selection.selected;
     const diagnosticWorkflowId = useMemo(() => channelModelOf(config, value)?.model.workflowId, [config, value]);
     return (
         <LevelSelect

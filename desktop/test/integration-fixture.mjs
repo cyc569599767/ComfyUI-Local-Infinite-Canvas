@@ -33,7 +33,7 @@ try {
   const comfyUrl = await listen(fakeComfy);
   process.env.DISABLE_NODE_BOOTSTRAP = '1';
   gateway = await createGatewayApp({
-    dataDir: path.join(temporary, 'data'), outputDir: path.join(temporary, 'outputs'),
+    dataDir: path.join(temporary, 'data'), outputDir: path.join(temporary, 'data', 'outputs'),
     workflowDir: path.join(temporary, 'workflows'), comfyUrl, comfyDir: '', comfyWorkflowsDir: '',
     comfyFrontendDir: '', canvasDist: path.join(root, 'infinite-canvas/web/dist'),
     scanOnStart: false, watchWorkflows: false, updateEnabled: false, gatewayToken: '',
@@ -44,12 +44,13 @@ try {
   const redirectUrl = await listen(redirectTarget);
   gateway.app.get('/desktop-test-redirect', (_req, res) => res.redirect(redirectUrl));
   // Insert this test-only route before the gateway's final 404 middleware.
-  const layers = gateway.app.router.stack;
-  const redirectLayer = layers.pop();
-  layers.splice(layers.findIndex(layer => layer.route?.path === '/health'), 0, redirectLayer);
+  const redirectLayers = gateway.app.router.stack;
+  const redirectLayer = redirectLayers.pop();
+  redirectLayers.splice(redirectLayers.findIndex(layer => layer.route?.path === '/health'), 0, redirectLayer);
   gateway.app.post('/desktop-test-echo', (req, res) => res.json(req.body));
-  const echoLayer = layers.pop();
-  layers.splice(layers.findIndex(layer => layer.route?.path === '/health'), 0, echoLayer);
+  const echoLayers = gateway.app.router.stack;
+  const echoLayer = echoLayers.pop();
+  echoLayers.splice(echoLayers.findIndex(layer => layer.route?.path === '/health'), 0, echoLayer);
   canvas = createCanvasServer({ canvasDist: gateway.config.canvasDist, gatewayUrl,
     gatewayPort: gatewayServer.address().port, canvasHost: '127.0.0.1' });
   const canvasUrl = await listen(canvas);

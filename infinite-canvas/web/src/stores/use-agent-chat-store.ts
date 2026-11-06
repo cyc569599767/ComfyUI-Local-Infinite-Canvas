@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { localForageStorage } from "@/lib/localforage-storage";
+import { persistChatMessage } from "@/lib/agent-chat-history";
 import type { AgentChatMessageItem } from "@/components/agent/agent-chat-message";
 
 export type AgentConversation = {
@@ -35,7 +36,7 @@ function blankConversation(): AgentConversation {
 }
 
 function storedMessage(message: AgentChatMessageItem): AgentChatMessageItem {
-    return { id: message.id, role: message.role, title: message.title, text: message.text, meta: message.meta, reasoning: message.reasoning };
+    return persistChatMessage(message);
 }
 
 function titleFromMessages(messages: AgentChatMessageItem[]) {

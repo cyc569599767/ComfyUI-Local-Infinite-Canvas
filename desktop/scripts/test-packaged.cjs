@@ -12,6 +12,8 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { DEFAULTS } = require('../src/main/application.cjs');
 
+const PLY_FIXTURE = `ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float scale_0\nproperty float scale_1\nproperty float scale_2\nproperty float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nproperty float opacity\nend_header\n0 0 0 -2.302585 -2.302585 -2.302585 1 0 0 0 0.2 0.4 0.6 2\n`;
+
 async function listen(server) {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return server.address().port;
@@ -50,10 +52,15 @@ async function inventory(dir, prefix = '') {
     const gatewayPort = await freePort(); const canvasPort = await freePort();
     await fsp.writeFile(path.join(userData, 'config.json'), JSON.stringify({ ...DEFAULTS,
       comfyUrl: `http://127.0.0.1:${comfyPort}`, gatewayPort, canvasPort }));
+    if (process.argv.includes('--3d')) {
+      const outputs = path.join(userData, 'gateway', 'outputs'); await fsp.mkdir(outputs, { recursive: true });
+      await fsp.writeFile(path.join(outputs, 'model3d_fixture.ply'), PLY_FIXTURE);
+    }
     const before = await inventory(path.join(installed, 'resources'));
     const env = { ...process.env, PATH: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32') };
     delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
-    child = spawn(path.join(installed, 'ComfyCanvas.exe'), ['--distribution-smoke', `--test-user-data=${userData}`], {
+    const appArgs = process.argv.includes('--3d') ? ['--distribution-3d-smoke'] : ['--distribution-smoke'];
+    child = spawn(path.join(installed, 'ComfyCanvas.exe'), [...appArgs, `--test-user-data=${userData}`], {
       cwd: temporary, env, stdio: 'inherit',
     });
     const code = await new Promise((resolve, reject) => {

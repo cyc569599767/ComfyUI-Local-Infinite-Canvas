@@ -1,0 +1,62 @@
+{
+  "id": "video-h3-fast",
+  "name": "video-h3-fast",
+  "type": "video",
+  "label": "H3 极速草稿",
+  "description": "H3 极速草稿：FastH3 4 步采样，4B 文本编码器 + ClipProj 投影；用于快速预览，448/480 速度档。",
+  "file": "h3-fast-draft.json",
+  "bindings": {
+    "prompt": {
+      "node": "6",
+      "input": "prompt"
+    },
+    "width": {
+      "node": "6",
+      "input": "width",
+      "from": "size.width",
+      "transform": "snap32",
+      "default": 832
+    },
+    "height": {
+      "node": "6",
+      "input": "height",
+      "from": "size.height",
+      "transform": "snap32",
+      "default": 480
+    },
+    "length": {
+      "node": "6",
+      "input": "length",
+      "from": "seconds",
+      "transform": "secondsToFrames17",
+      "fps": 24,
+      "default": 124
+    },
+    "seed": {
+      "node": "9",
+      "input": "noise_seed",
+      "from": "params.seed",
+      "transform": "int",
+      "random": true
+    },
+    "fps": {
+      "node": "12",
+      "input": "frame_rate",
+      "default": 24
+    }
+  },
+  "defaults": {},
+  "presets": {},
+  "parameters": [
+    {
+      "key": "seed",
+      "label": "种子",
+      "type": "number",
+      "min": 1,
+      "max": 2147483647,
+      "step": 1,
+      "description": "留空则每次随机"
+    }
+  ],
+  "lora": null
+}

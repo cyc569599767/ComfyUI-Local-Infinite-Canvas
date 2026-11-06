@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Pause, Play, Puzzle, RefreshCw, Sparkles, Star, Trash2, Video, Volume2, VolumeX } from "lucide-react";
+import { ChevronRight, Copy, Download, GripHorizontal, Group, Image as ImageIcon, Music2, Pause, Play, Puzzle, RefreshCw, Sparkles, Star, Trash2, Video, Volume2, VolumeX } from "lucide-react";
 
 import { canvasThemes, getCardBackground } from "@/lib/canvas-theme";
 import { useCanvasTheme, useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
@@ -10,6 +10,7 @@ import { formatElapsedDuration } from "@/lib/media-size";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { nodeInteractionState } from "@/lib/canvas/node-interaction";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeProgressRing } from "./canvas-node-progress-ring";
@@ -160,9 +161,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isBatchRoot = batchCount > 1;
     // Nodes with the interaction/move toggle ignore content pointer events in move mode and allow interaction in interactive mode.
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
-    const supportsInteractionToggle = Boolean(definition?.interactionToggle);
-    const forceInteractive = supportsInteractionToggle ? Boolean(definition?.forceInteractive?.(data)) : false;
-    const contentInteractive = !supportsInteractionToggle || forceInteractive || !data.metadata?.content ? true : Boolean(data.metadata?.interactive);
+    const hasDragHeader = Boolean(definition?.dragHeader);
+    const dragHeaderHeight = hasDragHeader ? 36 : 0;
+    const { contentInteractive } = nodeInteractionState(data, definition);
     // Transparent nodes such as SVGs blend into the canvas while retaining outlines for selected or related states.
     const transparentBg = Boolean(definition?.transparentBackground);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
@@ -345,11 +346,11 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
         >
             {isGenerating && generationStartedAt !== null ? (
-                <div className="pointer-events-none absolute left-2 top-2 z-[70]">
+                <div className={`pointer-events-none absolute ${hasDragHeader ? "right-2" : "left-2"} top-2 z-[70]`}>
                     <NodeGenerationElapsed startedAt={generationStartedAt} />
                 </div>
             ) : null}
-            {!isBare && !referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
+            {!isBare && (!hasDragHeader || isEditingTitle) && !referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
                 <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                     {isEditingTitle ? (
                         <input
@@ -388,6 +389,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             {fishSkin && showFishWhip ? <div className="fish-guard-halo" aria-hidden="true" /> : null}
 
             <div
+                data-node-card={data.id}
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
                     background: isBare ? "transparent" : isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : artSkin ? cardBackground : theme.node.fill,
@@ -522,10 +524,29 @@ export const CanvasNode = React.memo(function CanvasNode({
                         <span className="angel-feather f5" />
                     </div>
                 ) : null}
+                {hasDragHeader ? (
+                    <div
+                        data-node-drag-handle={data.id}
+                        className="relative z-20 flex w-full cursor-grab items-center gap-2 rounded-t-[inherit] border-b px-3 active:cursor-grabbing"
+                        style={{ height: dragHeaderHeight, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, touchAction: "none" }}
+                        title={t("canvas.model3d.moveCardHint")}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onMouseDown={(event) => { if (event.button !== 0) event.stopPropagation(); }}
+                        onDoubleClick={(event) => { event.stopPropagation(); setIsEditingTitle(true); }}
+                    >
+                        <GripHorizontal className="size-4 shrink-0 opacity-60" />
+                        <span className="shrink-0">{definition?.icon}</span>
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium">{data.title || definition?.title}</span>
+                        <span className="shrink-0 text-[10px] opacity-60">{t("canvas.model3d.moveCard")}</span>
+                    </div>
+                ) : null}
                 <div
-                    className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
+                    data-node-content={data.id}
+                    className={`relative flex w-full items-center justify-center ${hasDragHeader ? "rounded-b-[inherit]" : "h-full rounded-[inherit]"} ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
+                    onMouseDown={hasDragHeader && contentInteractive ? (event) => event.stopPropagation() : undefined}
                     style={
                         {
+                            height: hasDragHeader ? `calc(100% - ${dragHeaderHeight}px)` : undefined,
                             background: isBare ? "transparent" : isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : artSkin ? "transparent" : theme.node.fill,
                             pointerEvents: contentInteractive ? undefined : "none",
                         } as React.CSSProperties
@@ -560,7 +581,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
 
-                {!isBare && !isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
+                {!isBare && !hasDragHeader && !isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
                 {referenceSelectionState && (referenceSelectionState !== "available" || hovered) ? (
                     <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`, boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>

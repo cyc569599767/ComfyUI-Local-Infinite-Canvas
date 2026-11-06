@@ -8,6 +8,8 @@
  * still write its runtime data and install/update its ComfyUI bridge.
  */
 import net from "node:net";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 
 export function sendDesktop(message) {
@@ -27,7 +29,60 @@ export function comfySpawnEnvironment(env = process.env) {
   for (const key of Object.keys(result)) {
     if (key.toUpperCase() === "ELECTRON_RUN_AS_NODE") delete result[key];
   }
+  // Hidden Python processes on Chinese Windows otherwise use GBK rather than
+  // the console's UTF-8; emoji printed by custom nodes can abort startup.
+  Object.assign(result, { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONUNBUFFERED: "1" });
   return result;
+}
+
+// Official portable launchers enable --windows-standalone-build, which also
+// enables auto-launch. They often ignore %*, so merely appending a switch to
+// the BAT has no effect. Convert only a simple, verified Python invocation;
+// never execute/evaluate BAT contents or discard unknown environment setup.
+export function resolveDesktopComfyPlan(install, plan) {
+  if (!plan) return null;
+  if (plan.kind === "python") return plan;
+  if (plan.kind === "desktop") {
+    if (install.scripts?.length) {
+      return resolveDesktopComfyPlan(install, { kind: "script", file: install.scripts[0], cwd: path.dirname(install.scripts[0]) });
+    }
+    if (install.pythonExe && install.mainPy) {
+      return { kind: "python", file: install.pythonExe, mainPy: install.mainPy, cwd: install.dir };
+    }
+    throw new Error("ComfyUI Desktop 不提供已验证的无浏览器后台启动方式。请先手动启动 ComfyUI，或选择带 Python/main.py 的便携版目录，再由工作台连接。");
+  }
+  const source = fs.readFileSync(plan.file, "utf8").replace(/^\uFEFF/, "");
+  const lines = source.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^(?:@?echo\s+off\s*$|@?rem(?:\s|$)|::)/i.test(line));
+  const command = lines[0] || "";
+  const tailIsPassive = lines.slice(1).every(line => /^@?(?:echo(?:\s|$)|pause\s*$|exit\s+\/b(?:\s+\d+)?\s*$)/i.test(line));
+  const tokens = command.match(/"[^"\r\n]*"|[^\s"]+/g) || [];
+  const quotes = (command.match(/"/g) || []).length;
+  if (tailIsPassive && quotes % 2 === 0 && !/[&|<>^]/.test(command) && install.pythonExe && install.mainPy) {
+    const unquote = token => token.startsWith('"') ? token.slice(1, -1) : token;
+    const args = tokens.map(unquote);
+    const expandPath = value => {
+      const expanded = value.replace(/%~dp0/gi, `${path.dirname(plan.file)}${path.sep}`);
+      return /[%!]/.test(expanded) ? null : path.resolve(plan.cwd, expanded);
+    };
+    const mainIndex = args.findIndex((token, index) => index > 0 && /(?:^|[\\/])main\.py$/i.test(expandPath(token) || ""));
+    const executable = args[0] && expandPath(args[0].replace(/^@/, ""));
+    const mainPy = mainIndex > 0 && expandPath(args[mainIndex]);
+    const samePath = (left, right) => left && right && path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+    const pythonArgs = args.slice(1, mainIndex);
+    const comfyArgs = args.slice(mainIndex + 1).filter(token => token !== "%*");
+    if (samePath(executable, install.pythonExe) && samePath(mainPy, install.mainPy)
+      && pythonArgs.every(token => ["-s", "-u", "-E", "-B"].includes(token))
+      && comfyArgs.every(token => !/[%!]/.test(token) && token !== "--")) {
+      return { kind: "python", file: install.pythonExe, mainPy: install.mainPy,
+        cwd: plan.cwd, pythonArgs, args: comfyArgs };
+    }
+  }
+  throw new Error(`启动脚本不转发参数，无法安全禁用浏览器：${path.basename(plan.file)}。请改用标准便携版启动脚本，或先手动启动 ComfyUI 后连接；工作台不会修改原脚本。`);
+}
+
+export function comfyPythonArguments(plan, port, desktop = false) {
+  return [...(plan.pythonArgs || []), plan.mainPy, ...(plan.args || []),
+    "--port", String(port), "--listen", "127.0.0.1", ...(desktop ? ["--disable-auto-launch"] : [])];
 }
 
 export function desktopLocalUrl(value) {

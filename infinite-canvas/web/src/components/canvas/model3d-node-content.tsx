@@ -302,7 +302,7 @@ function SplatNodeContent({ ctx }: { ctx: CanvasNodeContext }) {
         };
     }, [t, url]);
 
-    if (!url) return <div className="h-full w-full" style={{ background: "transparent" }} />;
+    if (!url) return <div className="flex h-full w-full items-center justify-center text-xs" style={{ color: ctx.theme.node.muted }}>{t("canvas.model3d.empty")}</div>;
 
     return (
         <div className="relative h-full w-full overflow-hidden" style={{ background: "transparent" }}>

@@ -31,7 +31,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 import { installBundledNodes } from "./bootstrap-nodes.mjs";
-import { assertDesktopPortAvailable, comfySpawnEnvironment, createDesktopSession, desktopGet, desktopLocalUrl, isDesktopCanvasConfig, isDesktopCanvasIndex, isDesktopGatewayHealth, sendDesktop } from "./desktop-protocol.mjs";
+import { assertDesktopPortAvailable, comfyPythonArguments, comfySpawnEnvironment, createDesktopSession, desktopGet, desktopLocalUrl, isDesktopCanvasConfig, isDesktopCanvasIndex, isDesktopGatewayHealth, resolveDesktopComfyPlan, sendDesktop } from "./desktop-protocol.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -613,16 +613,22 @@ async function listenCanvasServer(cfg, preferredPort, session = null) {
 }
 
 function spawnComfy(plan, port = COMFY_PORT_FIRST) {
-  const options = { cwd: plan.cwd, detached: true, stdio: "ignore", windowsHide: plan.kind !== "script",
+  const options = { cwd: plan.cwd, detached: true,
+    stdio: DESKTOP ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: plan.kind !== "script",
     ...(DESKTOP ? { env: comfySpawnEnvironment() } : {}) };
   let child;
   if (plan.kind === "python") {
-    child = spawn(plan.file, [plan.mainPy, "--port", String(port), "--listen", "127.0.0.1"], options);
+    child = spawn(plan.file, comfyPythonArguments(plan, port, DESKTOP), options);
   } else if (plan.kind === "desktop") {
     child = spawn(plan.file, [], { ...options, windowsHide: false });
   } else {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
     child = spawn(comspec, ["/d", "/s", "/c", plan.file], { ...options, windowsHide: false });
+  }
+  if (DESKTOP) {
+    child.stdout?.on("data", data => forwardLines(data, "comfy"));
+    child.stderr?.on("data", data => forwardLines(data, "comfy"));
+    child.on("exit", (code, signal) => log(`ComfyUI 子进程退出（code=${code}, signal=${signal || "none"}）`, "WARN"));
   }
   child.on("error", (err) => log(`启动 ComfyUI 失败：${err.message}`, "ERROR"));
   child.unref();
@@ -2153,16 +2159,29 @@ async function desktopMain(session) {
     // Drain queued IPC/disconnect before spawning anything after that work.
     await new Promise(setImmediate);
     session.assertRunning();
-    const plan = resolveLaunchPlan(install);
+    let plan = null;
+    try {
+      plan = resolveDesktopComfyPlan(install, resolveLaunchPlan(install));
+    } catch (error) {
+      // Unsupported vendor scripts must not open a browser or lose environment
+      // setup; keep canvas/gateway usable and explain how to connect manually.
+      log(`Desktop 未自动启动 ComfyUI：${error.message}`, "WARN");
+    }
     if (plan) {
       cfg.comfyDir ||= install.dir;
       cfg.comfyWorkflowsDir ||= install.workflowsDir;
-      log(`Desktop 启动 ComfyUI：${plan.file}`);
+      log(`Desktop 启动 ComfyUI（禁止自动打开浏览器）：${plan.file}`);
       // Configured port only: do not accidentally adopt a different installation.
       const child = session.ownChild(spawnComfy(plan, portFromUrl(cfg.comfyUrl) || COMFY_PORT_FIRST));
-      const ready = await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child);
-      session.assertRunning();
-      if (ready) comfy = { url: cfg.comfyUrl, mode: "started" };
+      try {
+        const ready = await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child);
+        session.assertRunning();
+        if (ready) comfy = { url: cfg.comfyUrl, mode: "started" };
+        else log("ComfyUI 启动尚未就绪；继续提供画布与网关，稍后可检查状态。", "WARN");
+      } catch (error) {
+        session.assertRunning(); // Parent shutdown still cancels the whole startup.
+        log(`ComfyUI 启动失败，保留画布与网关：${error.message}（code=${child.exitCode}, signal=${child.signalCode || "none"}）`, "WARN");
+      }
     }
   }
   if (comfy.mode === "missing") log("ComfyUI 未就绪，desktop 以 missing 状态继续（connect-only 不启动 ComfyUI）", "WARN");

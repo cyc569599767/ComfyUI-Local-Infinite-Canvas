@@ -16,7 +16,8 @@ import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
 import { ResourceCenterPanel } from "@/components/layout/resource-center-panel";
 import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
-import { fetchImageModels } from "@/services/api/image";
+import { fetchAgentCloudModels } from "@/services/api/agent-cloud";
+import { normalizeAgentBaseUrl } from "@/lib/agent-cloud-config";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
@@ -26,7 +27,7 @@ import { cardSkinIds, getCanvasTheme, type CardSkinId } from "@/lib/canvas-theme
 import { isCardSkinLocked, verifySkinPassword } from "@/lib/canvas/skin-unlocks";
 import { persistSkinUnlock } from "@/services/api/skin-unlocks";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel, type PromptCloudApi } from "@/stores/use-config-store";
+import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, promptCloudApiFormats, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel, type PromptCloudApi } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -67,7 +68,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [editingChannelId, setEditingChannelId] = useState("");
     const [cloudApiEditorOpen, setCloudApiEditorOpen] = useState(false);
     const [editingCloudApiId, setEditingCloudApiId] = useState("");
-    const [cloudApiForm] = Form.useForm<{ name: string; baseUrl: string; apiKey: string; model: string }>();
+    const [cloudApiForm] = Form.useForm<Omit<PromptCloudApi, "id">>();
     const [cloudModelOptions, setCloudModelOptions] = useState<string[]>([]);
     const [cloudModelState, setCloudModelState] = useState<"idle" | "loading" | "success" | "empty" | "error">("idle");
     const [cloudModelError, setCloudModelError] = useState("");
@@ -215,9 +216,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const fetchCloudModels = async () => {
-        const values = cloudApiForm.getFieldsValue(["baseUrl", "apiKey"]);
+        const values = cloudApiForm.getFieldsValue(["baseUrl", "apiKey", "apiFormat"]);
         const baseUrl = String(values.baseUrl || "").trim();
         const apiKey = String(values.apiKey || "").trim();
+        const apiFormat = values.apiFormat || "openai";
         cloudModelAbortRef.current?.abort();
         if (!baseUrl || !apiKey) {
             setCloudModelOptions([]);
@@ -231,7 +233,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         setCloudModelState("loading");
         setCloudModelError("");
         try {
-            const models = await fetchImageModels({ baseUrl, apiKey, apiFormat: "openai" }, { signal: controller.signal });
+            const models = await fetchAgentCloudModels({ baseUrl, apiKey, apiFormat }, { signal: controller.signal });
             if (seq !== cloudModelSeqRef.current) return;
             setCloudModelOptions(models);
             setCloudModelState(models.length ? "success" : "empty");
@@ -268,13 +270,23 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const openCloudApiEditor = (api?: PromptCloudApi) => {
         setEditingCloudApiId(api?.id || "");
         resetCloudModelFetch();
-        cloudApiForm.setFieldsValue(api ? { name: api.name, baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model } : { name: "", baseUrl: "", apiKey: "", model: "" });
+        cloudApiForm.setFieldsValue(api
+            ? { name: api.name, baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model, apiFormat: api.apiFormat || "openai", rememberKey: api.rememberKey !== false }
+            : { name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", rememberKey: false });
         setCloudApiEditorOpen(true);
     };
 
     const saveCloudApi = async () => {
         try {
             const values = await cloudApiForm.validateFields();
+            // Validate using the chosen protocol, but keep the saved URL literal.
+            // Runtime normalization must not migrate an existing provider endpoint.
+            try { normalizeAgentBaseUrl(values.baseUrl, values.apiFormat || "openai"); }
+            catch (error) {
+                cloudApiForm.setFields([{ name: "baseUrl", errors: [error instanceof Error ? error.message : "URL 无效"] }]);
+                return;
+            }
+            values.model = values.model.trim();
             if (editingCloudApiId) updatePromptCloudApi(editingCloudApiId, values);
             else addPromptCloudApi(values);
             setCloudApiEditorOpen(false);
@@ -438,7 +450,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                                                 ) : null}
                                                             </div>
                                                             <div className="mt-1 truncate text-xs text-stone-500">
-                                                                {api.baseUrl || t("config.channels.missingUrl")} · {api.model || "—"}
+                                                                {api.baseUrl || t("config.channels.missingUrl")} · {api.model || "—"} · {t(`config.cloudApi.formats.${api.apiFormat || "openai"}`)}
                                                             </div>
                                                             <div className="mt-0.5 text-xs text-stone-500">{api.apiKey ? t("config.cloudApi.keySaved") : t("config.cloudApi.keyMissing")}</div>
                                                         </div>
@@ -789,11 +801,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     layout="vertical"
                     requiredMark={false}
                     onValuesChange={(changed) => {
-                        if ("baseUrl" in changed || "apiKey" in changed) resetCloudModelFetch();
+                        if ("baseUrl" in changed || "apiKey" in changed || "apiFormat" in changed) resetCloudModelFetch();
                     }}
                 >
                     <Form.Item label={t("config.cloudApi.name")} name="name" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.nameRequired") }]}>
                         <Input placeholder={t("config.cloudApi.namePlaceholder")} />
+                    </Form.Item>
+                    <Form.Item label={t("config.cloudApi.apiFormat")} name="apiFormat" initialValue="openai" extra={t("config.cloudApi.apiFormatHint")}>
+                        <Select options={promptCloudApiFormats.map((value) => ({ value, label: t(`config.cloudApi.formats.${value}`) }))} />
                     </Form.Item>
                     <Form.Item label={t("config.cloudApi.baseUrl")} name="baseUrl" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.baseUrlRequired") }]}>
                         <Input placeholder="https://api.deepseek.com/v1" onBlur={() => void fetchCloudModels()} />
@@ -828,6 +843,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     </Form.Item>
                     <Form.Item label={t("config.cloudApi.apiKey")} name="apiKey" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.keyRequired") }]}>
                         <Input.Password placeholder="sk-..." autoComplete="off" onBlur={() => void fetchCloudModels()} />
+                    </Form.Item>
+                    <Form.Item label={t("config.cloudApi.rememberKey")} name="rememberKey" valuePropName="checked" extra={t("config.cloudApi.rememberKeyHint")}>
+                        <Switch />
                     </Form.Item>
                 </Form>
                 <div className="text-xs text-stone-500">{t("config.cloudApi.hint")}</div>

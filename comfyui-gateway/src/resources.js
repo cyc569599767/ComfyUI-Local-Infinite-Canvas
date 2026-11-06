@@ -643,6 +643,10 @@ export function createResourceManager({ config, setup, registry, logger, workflo
         const wanted = normalizeRelName(file);
         const wantedBase = wanted.split("/").pop() || wanted;
         const expectedSize = Number(resource.size) || 0;
+        // These files are a paired vision model. Filename resemblance or equal
+        // size cannot prove a Qwen3.8 projector works with Qwen3.5. Explicit user
+        // replacement remains available in resourceStatus/resourceAliasFor.
+        const exactPromptModel = ["prompt_qwen_gguf", "prompt_qwen_mmproj"].includes(resource.id);
         const sameSize = (item) => !expectedSize || !item.size || item.size === expectedSize;
         let directMismatch = "";
         for (const candidate of modelFileCandidates(resource, root)) {
@@ -677,7 +681,7 @@ export function createResourceManager({ config, setup, registry, logger, workflo
                 }
             }
         }
-        if (!found && expectedSize > 0) {
+        if (!found && !exactPromptModel && expectedSize > 0) {
             const bySize = inventory.filter((item) => item.size === expectedSize && item.size > 0);
             if (bySize.length === 1) {
                 found = bySize[0];
@@ -687,7 +691,7 @@ export function createResourceManager({ config, setup, registry, logger, workflo
         let similarScore = 0;
         // 格式相同、名称相似度 ≥50% 的同类模型（不同量化/版本）识别；
         // 只对普通权重生效，.onnx/.engine 编译产物不做模糊匹配。
-        if (!found && String(resource.type || "model") === "model") {
+        if (!found && !exactPromptModel && String(resource.type || "model") === "model") {
             const targetExt = path.extname(wantedBase).toLowerCase();
             if (FUZZY_MODEL_EXTENSIONS.has(targetExt)) {
                 const similar = findSimilarModel(wantedBase, inventory.map((item) => item.rel));
@@ -1352,9 +1356,11 @@ export function createResourceManager({ config, setup, registry, logger, workflo
         },
         {
             id: "teMan",
-            label: "本地提示词优化",
-            resourceIds: ["prompt_te_man"],
-            nodeClasses: ["TE_H3_Prompt_Enhancer", "TE_Qwen_Image_2_1_Prompt_Enhancer"],
+            label: "本地 H3 提示词优化",
+            // Text optimization needs no vision projector. Image-bearing requests
+            // additionally validate their exact mmproj in the optimizer preflight.
+            resourceIds: ["prompt_te_man", "prompt_qwen_gguf", "prompt_llama_node", "prompt_llama_python"],
+            nodeClasses: ["TE_H3_Prompt_Enhancer", "llama_cpp_model_loader", "llama_cpp_instruct_adv", "llama_cpp_parameters", "TE_text_display"],
         },
         {
             id: "imagePe",
@@ -1805,7 +1811,7 @@ export function createResourceManager({ config, setup, registry, logger, workflo
                 resourceId: id,
             });
         }
-        if (String(workflowId).startsWith("video-h3-")) {
+        if (String(workflowId).startsWith("video-h3-") && workflowId !== "video-h3-fast") {
             const python = comfyPythonForBake(comfyRoot());
             const tensorrt = python ? pipImportStatus(python, "tensorrt", { distribution: "tensorrt" }) : null;
             // 快速探测超时/无法确认时不误杀；只有明确未安装才给出可执行提示。

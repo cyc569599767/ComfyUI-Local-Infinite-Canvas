@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { applyModelAliases } from "./runner.js";
 import { ensureSpeakerTags } from "./speaker-tags.js";
 import { deepClone, sleep, truncate } from "./util.js";
+import { requestAgentCloudJson } from "./agent-cloud.js";
+import { validateLocalH3Workflow } from "./h3-prompt-workflow.js";
 
 const MODES = new Set([
   "全参考模式(Reference to Video)",
@@ -238,6 +240,18 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
   if (!baseUrl || !apiKey || !model) {
     throw new PromptOptimizeError("云端 API 未配置：请先在设置中填写 Base URL、API Key 和模型", { status: 400, code: "cloud_not_configured" });
   }
+  if (cloud.apiFormat && cloud.apiFormat !== "openai") {
+    const started = Date.now();
+    try {
+      const content = images.length ? [{ type: "text", text: userText }, ...images.map(url => ({ type: "image_url", image_url: { url } }))] : userText;
+      const data = await requestAgentCloudJson({ baseUrl, apiKey, apiFormat: cloud.apiFormat, request: {
+        model, messages: [{ role: "system", content: system }, { role: "user", content }], max_tokens: maxTokens,
+      } }, { signal });
+      return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
+    } catch (error) {
+      throw new PromptOptimizeError("云端 API 请求失败，请检查所选协议、模型和服务配置", { status: error?.status || 502, code: error?.code || "cloud_api_failed" });
+    }
+  }
   assertCloudBaseUrl(baseUrl);
   const endpoint = cloudChatUrl(baseUrl);
   const userContent = images.length
@@ -357,7 +371,7 @@ async function cloudOptimizeImage({ prompt, mode, language, imageCount = 0, clou
   return { prompt: result, mode, provider: "cloud", model, elapsedMs };
 }
 
-export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, loaderSpecs = undefined }) {
+export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, userModelAliasFor = null, loaderSpecs = undefined }) {
   // 反推/优化提交的是打包模板，模型名写死在模板里；必须和出图路径一样套别名。
   // loaderSpecs 允许传 getter：网关启动扫描可能还没完成，不能拿旧快照。
   function withAliases(workflow) {
@@ -416,7 +430,9 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
     workflow["2"].inputs["视频时长"] = optimizeSeconds;
     workflow["2"].inputs["参考素材说明"] = String(referenceNote || "").slice(0, 4000);
     if (images.length) {
-      workflow["3"].inputs["输入模式"] = "图片";
+      workflow["1"].inputs.mmproj = "mmproj-BF16.gguf";
+      workflow["1"].inputs.chat_handler = "Qwen3.5";
+      const imageLinks = {};
       images.forEach((uploaded, index) => {
         const nodeId = String(9101 + index);
         workflow[nodeId] = {
@@ -424,16 +440,29 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
           inputs: { image: imageValue(uploaded) },
           _meta: { title: `H3 Ref ${index + 1}` },
         };
-        workflow["3"].inputs[index === 0 ? "图片" : `图片${index + 1}`] = [nodeId, 0];
+        imageLinks[`inputs.input${index}`] = [nodeId, 0];
       });
-    } else {
-      workflow["3"].inputs["输入模式"] = "文本";
+      if (images.length > 1) {
+        // Core list node preserves separate sizes/order and emits OUTPUT_IS_LIST,
+        // which llama_cpp_instruct_adv (INPUT_IS_LIST) consumes without cropping.
+        workflow["9200"] = { class_type: "CreateList", inputs: imageLinks };
+        workflow["3"].inputs.images = ["9200", 0];
+      } else workflow["3"].inputs.images = imageLinks["inputs.input0"];
     }
-    const baseSystemPrompt = String(workflow["3"].inputs["系统提示词"] || "").trim();
-    workflow["3"].inputs["系统提示词"] = `${baseSystemPrompt}${baseSystemPrompt ? "\n" : ""}${h3LanguageDirective(outputLanguage)}\n只输出最终提示词正文；禁止输出思考过程、分析、推理、解释、Markdown 代码块、前后缀或自我说明。`;
+    const baseSystemPrompt = String(workflow["3"].inputs.system_prompt || "").trim();
+    workflow["3"].inputs.system_prompt = `${baseSystemPrompt}${baseSystemPrompt ? "\n" : ""}${h3LanguageDirective(outputLanguage)}\n只输出最终提示词正文；禁止输出思考过程、分析、推理、解释、Markdown 代码块、前后缀或自我说明。`;
 
+    // Only explicit user aliases are allowed for this LLM / vision pair. A fuzzy
+    // Qwen3.8 mmproj match for the Qwen3.5 model is not a compatible replacement.
+    const selectedWorkflow = applyModelAliases(workflow, userModelAliasFor, [
+      { classType: "llama_cpp_model_loader", input: "model" },
+      ...(images.length ? [{ classType: "llama_cpp_model_loader", input: "mmproj" }] : []),
+    ]);
+    if (signal?.aborted) throw new PromptOptimizeError("提示词优化已取消", { status: 400, code: "cancelled" });
+    const objectInfo = await comfy.objectInfo({ signal });
+    validateLocalH3Workflow(selectedWorkflow, objectInfo, { hasImages: images.length > 0 });
     const started = Date.now();
-    const submitted = await comfy.submit(withAliases(workflow), { signal });
+    const submitted = await comfy.submit(selectedWorkflow, { signal });
     const promptId = submitted.promptId;
     let running = true;
     let cancelPromise = null;
@@ -471,7 +500,9 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
       if (!historyCompleted(history)) {
         throw new PromptOptimizeError("提示词优化超时", { status: 504, code: "prompt_optimize_timeout" });
       }
-      const raw = outputText(history).trim();
+      // TE_H3_Prompt_Enhancer is also an output node. Never mistake its
+      // intermediate template for the generated response if inference is empty.
+      const raw = String(history.outputs?.["4"]?.text?.[0] || history.outputs?.["4"]?.input_text?.[0] || "").trim();
       const result = sanitizeH3Prompt(raw);
       if (raw !== result) logger?.info?.(`prompt optimize sanitized ${raw.length}->${result.length}`);
       if (!result) {

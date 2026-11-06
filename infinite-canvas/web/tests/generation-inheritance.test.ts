@@ -1,0 +1,33 @@
+import { afterAll, expect, test } from 'bun:test';
+const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+const storage = new Map<string,string>();
+Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:(key:string)=>storage.get(key)??null,setItem:(key:string,value:string)=>storage.set(key,value),removeItem:(key:string)=>storage.delete(key)}});
+afterAll(()=>{if(originalStorage)Object.defineProperty(globalThis,'localStorage',originalStorage);else Reflect.deleteProperty(globalThis,'localStorage');});
+const { buildNodeGenerationInputs, buildNodeGenerationContext } = await import('../src/components/canvas/canvas-node-generation');
+import { buildGeneratedNodeConnections } from '../src/lib/canvas/generation-connections';
+import { CanvasNodeType, type CanvasNodeData, type CanvasConnection } from '../src/types/canvas';
+const node = (id: string, type: CanvasNodeType, content = id): CanvasNodeData => ({ id, type, title:id, position:{x:0,y:0},width:100,height:100,metadata:{content} });
+test('real generation resolver preserves config/group reference order when bypassing result', () => {
+ const nodes=[node('one',CanvasNodeType.Image),node('two',CanvasNodeType.Image),node('text',CanvasNodeType.Text,'upstream context'),node('group',CanvasNodeType.Group),node('config',CanvasNodeType.Config),node('old',CanvasNodeType.Video),node('new',CanvasNodeType.Video)];
+ nodes[0].metadata!.groupId='group'; nodes[1].metadata!.groupId='group';
+ const connections:CanvasConnection[]=[{id:'g',fromNodeId:'group',toNodeId:'config'},{id:'c',fromNodeId:'old',toNodeId:'config'},{id:'t',fromNodeId:'text',toNodeId:'old'},{id:'dup',fromNodeId:'one',toNodeId:'old'},{id:'ignore',fromNodeId:'two',toNodeId:'old',role:'lineage'}];
+ const before=buildNodeGenerationContext('old',nodes,connections,'Base');
+ let id=0;const inherited=buildGeneratedNodeConnections('old','new',buildNodeGenerationInputs('old',nodes,connections),nodes,connections,()=>`new-${++id}`);
+ expect(inherited.map(c=>c.fromNodeId)).toEqual(['one','two','text']);
+ const after=buildNodeGenerationContext('new',nodes,[...connections,...inherited],'Base');
+ expect(after.referenceImages.map(r=>r.id)).toEqual(before.referenceImages.map(r=>r.id));
+ expect(after.prompt).toBe(before.prompt);
+ expect(after.referenceVideos).toEqual([]);
+ expect(connections).toHaveLength(5);
+});
+test('generated sibling can regenerate repeatedly with no ancestor video or duplicated text',()=>{
+ const nodes=[node('ref',CanvasNodeType.Image),node('text',CanvasNodeType.Text,'Reference paragraph'),node('old',CanvasNodeType.Video),node('child',CanvasNodeType.Video),node('next',CanvasNodeType.Video)];
+ let edges:CanvasConnection[]=[{id:'a',fromNodeId:'ref',toNodeId:'old'},{id:'b',fromNodeId:'text',toNodeId:'old'}];
+ let id=0;const createId=()=>`c-${++id}`;
+ edges.push(...buildGeneratedNodeConnections('old','child',buildNodeGenerationInputs('old',nodes,edges),nodes,edges,createId));
+ edges.push(...buildGeneratedNodeConnections('child','next',buildNodeGenerationInputs('child',nodes,edges),nodes,edges,createId));
+ const context=buildNodeGenerationContext('next',nodes,edges,'Base\n\nReference paragraph');
+ expect(context.referenceImages.map(r=>r.id)).toEqual(['ref']);expect(context.referenceVideos).toEqual([]);
+ expect(context.prompt.match(/Reference paragraph/g)).toHaveLength(1);
+ expect(edges.filter(c=>c.toNodeId==='next').map(c=>c.fromNodeId)).toEqual(['ref','text']);
+});

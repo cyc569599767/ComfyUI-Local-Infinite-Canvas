@@ -1,23 +1,15 @@
 {
   "1": {
-    "class_type": "QwenTE_ModelLoader",
+    "class_type": "llama_cpp_model_loader",
     "inputs": {
-      "模型系列": "Qwen3.5-VL",
-      "主模型": "Qwen3.5-9B-Q4_K_M.gguf",
-      "视觉投影mmproj": "mmproj-BF16.gguf",
-      "启用思考": false,
-      "保留历史think": false,
-      "上下文长度": 32768,
-      "GPU层数": -1,
-      "KV缓存K类型": "默认(F16)",
-      "KV缓存V类型": "默认(F16)",
-      "MoE专家上CPU": false,
-      "前N层专家上CPU": 0,
-      "Qwen3.8推理强度": "xhigh",
-      "MTP推测解码": "关闭",
-      "MTP草稿token数": 2,
-      "Flash Attention": "不开启",
-      "MTP草稿模型": "无"
+      "model": "Qwen3.5-9B-Q4_K_M.gguf",
+      "mmproj": "None",
+      "chat_handler": "None",
+      "n_ctx": 8192,
+      "vram_limit": -1,
+      "image_min_tokens": 0,
+      "image_max_tokens": 0,
+      "load_mtp": false
     },
     "_meta": { "title": "Qwen3.5-9B (H3 prompt)" }
   },
@@ -37,29 +29,24 @@
       "timeout_s": 300,
       "绕过代理": false
     },
-    "_meta": { "title": "H3 Prompt Enhancer" }
+    "_meta": { "title": "H3 Prompt Enhancer (local template only)" }
   },
   "3": {
-    "class_type": "QwenTE_ImageInfer",
+    "class_type": "llama_cpp_instruct_adv",
     "inputs": {
-      "qwen模型": ["1", 0],
-      "输入模式": "文本",
-      "提示词": ["2", 1],
-      "系统提示词": "你是 MiniMax H3 视频提示词专家。严格按用户提供的提示词模板输出，不要解释。\n本地兼容规则（VDN / cfg=1）：\n1. 描述性文本全部用正向事实表述；no/not/without/avoid 等否定词在 cfg=1 下会作为普通 token 参与正向条件，可能反向生效，改写为正向事实（如 no blood → clean, intact, unretouched skin）。不要改台词、旁白、歌词和画面文字，不做全局替换。\n2. 有图片输入时用 <Picture 1>、<Picture 2> 标注身份/服装/场景来源，标签必须和实际输入一致；只有完全没有图片输入的纯文本 T2VA 不得伪造 Picture 标签，I2VA/FL2VA/L2VA/Ref2VA 的关键帧或参考图必须按实际输入使用对应标签。\n3. 用户要求单段/不切镜时写明 one continuous locked-off shot from a tripod（或等价正向表述）；用户要求切镜时按用户意图，不强制锁机位。\n4. 少堆 cinematic/photorealistic/8k/masterpiece 等泛化质量词，优先具体的光位、色温、镜头、材质、运动；不要一刀切禁用 cinematic。",
-      "最多帧数": 24,
-      "最大边长": 768,
-      "最大生成token": 4096,
-      "温度": 0.6,
-      "top_p": 0.9,
-      "top_k": 20,
-      "重复惩罚": 1,
-      "频率惩罚": 0,
-      "存在惩罚": 0,
+      "llama_model": ["1", 0],
+      "parameters": ["5", 0],
+      "preset_prompt": "Empty - Nothing",
+      "custom_prompt": ["2", 1],
+      "system_prompt": "你是 MiniMax H3 视频提示词专家。严格按用户提供的提示词模板输出，不要解释。\n本地兼容规则（VDN / cfg=1）：\n1. 描述性文本全部用正向事实表述；no/not/without/avoid 等否定词在 cfg=1 下会作为普通 token 参与正向条件，可能反向生效，改写为正向事实（如 no blood → clean, intact, unretouched skin）。不要改台词、旁白、歌词和画面文字，不做全局替换。\n2. 有图片输入时用 <Picture 1>、<Picture 2> 标注身份/服装/场景来源，标签必须和实际输入一致；只有完全没有图片输入的纯文本 T2VA 不得伪造 Picture 标签，I2VA/FL2VA/L2VA/Ref2VA 的关键帧或参考图必须按实际输入使用对应标签。\n3. 用户要求单段/不切镜时写明 one continuous locked-off shot from a tripod（或等价正向表述）；用户要求切镜时按用户意图，不强制锁机位。\n4. 少堆 cinematic/photorealistic/8k/masterpiece 等泛化质量词，优先具体的光位、色温、镜头、材质、运动；不要一刀切禁用 cinematic。",
+      "inference_mode": "images",
+      "max_frames": 24,
+      "max_size": 768,
       "seed": 0,
-      "输出think块": false,
-      "生成后自动卸载模型": true
+      "force_offload": true,
+      "save_states": false
     },
-    "_meta": { "title": "QwenTE expand" }
+    "_meta": { "title": "Qwen3.5 H3 local expansion" }
   },
   "4": {
     "class_type": "TE_text_display",
@@ -70,5 +57,24 @@
       "edited_from_text": ""
     },
     "_meta": { "title": "H3 prompt output" }
+  },
+  "5": {
+    "class_type": "llama_cpp_parameters",
+    "inputs": {
+      "max_tokens": 4096,
+      "top_k": 20,
+      "top_p": 0.9,
+      "min_p": 0.05,
+      "typical_p": 1,
+      "temperature": 0.6,
+      "repeat_penalty": 1,
+      "frequency_penalty": 0,
+      "present_penalty": 0,
+      "mirostat_mode": 0,
+      "mirostat_eta": 0.1,
+      "mirostat_tau": 5,
+      "state_uid": -1
+    },
+    "_meta": { "title": "Bounded H3 text generation" }
   }
 }

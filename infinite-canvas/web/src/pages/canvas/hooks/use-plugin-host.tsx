@@ -9,6 +9,7 @@ import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type M
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { nodeInteractionState } from "@/lib/canvas/node-interaction";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
@@ -164,7 +165,7 @@ export function usePluginHost(params: PluginHostParams) {
             const ctx = buildNodeContext(pluginHost, node, theme, viewportRef.current.k);
             const custom = definition?.toolbar?.(ctx) || [];
             // Show the interaction/move toggle only for nodes with content that are not forced into an interactive state.
-            if (!definition?.interactionToggle || !node.metadata?.content || definition.forceInteractive?.(node)) return custom;
+            if (!nodeInteractionState(node, definition).toggleEnabled) return custom;
             const interactive = Boolean(node.metadata?.interactive);
             const toggle: CanvasNodeToolbarItem = {
                 id: "node-interaction-toggle",

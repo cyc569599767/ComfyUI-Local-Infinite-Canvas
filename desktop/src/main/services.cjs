@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
+const { timestampDesktopLog } = require('../renderer/log-utils.cjs');
 
 function localUrl(value) {
   const url = new URL(value);
@@ -115,14 +116,16 @@ class ServiceManager extends EventEmitter {
     this.connecting = null;
     this.stopping = null;
     this.stopped = false;
-    this.state = { phase: 'idle', message: '准备连接本地服务', services: null, logs: [], ownedLauncher: false };
+    this.state = { phase: 'idle', message: '准备连接本地服务', services: null, logs: [], logsVersion: 0, ownedLauncher: false };
   }
 
   snapshot() { return structuredClone(this.state); }
   update(patch) { Object.assign(this.state, patch); this.emit('change', this.snapshot()); }
   log(message) {
-    this.state.logs.push(String(message).replace(/\u001b\[[0-9;]*m/g, '').slice(0, 2000));
+    const text = String(message).replace(/\u001b\[[0-9;]*m/g, '').slice(0, 2000);
+    this.state.logs.push(timestampDesktopLog(text));
     this.state.logs = this.state.logs.slice(-100);
+    this.state.logsVersion += 1;
     this.emit('change', this.snapshot());
   }
 

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { localUrl } = require('./services.cjs');
+const { migrateFastDraft } = require('./fast-draft-migration.cjs');
 
 const DEFAULTS = {
   schemaVersion: 1, comfyUrl: 'http://127.0.0.1:8188', comfyDir: '', comfyWorkflowsDir: '',
@@ -44,6 +45,7 @@ function validateConfig(input, { checkDirectories = false } = {}) {
 // Maintain writable workflows across application upgrades. Only an unchanged
 // bundled default may be replaced; user-edited files and extra files survive.
 function seedWorkflows(source, destination, baselineFile) {
+  migrateFastDraft(source, destination, baselineFile);
   let previous = {};
   if (fs.existsSync(baselineFile)) previous = JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
   const next = { ...previous };
@@ -67,6 +69,32 @@ function seedWorkflows(source, destination, baselineFile) {
     }
   }
   visit(source);
+
+  // Existing installations may have a user-edited registry.json. Preserve every
+  // existing row while merging only newly shipped IDs, so release workflows
+  // (including 3D and fast-draft entries) become available without replacing
+  // local imports, edits, or disabled/visibility state.
+  const registryRelative = 'registry.json';
+  const bundledRegistry = path.join(source, registryRelative);
+  const userRegistry = path.join(destination, registryRelative);
+  if (fs.existsSync(bundledRegistry) && fs.existsSync(userRegistry)) {
+    try {
+      const bundled = JSON.parse(fs.readFileSync(bundledRegistry, 'utf8'));
+      const current = JSON.parse(fs.readFileSync(userRegistry, 'utf8'));
+      if (Array.isArray(bundled.workflows) && Array.isArray(current.workflows)) {
+        const ids = new Set(current.workflows.map(item => item?.id).filter(Boolean));
+        const missing = bundled.workflows.filter(item => item?.id && !ids.has(item.id));
+        if (missing.length) {
+          current.workflows.push(...missing);
+          fs.writeFileSync(userRegistry, `${JSON.stringify(current, null, 2)}\n`);
+          conflicts.push('registry.json (merged new upstream workflow IDs; existing entries preserved)');
+        }
+      }
+    } catch {
+      conflicts.push('registry.json (not merged: invalid JSON; existing file preserved)');
+    }
+  }
+
   writeJson(baselineFile, next);
   return conflicts;
 }

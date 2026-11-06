@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { isLocalGatewayUrl, LOCAL_GATEWAY_BASE_URL, LOCAL_GATEWAY_CHANNEL_ID, LOCAL_GATEWAY_MODELS, LOCAL_GATEWAY_MODEL_VALUES, LOCAL_ONLY } from "@/constant/app-mode";
 import { normalizeProgressRingSkin, type ProgressRingSkinId } from "@/lib/canvas/progress-ring-skins";
+import { AGENT_API_FORMATS, normalizeAgentApiFormat, persistedPromptCloudConfig, type AgentApiFormat } from "@/lib/agent-cloud-config";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -33,12 +34,17 @@ export type ModelChannel = {
     models: ChannelModel[];
 };
 
+export const promptCloudApiFormats = AGENT_API_FORMATS;
+export type PromptCloudApiFormat = AgentApiFormat;
+
 export type PromptCloudApi = {
     id: string;
     name: string;
     baseUrl: string;
     apiKey: string;
     model: string;
+    apiFormat?: PromptCloudApiFormat;
+    rememberKey?: boolean;
 };
 
 export type AiConfig = {
@@ -68,6 +74,7 @@ export type AiConfig = {
     promptCloudBaseUrl?: string;
     promptCloudApiKey?: string;
     promptCloudModel?: string;
+    promptCloudApiFormat?: PromptCloudApiFormat;
     promptCloudApis?: PromptCloudApi[];
     promptCloudApiId?: string;
     frameMode?: "first" | "last" | "both";
@@ -173,6 +180,7 @@ const cloudDefaultConfig: AiConfig = {
     promptCloudBaseUrl: "",
     promptCloudApiKey: "",
     promptCloudModel: "",
+    promptCloudApiFormat: "openai",
     promptCloudApis: [],
     promptCloudApiId: "",
     systemPrompt: "",
@@ -383,8 +391,9 @@ export function suggestPromptCloudApiName(baseUrl: string, model: string) {
     return "云端 API";
 }
 
-function normalizePromptCloudModel(baseUrl: string, model: string) {
-    return /deepseek/i.test(baseUrl) && model === "deepseek-chat" ? "deepseek-flash" : model;
+function normalizePromptCloudModel(_baseUrl: string, model: string) {
+    // Preserve provider model IDs verbatim; names are provider-defined.
+    return model;
 }
 
 export function normalizePromptCloudApis(value: unknown): PromptCloudApi[] {
@@ -402,7 +411,7 @@ export function normalizePromptCloudApis(value: unknown): PromptCloudApi[] {
         let id = String(raw.id || "").trim() || nanoid();
         if (seen.has(id)) id = nanoid();
         seen.add(id);
-        apis.push({ id, name: explicitName || suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model });
+        apis.push({ id, name: explicitName || suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(raw.apiFormat), rememberKey: raw.rememberKey !== false });
     }
     return apis;
 }
@@ -415,6 +424,7 @@ function promptCloudMirror(apis: PromptCloudApi[], activeId: string) {
         promptCloudBaseUrl: active?.baseUrl || "",
         promptCloudApiKey: active?.apiKey || "",
         promptCloudModel: active?.model || "",
+        promptCloudApiFormat: normalizeAgentApiFormat(active?.apiFormat),
     };
 }
 
@@ -425,7 +435,7 @@ export function normalizePromptCloudConfig(config: AiConfig): AiConfig {
         const apiKey = String(config.promptCloudApiKey || "").trim();
         const model = normalizePromptCloudModel(baseUrl, String(config.promptCloudModel || "").trim());
         if (baseUrl || apiKey || model) {
-            apis.push({ id: nanoid(), name: suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model });
+            apis.push({ id: nanoid(), name: suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(config.promptCloudApiFormat) });
         }
     }
     const activeId = apis.some((api) => api.id === config.promptCloudApiId) ? String(config.promptCloudApiId) : apis[0]?.id || "";
@@ -464,6 +474,8 @@ export const useConfigStore = create<ConfigStore>()(
                     baseUrl: String(input.baseUrl || "").trim(),
                     apiKey: String(input.apiKey || "").trim(),
                     model: String(input.model || "").trim(),
+                    apiFormat: normalizeAgentApiFormat(input.apiFormat),
+                    rememberKey: input.rememberKey === true,
                 };
                 set((state) => {
                     const apis = [...(state.config.promptCloudApis || []), api];
@@ -483,6 +495,7 @@ export const useConfigStore = create<ConfigStore>()(
                                   baseUrl: String((patch.baseUrl ?? api.baseUrl) || "").trim(),
                                   apiKey: String((patch.apiKey ?? api.apiKey) || "").trim(),
                                   model: String((patch.model ?? api.model) || "").trim(),
+                                  apiFormat: normalizeAgentApiFormat(patch.apiFormat ?? api.apiFormat),
                               }
                             : api,
                     );
@@ -521,7 +534,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            partialize: (state) => ({ config: state.config, webdav: state.webdav }),
+            partialize: (state) => ({ config: persistedPromptCloudConfig(state.config), webdav: state.webdav }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
@@ -598,6 +611,7 @@ export const useConfigStore = create<ConfigStore>()(
                         promptCloudBaseUrl: normalizedCloud.promptCloudBaseUrl,
                         promptCloudApiKey: normalizedCloud.promptCloudApiKey,
                         promptCloudModel: normalizedCloud.promptCloudModel,
+                        promptCloudApiFormat: normalizedCloud.promptCloudApiFormat,
                         canvasImageCount: config.canvasImageCount || "3",
                         proxyEnabled: LOCAL_ONLY ? false : Boolean(config.proxyEnabled),
                         proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,

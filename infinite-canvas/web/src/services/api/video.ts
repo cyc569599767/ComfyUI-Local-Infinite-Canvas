@@ -5,7 +5,8 @@ import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { clampVideoSeconds, computeVideoSize, draftLongSideSize, draftShortSideSize, inferVideoRatio } from "@/lib/media-size";
 import { buildAcceleratedReference } from "@/lib/canvas/reference-acceleration";
-import { baseVideoWorkflowId, videoWorkflowId } from "@/lib/canvas/video-model-mode";
+import { isFinalVideoResult, isStillImageUrl, rejectStillImageBlob } from "@/lib/video-result";
+import { baseVideoWorkflowId, videoWorkflowId, resolveVideoWorkflowMode } from "@/lib/canvas/video-model-mode";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
@@ -102,7 +103,8 @@ function videoTaskFailed(message: string) {
 
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
-    const requestConfig = resolveModelRequestConfig(config, selectedModel);
+    const effectiveMode = resolveVideoWorkflowMode(config, selectedModel, config.videoMode);
+    const requestConfig = { ...resolveModelRequestConfig(config, selectedModel), videoMode: effectiveMode };
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
@@ -236,8 +238,12 @@ function videoPluginResult(result: unknown): VideoGenerationResult {
 }
 
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
-    if (result.blob) return uploadMediaFile(result.blob, "video");
+    if (result.blob) {
+        await assertVideoBlob(result.blob);
+        return uploadMediaFile(result.blob, "video");
+    }
     if (result.url) {
+        if (isStillImageUrl(result.url)) throw new Error(apiText("noPlayableVideo"));
         try {
             return await uploadMediaFile(result.url, "video");
         } catch {
@@ -348,7 +354,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
     try {
         const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
         const url = videoResultUrl(video);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url && isFinalVideoResult(video.status)) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (video.status === "completed") {
             const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
             await assertVideoBlob(content.data);
@@ -382,14 +388,18 @@ function resolvePreviewUrl(config: AiConfig, url: string) {
 }
 
 async function videoResultFromUrl(url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
+    if (isStillImageUrl(url)) throw new Error(apiText("noPlayableVideo"));
+    let blob: Blob;
     try {
-        const response = await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal });
-        await assertVideoBlob(response.data);
-        return { blob: response.data };
+        blob = (await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal })).data;
     } catch (error) {
         if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        // Some hosted services prohibit JS downloads but allow direct video playback.
         return { url, mimeType: "video/mp4" };
     }
+    // A received image/error is a validation failure, never a CORS URL fallback.
+    await assertVideoBlob(blob);
+    return { blob };
 }
 
 async function createGeminiVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
@@ -590,6 +600,7 @@ function statusMessage(status: number | undefined, fallback: string) {
 }
 
 async function assertVideoBlob(blob: Blob) {
+    await rejectStillImageBlob(blob, apiText("noPlayableVideo"));
     if (!blob.type.includes("json")) return;
     let payload: { code?: number; msg?: string; error?: { message?: string } };
     try {

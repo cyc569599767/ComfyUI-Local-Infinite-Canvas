@@ -85,6 +85,8 @@ export type CanvasMossLayout = {
 export type CanvasNodeMetadata = {
     content?: string;
     composerContent?: string;
+    // Prompt before connected text expansion, used to replay a generation once.
+    generationInputPrompt?: string;
     prompt?: string;
     status?: CanvasNodeStatus;
     errorDetails?: string;

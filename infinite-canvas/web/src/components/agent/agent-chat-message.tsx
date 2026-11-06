@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { App, Button, Image, Modal, Popover } from "antd";
-import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, Search, ShieldAlert, TerminalSquare, Wrench, XCircle } from "lucide-react";
+import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, RefreshCw, Search, ShieldAlert, TerminalSquare, Trash2, Wrench, XCircle } from "lucide-react";
 import { Streamdown, type LinkSafetyModalProps } from "streamdown";
 import { useTranslation } from "react-i18next";
 
@@ -101,17 +101,35 @@ export type AgentChatMessageItem = {
     /** Present while the message is actively streaming; cleared on completion. */
     streamId?: string;
     reasoning?: string;
+    turnId?: string;
+    promptText?: string;
+    hasAttachments?: boolean;
 };
 
-export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: { item: AgentChatMessageItem; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onRejectTool?: (id: string) => void; onApproveTool?: (id: string) => void }) {
+type AgentChatMessageProps = {
+    item: AgentChatMessageItem;
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    onRejectTool?: (id: string) => void;
+    onApproveTool?: (id: string) => void;
+    onRegenerate?: (id: string) => void;
+    onDelete?: (id: string) => void;
+    actionsDisabled?: boolean;
+    regenerateDisabled?: boolean;
+};
+
+export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool, onRegenerate, onDelete, actionsDisabled = false, regenerateDisabled = false }: AgentChatMessageProps) {
     const { t } = useTranslation();
     const copyText = useCopyText();
     const isUser = item.role === "user";
     const isSystem = item.role === "system";
+    const canManageMessage = isUser || item.role === "assistant";
+    const showMessageActions = canManageMessage && Boolean(onRegenerate || onDelete);
+    const messageActionsDisabled = actionsDisabled || Boolean(item.streamId);
+    const showCopy = (!isUser || showMessageActions) && !item.streamId && Boolean(item.text.trim());
     const color = item.role === "error" ? "#dc2626" : item.role === "tool" ? "#2563eb" : theme.node.text;
     if (isSystem) {
         return (
-            <div className="flex justify-center text-xs">
+            <div className="flex justify-center text-xs" data-agent-message-id={item.id} data-agent-message-role={item.role}>
                 <div className="max-w-[88%] px-3 py-1.5 text-center" style={{ color: theme.node.muted }}>
                     {item.text}
                     {item.meta ? <span className="ml-2 opacity-60">{item.meta}</span> : null}
@@ -124,7 +142,7 @@ export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: {
         return <AgentToolCard title={item.title || tr("toolCall")} text={item.text} detail={item.detail} theme={theme} />;
     }
     return (
-        <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+        <div className={`flex ${isUser ? "justify-end" : "justify-start"}`} data-agent-message-id={item.id} data-agent-message-role={item.role}>
             <div
                 className={isUser ? "min-w-0 max-w-[82%] py-1 text-right text-sm leading-6" : "min-w-0 w-full text-left text-sm leading-6"}
                 style={{ color }}
@@ -135,18 +153,49 @@ export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: {
                 ) : (
                     <Streamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={!!item.streamId}>{item.text}</Streamdown>
                 )}
-                {!isUser && !item.streamId && item.text.trim() ? (
-                    <div className="mt-1 flex justify-start">
-                        <button
-                            type="button"
-                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition hover:bg-black/5 dark:hover:bg-white/10"
-                            style={{ color: theme.node.muted }}
-                            onClick={() => copyText(item.text, t("common.copied"))}
-                            title={t("common.copy")}
-                        >
-                            <Copy className="size-3" />
-                            {t("common.copy")}
-                        </button>
+                {showCopy || showMessageActions ? (
+                    <div className={`mt-1 flex flex-wrap items-center gap-1 ${isUser ? "justify-end" : "justify-start"}`}>
+                        {showCopy ? (
+                            <button
+                                type="button"
+                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition hover:bg-black/5 dark:hover:bg-white/10"
+                                style={{ color: theme.node.muted }}
+                                onClick={() => copyText(item.text, t("common.copied"))}
+                                aria-label={t("common.copy")}
+                                title={t("common.copy")}
+                            >
+                                <Copy className="size-3" aria-hidden="true" />
+                                {t("common.copy")}
+                            </button>
+                        ) : null}
+                        {canManageMessage && onRegenerate ? (
+                            <button
+                                type="button"
+                                className="inline-flex min-h-6 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition enabled:hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:bg-white/10"
+                                style={{ color: theme.node.muted }}
+                                onClick={() => onRegenerate(item.id)}
+                                disabled={messageActionsDisabled || regenerateDisabled}
+                                aria-label={t("agent.message.regenerate")}
+                                title={t("agent.message.regenerate")}
+                            >
+                                <RefreshCw className="size-3" aria-hidden="true" />
+                                {t("agent.message.regenerate")}
+                            </button>
+                        ) : null}
+                        {canManageMessage && onDelete ? (
+                            <button
+                                type="button"
+                                className="inline-flex min-h-6 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition enabled:hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:bg-white/10"
+                                style={{ color: theme.node.muted }}
+                                onClick={() => onDelete(item.id)}
+                                disabled={messageActionsDisabled}
+                                aria-label={t("agent.message.deleteMessage")}
+                                title={t("agent.message.deleteMessage")}
+                            >
+                                <Trash2 className="size-3" aria-hidden="true" />
+                                {t("agent.message.deleteMessage")}
+                            </button>
+                        ) : null}
                     </div>
                 ) : null}
                 {item.attachments?.length ? <AgentMessageAttachments attachments={item.attachments} alignRight={isUser} /> : null}

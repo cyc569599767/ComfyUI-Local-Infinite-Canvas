@@ -286,7 +286,14 @@ export async function runImage({ entry, context, comfy, timeoutMs, pollIntervalM
 
 export async function runVideo({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
   const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, loraCatalog, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress });
-  const video = result.files.find((file) => /^video\//i.test(file.mimeType) || /\.(mp4|webm|mov)$/i.test(file.filename));
+  const video = result.files.find((file) => {
+    const bytes = file.buffer;
+    const imageBytes = bytes?.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) ||
+      (bytes?.[0] === 0xff && bytes?.[1] === 0xd8) || /^GIF8[79]a/.test(bytes?.subarray(0, 6).toString() || "") ||
+      (bytes?.subarray(0, 4).toString() === "RIFF" && bytes?.subarray(8, 12).toString() === "WEBP");
+    if (file.type === "temp" || /^image\//i.test(file.mimeType) || imageBytes) return false;
+    return /^video\//i.test(file.mimeType) || /\.(mp4|webm|mov|mkv)$/i.test(file.filename);
+  });
   if (!video) {
     throw new GenerationError("视频工作流没有返回视频文件（只拿到了图片/动图）", { status: 502, code: "no_video_output", details: result.files.map((file) => file.filename) });
   }

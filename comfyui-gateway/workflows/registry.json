@@ -3162,95 +3162,54 @@
       "name": "video-h3-fast",
       "type": "video",
       "label": "H3 极速草稿",
-      "description": "H3 极速草稿：FastH3 4 步采样，4B 文本编码器 + ClipProj 投影；用于快速预览，448/480 速度档。",
+      "description": "H3 极速草稿：本地 FL2VA Turbo 4 步、4B + ClipProj；支持文生及首/尾帧，448 长边、24fps，输出带音轨的 MP4。",
       "file": "h3-fast-draft.json",
       "bindings": {
         "prompt": {
-          "node": "10",
+          "node": "6",
           "input": "prompt"
         },
         "width": {
-          "node": "10",
+          "node": "6",
           "input": "width",
           "from": "size.width",
           "transform": "snap32",
-          "default": 256
+          "default": 448
         },
         "height": {
-          "node": "10",
+          "node": "6",
           "input": "height",
           "from": "size.height",
           "transform": "snap32",
-          "default": 448
+          "default": 256
         },
         "length": {
-          "node": "10",
+          "node": "6",
           "input": "length",
           "from": "seconds",
           "transform": "secondsToFrames17",
           "fps": 24,
-          "default": 243
+          "default": 124
         },
         "seed": {
-          "node": "13",
-          "input": "seed",
+          "node": "9",
+          "input": "noise_seed",
           "from": "params.seed",
           "transform": "int",
           "random": true
         },
         "fps": {
-          "node": "16",
-          "input": "fps",
+          "node": "12",
+          "input": "frame_rate",
           "default": 24
         },
-        "preset": {
-          "node": "1",
-          "input": "preset",
-          "from": "params.preset",
-          "default": "fp4-mlp-fused-fasth3-v2-4step-vsa20-kitchen034-b1"
-        },
-        "contract": {
-          "node": "1",
-          "input": "sampling_contract_override",
-          "from": "params.contract",
-          "default": "pdmd-2step"
-        },
-        "decoderMode": {
-          "node": "14",
-          "input": "decoder_mode",
-          "from": "params.decoderMode",
-          "default": "fused_ff_qk_rope"
-        },
-        "outputBackend": {
-          "node": "16",
-          "input": "output_backend",
-          "from": "params.outputBackend",
-          "default": "nvenc"
-        },
         "frames": {
-          "node": "10",
+          "node": "6",
           "input": "first_frame",
           "from": "image",
           "frameMode": true,
-          "firstInput": "first_frame",
-          "lastInput": "last_frame",
-          "max": 2,
-          "modes": [
-            "frames"
-          ]
-        },
-        "refs": {
-          "node": "10",
-          "input": "ref_image_",
-          "from": "image",
-          "array": true,
-          "min": 1,
-          "max": 9,
-          "inputPrefix": "ref_image_",
-          "indexBase": 1,
-          "modes": [
-            "reference"
-          ]
+          "modes": ["frames"],
+          "max": 2
         }
       },
       "defaults": {},

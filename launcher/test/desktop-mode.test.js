@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { comfySpawnEnvironment, desktopLocalUrl, isDesktopGatewayHealth, isDesktopCanvasConfig, isDesktopCanvasIndex } from "../desktop-protocol.mjs";
+import { comfyPythonArguments, comfySpawnEnvironment, desktopLocalUrl, isDesktopGatewayHealth, isDesktopCanvasConfig, isDesktopCanvasIndex, resolveDesktopComfyPlan } from "../desktop-protocol.mjs";
 
 const launcherDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const indexHtml = '<!doctype html><title>无界工作台</title><div id="root"></div><script type="module" src="/assets/index.js"></script><script src="/config.js"></script>';
@@ -247,7 +247,7 @@ test("strict identity rejects generic, malformed and mismatched service response
   assert.equal(isDesktopCanvasConfig(configJs("http://127.0.0.1:12345"), "http://127.0.0.1:12345"), true);
   assert.equal(isDesktopCanvasConfig(configJs("http://unrelated.test"), "http://127.0.0.1:12345"), false);
   const input = { ELECTRON_RUN_AS_NODE: "1", electron_run_as_node: "1", KEEP: "yes" };
-  assert.deepEqual(comfySpawnEnvironment(input), { KEEP: "yes" });
+  assert.deepEqual(comfySpawnEnvironment(input), { KEEP: "yes", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONUNBUFFERED: "1" });
   assert.equal(input.ELECTRON_RUN_AS_NODE, "1");
 });
 
@@ -305,24 +305,99 @@ test("connect-only missing Comfy degrades and hosts canvas; disconnect cleans on
   await fx.unchanged();
 });
 
-test("managed mode starts only a temporary mock Comfy script and removes Electron Node flag", async (t) => {
-  if (process.platform !== "win32") return t.skip("Legacy Comfy vendor script runner is Windows cmd.exe");
+test("desktop portable BAT preserves original Python/Comfy options and suppresses automatic browser launch", async (t) => {
+  const fx = await fixture(t);
+  const cwd = path.join(fx.root, "portable with spaces");
+  await fs.mkdir(cwd, { recursive: true });
+  const bat = path.join(cwd, "run_nvidia_gpu.bat");
+  const original = '@echo off\r\nrem Standard portable ComfyUI\r\n".\\python_embeded\\python.exe" -s "ComfyUI\\main.py" --windows-standalone-build --auto-launch --reserve-vram 2\r\necho If ComfyUI did not start, check the GPU driver.\r\npause\r\n';
+  await fs.writeFile(bat, original);
+  const install = { dir: path.join(cwd, "ComfyUI"), pythonExe: path.join(cwd, "python_embeded", "python.exe"),
+    mainPy: path.join(cwd, "ComfyUI", "main.py"), scripts: [bat] };
+  const plan = resolveDesktopComfyPlan(install, { kind: "script", file: bat, cwd });
+  assert.equal(plan.kind, "python"); assert.equal(plan.cwd, cwd);
+  const argv = comfyPythonArguments(plan, 18188, true);
+  assert.deepEqual(argv, ["-s", install.mainPy, "--windows-standalone-build", "--auto-launch", "--reserve-vram", "2",
+    "--port", "18188", "--listen", "127.0.0.1", "--disable-auto-launch"]);
+  assert.equal(await fs.readFile(bat, "utf8"), original, "installed BAT must stay unchanged");
+  assert.equal(comfyPythonArguments({ mainPy: install.mainPy }, 8188).includes("--disable-auto-launch"), false, "legacy CLI behavior stays unchanged");
+  assert.equal(comfyPythonArguments({ mainPy: install.mainPy }, 8188, true).at(-1), "--disable-auto-launch");
+});
+
+test("desktop launch refuses unknown BAT environment/browser side effects instead of bypassing setup", async (t) => {
+  const fx = await fixture(t);
+  const bat = path.join(fx.root, "vendor.bat");
+  const install = { dir: fx.root, pythonExe: path.join(fx.root, "python.exe"), mainPy: path.join(fx.root, "main.py"), scripts: [bat] };
+  for (const content of [
+    'set CUDA_VISIBLE_DEVICES=0\r\npython.exe main.py\r\n',
+    'python.exe main.py\r\nstart http://127.0.0.1:8188\r\n',
+    'rem %*\r\necho %*\r\nnode mock.mjs\r\n',
+    'python.exe -c "print(1)" main.py\r\n',
+    'python.exe main.py & start http://127.0.0.1:8188\r\n',
+    'python.exe main.py -- --auto-launch\r\n',
+  ]) {
+    await fs.writeFile(bat, content);
+    assert.throws(() => resolveDesktopComfyPlan(install, {kind:"script", file:bat, cwd:fx.root}), /启动脚本/);
+  }
+  assert.throws(() => resolveDesktopComfyPlan({}, {kind:"desktop", file:"ComfyUI.exe"}), /无浏览器/);
+});
+
+test("desktop portable BAT handles controlled dp0 paths and forwarded args without executing BAT", async (t) => {
+  const fx = await fixture(t); const bat = path.join(fx.root, "standard.bat");
+  await fs.writeFile(bat, '@echo off\r\n"%~dp0python.exe" -u "%~dp0main.py" --windows-standalone-build %*\r\n');
+  const install = {pythonExe:path.join(fx.root,"python.exe"),mainPy:path.join(fx.root,"main.py"),dir:fx.root};
+  const plan = resolveDesktopComfyPlan(install, {kind:"script",file:bat,cwd:fx.root});
+  assert.deepEqual(plan.pythonArgs, ["-u"]);
+  assert.deepEqual(plan.args, ["--windows-standalone-build"]);
+  assert.equal(comfyPythonArguments(plan, 8188, true).at(-1), "--disable-auto-launch");
+});
+
+test("managed mode leaves unsupported browser-opening vendor scripts untouched and does not run them", async (t) => {
   const fx = await fixture(t);
   const comfyDir = fx.config.comfyDir;
   await fs.mkdir(comfyDir, { recursive: true });
-  await fs.writeFile(path.join(comfyDir, "mock-comfy.mjs"), `
-import http from 'node:http';
-import fs from 'node:fs';
-fs.writeFileSync('comfy-env.json', JSON.stringify({ electronFlag: process.env.ELECTRON_RUN_AS_NODE ?? null }));
-http.createServer((req,res) => { res.setHeader('content-type','application/json'); res.end(${JSON.stringify(JSON.stringify(stats))}); }).listen(${new URL(fx.config.comfyUrl).port},'127.0.0.1');
-`);
-  await fs.writeFile(path.join(comfyDir, "run_fixture.bat"), `@echo off\r\nrem main.py -- fixture marker only\r\n"${process.execPath}" "${path.join(comfyDir, "mock-comfy.mjs")}"\r\n`);
+  const marker = path.join(comfyDir, "must-not-run.txt");
+  const original = `@echo off\r\nrem main.py -- fixture marker only\r\necho browser-side-effect > "${marker}"\r\n`;
+  await fs.writeFile(path.join(comfyDir, "run_fixture.bat"), original);
   const run = startLauncher(t, fx, ["--desktop"]);
-  const { services } = await run.message("desktop:ready");
-  assert.deepEqual(services.comfy, { url: fx.config.comfyUrl, mode: "started" });
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(comfyDir, "comfy-env.json"), "utf8")), { electronFlag: null });
+  const {services} = await run.message("desktop:ready");
+  assert.deepEqual(services.comfy, {url:fx.config.comfyUrl, mode:"missing"});
+  assert.ok(run.messages.some(message => /未自动启动 ComfyUI/.test(message.message || "")));
+  await assert.rejects(fs.access(marker), {code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(comfyDir,"run_fixture.bat"),"utf8"), original);
   await run.stop();
-  await closed(services.comfy.url); await closed(services.gateway.url); await closed(services.canvas.url);
+  await closed(services.gateway.url); await closed(services.canvas.url);
+  await fx.unchanged();
+});
+
+test("desktop Python output is UTF-8 and a crashing Comfy process does not take canvas/gateway down", async (t) => {
+  const python = process.env.DESKTOP_TEST_PYTHON;
+  if (!python) return t.skip("Set DESKTOP_TEST_PYTHON to exercise real Python process startup");
+  const fx = await fixture(t, { comfyStartTimeoutSec: 3 });
+  const comfyDir = fx.config.comfyDir;
+  await fs.mkdir(comfyDir, { recursive: true });
+  const pythonCode = `import sys, json, faulthandler\nfaulthandler.enable(file=sys.stderr)\nprint('Unicode startup: \\u4e2d\\u6587 \\u2705', flush=True)\nprint('fixture startup error: \\u4e2d\\u6587 \\u2705', file=sys.stderr, flush=True)\nopen('comfy-stdio.json','w',encoding='utf-8').write(json.dumps({'stdout':sys.stdout.encoding,'stderr':sys.stderr.encoding,'argv':sys.argv}))\nsys.exit(7)\n`;
+  await fs.writeFile(path.join(comfyDir, "main.py"), pythonCode);
+  await fs.writeFile(path.join(comfyDir, "run_fixture.bat"), `@echo off\r\n"${python}" -s "${path.join(comfyDir, "main.py")}" --windows-standalone-build\r\n`);
+  // Discovery selects this wrapper as Python, while its -c probe reports Python 3.
+  // Use a dedicated launcher entry to bind this fixture's external interpreter.
+  let launcher = await fs.readFile(fx.entry, "utf8");
+  launcher = launcher.replace('const pythonCandidates = [', `const pythonCandidates = [${JSON.stringify(python)},`);
+  await fs.writeFile(fx.entry, launcher);
+  const run = startLauncher(t, fx, ["--desktop"], { PYTHONIOENCODING: "gbk", PYTHONUTF8: "0" });
+  const { services } = await run.message("desktop:ready");
+  assert.equal(services.comfy.mode, "missing");
+  assert.equal(services.gateway.mode, "started"); assert.equal(services.canvas.mode, "started");
+  assert.equal((await fetch(services.canvas.url)).status, 200);
+  assert.equal((await fetch(`${services.gateway.url}/health`)).status, 200);
+  const captured = JSON.parse(await fs.readFile(path.join(comfyDir, "comfy-stdio.json"), "utf8"));
+  assert.equal(captured.stdout.toLowerCase(), "utf-8"); assert.equal(captured.stderr.toLowerCase(), "utf-8");
+  assert.ok(captured.argv.includes("--disable-auto-launch"));
+  assert.ok(run.messages.some(message => message.message?.includes("Unicode startup: 中文 ✅")));
+  assert.ok(run.messages.some(message => /code=7/.test(message.message || "")));
+  assert.ok(run.messages.some(message => /保留画布与网关/.test(message.message || "")));
+  assert.equal(run.messages.some(message => message.type === "desktop:error"), false);
+  await run.stop(); await closed(services.canvas.url); await closed(services.gateway.url);
   await fx.unchanged();
 });
 

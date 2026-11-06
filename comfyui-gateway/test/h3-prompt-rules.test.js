@@ -24,7 +24,7 @@ test("H3 skill documents the local cfg=1 prompt rules", () => {
 
 test("local H3 enhance template carries the same rules in its system prompt", () => {
   const workflow = JSON.parse(fs.readFileSync(path.join(root, "prompts", "h3-prompt-enhance.json"), "utf8"));
-  const systemPrompt = workflow["3"]?.inputs?.["系统提示词"];
+  const systemPrompt = workflow["3"]?.inputs?.system_prompt;
   assert.equal(typeof systemPrompt, "string");
   for (const needle of ["cfg=1", "正向事实", "<Picture 1>", "I2VA/FL2VA/L2VA/Ref2VA", "locked-off shot", "cinematic", "不做全局替换"]) {
     assert.ok(systemPrompt.includes(needle), `system prompt missing: ${needle}`);

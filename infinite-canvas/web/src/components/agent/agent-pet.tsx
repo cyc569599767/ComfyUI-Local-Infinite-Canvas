@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { AgentCloudChat } from "./agent-cloud-chat";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { AGENT_PANEL_POSITION_KEY, agentPanelSize, anchorAgentPanelPosition, clampAgentPanelPosition, parseAgentPanelPosition, type AgentPanelPosition } from "@/lib/agent-panel-position";
 import { useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
 import { activePromptCloudApi, useConfigStore } from "@/stores/use-config-store";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -16,14 +17,15 @@ const PET_ART: Record<string, { idle: string; busy: string; label: string }> = {
 };
 const PET_SIZE = 112;
 const PET_MARGIN = 8;
-const PANEL_GAP = 12;
 const POSITION_KEY = "canvas-agent-pet-position";
+const PANEL_INTERACTIVE_SELECTOR = "button, a, input, select, textarea, [role='button'], [role='combobox'], [contenteditable]";
 
 type PetPosition = { x: number; y: number };
+type PanelDrag = { pointerId: number; startX: number; startY: number; origin: AgentPanelPosition; moved: boolean };
 
 function viewportSize() {
-    const width = typeof window === "undefined" ? 1280 : window.innerWidth || 1280;
-    const height = typeof window === "undefined" ? 720 : window.innerHeight || 720;
+    const width = typeof window === "undefined" ? 1280 : window.innerWidth;
+    const height = typeof window === "undefined" ? 720 : window.innerHeight;
     return { width, height };
 }
 
@@ -44,6 +46,24 @@ function initialPosition(): PetPosition {
     return { x: viewport.width - PET_SIZE - 16, y: viewport.height - PET_SIZE - 16 };
 }
 
+function initialPanelPosition(): AgentPanelPosition | null {
+    if (typeof window === "undefined") return null;
+    try {
+        const saved = parseAgentPanelPosition(window.localStorage.getItem(AGENT_PANEL_POSITION_KEY));
+        return saved ? clampAgentPanelPosition(saved, viewportSize()) : null;
+    } catch {
+        return null;
+    }
+}
+
+function persistPanelPosition(position: AgentPanelPosition) {
+    try {
+        window.localStorage.setItem(AGENT_PANEL_POSITION_KEY, JSON.stringify(position));
+    } catch {
+        // Private browsing, disabled storage, or a full quota must not break dragging.
+    }
+}
+
 export function AgentPet() {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -53,6 +73,12 @@ export function AgentPet() {
     const [broken, setBroken] = useState(false);
     const [position, setPositionState] = useState<PetPosition>(initialPosition);
     const [viewport, setViewport] = useState(viewportSize);
+    const [panelPosition, setPanelPositionState] = useState<AgentPanelPosition | null>(initialPanelPosition);
+    const panelPositionRef = useRef(panelPosition);
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    const panelDragRef = useRef<PanelDrag | null>(null);
+    const panelMovedRef = useRef(false);
+    const [panelDragging, setPanelDragging] = useState(false);
     const positionRef = useRef(position);
     const wrapRef = useRef<HTMLDivElement | null>(null);
     const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
@@ -87,6 +113,7 @@ export function AgentPet() {
     useEffect(() => {
         if (!panelOpen) return;
         const onPointerDown = (event: PointerEvent) => {
+            if (panelDragRef.current) return;
             const target = event.target;
             if (!(target instanceof Element)) return;
             if (wrapRef.current?.contains(target)) return;
@@ -103,17 +130,40 @@ export function AgentPet() {
             const next = clampPosition(positionRef.current, nextViewport);
             positionRef.current = next;
             setPositionState(next);
+            if (panelPositionRef.current) {
+                const nextPanel = clampAgentPanelPosition(panelPositionRef.current, nextViewport);
+                panelPositionRef.current = nextPanel;
+                setPanelPositionState(nextPanel);
+                persistPanelPosition(nextPanel);
+            }
+            // A resize ends the current gesture so its old origin cannot undo the reclamp.
+            const drag = panelDragRef.current;
+            panelDragRef.current = null;
+            setPanelDragging(false);
+            if (drag && panelRef.current?.hasPointerCapture(drag.pointerId)) panelRef.current.releasePointerCapture(drag.pointerId);
         };
         window.addEventListener("resize", onResize);
         return () => window.removeEventListener("resize", onResize);
     }, []);
+
+    useEffect(() => {
+        if (panelOpen) return;
+        const drag = panelDragRef.current;
+        panelDragRef.current = null;
+        panelMovedRef.current = false;
+        setPanelDragging(false);
+        if (drag?.moved && panelPositionRef.current) persistPanelPosition(panelPositionRef.current);
+        if (drag && panelRef.current?.hasPointerCapture(drag.pointerId)) panelRef.current.releasePointerCapture(drag.pointerId);
+    }, [panelOpen]);
 
     const setPosition = (next: PetPosition) => {
         positionRef.current = next;
         setPositionState(next);
     };
     const persistPosition = () => {
-        localStorage.setItem(POSITION_KEY, JSON.stringify(positionRef.current));
+        try {
+            localStorage.setItem(POSITION_KEY, JSON.stringify(positionRef.current));
+        } catch {}
     };
 
     const handleClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -165,13 +215,57 @@ export function AgentPet() {
         setDragging(false);
     };
 
-    const panelWidth = Math.min(460, Math.max(240, viewport.width - 32));
-    const spaceAbove = position.y - PANEL_GAP - PET_MARGIN;
-    const spaceBelow = viewport.height - position.y - PET_SIZE - PANEL_GAP - PET_MARGIN;
-    const placeAbove = spaceAbove >= spaceBelow;
-    const panelHeight = Math.min(680, Math.max(240, Math.max(spaceAbove, spaceBelow)));
-    const panelLeft = Math.min(Math.max(PET_MARGIN, position.x + PET_SIZE - panelWidth), Math.max(PET_MARGIN, viewport.width - panelWidth - PET_MARGIN));
-    const panelTop = placeAbove ? Math.max(PET_MARGIN, position.y - PANEL_GAP - panelHeight) : Math.min(position.y + PET_SIZE + PANEL_GAP, Math.max(PET_MARGIN, viewport.height - panelHeight - PET_MARGIN));
+    const handlePanelPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+        if (panelDragRef.current || event.button !== 0 || !event.isPrimary) return;
+        const target = event.target;
+        if (!(target instanceof Element) || !target.closest("[data-agent-drag-handle]") || target.closest(PANEL_INTERACTIVE_SELECTOR)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        const origin = panelPositionRef.current ?? anchorAgentPanelPosition(positionRef.current, viewportSize());
+        panelDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin, moved: false };
+        panelMovedRef.current = false;
+    };
+    const handlePanelPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+        const drag = panelDragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+        drag.moved = true;
+        panelMovedRef.current = true;
+        setPanelDragging(true);
+        event.preventDefault();
+        event.stopPropagation();
+        const next = clampAgentPanelPosition({ x: drag.origin.x + dx, y: drag.origin.y + dy }, viewportSize());
+        panelPositionRef.current = next;
+        setPanelPositionState(next);
+    };
+    const finishPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+        const drag = panelDragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        panelDragRef.current = null;
+        setPanelDragging(false);
+        event.stopPropagation();
+        if (drag.moved && panelPositionRef.current) {
+            const next = clampAgentPanelPosition(panelPositionRef.current, viewportSize());
+            panelPositionRef.current = next;
+            setPanelPositionState(next);
+            persistPanelPosition(next);
+        }
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    };
+    const handlePanelClickCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
+        if (!panelMovedRef.current || event.detail === 0) return;
+        panelMovedRef.current = false;
+        event.preventDefault();
+        event.stopPropagation();
+    };
+
+    const { width: panelWidth, height: panelHeight } = agentPanelSize(viewport);
+    const { x: panelLeft, y: panelTop } = panelPosition
+        ? clampAgentPanelPosition(panelPosition, viewport)
+        : anchorAgentPanelPosition(position, viewport);
     const bubbleAbove = position.y > 84;
     const art = pet && !broken ? (busy ? pet.busy : pet.idle) : "";
     const statusColor = connected ? "#16a34a" : busy ? "#d97706" : theme.node.muted;
@@ -195,8 +289,17 @@ export function AgentPet() {
                 </div>
             ) : null}
             <div
-                className="fixed flex flex-col overflow-hidden rounded-[26px] border shadow-2xl backdrop-blur"
-                style={{ display: panelOpen ? "flex" : "none", left: panelLeft, top: panelTop, width: panelWidth, height: panelHeight, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                ref={panelRef}
+                className="fixed z-10 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[26px] border shadow-2xl backdrop-blur"
+                style={{ display: panelOpen ? "flex" : "none", left: panelLeft, top: panelTop, width: panelWidth, height: panelHeight, borderWidth: panelWidth < 2 || panelHeight < 2 ? 0 : undefined, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, userSelect: panelDragging ? "none" : undefined, cursor: panelDragging ? "grabbing" : undefined }}
+                onPointerDownCapture={() => { if (!panelDragRef.current) panelMovedRef.current = false; }}
+                onPointerDown={handlePanelPointerDown}
+                onPointerMove={handlePanelPointerMove}
+                onPointerUp={finishPanelDrag}
+                onPointerCancel={finishPanelDrag}
+                onLostPointerCapture={finishPanelDrag}
+                onClickCapture={handlePanelClickCapture}
+                data-agent-panel
                 data-canvas-shortcuts-ignore
             >
                 <AgentCloudChat />

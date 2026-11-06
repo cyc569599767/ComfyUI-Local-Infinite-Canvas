@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createPromptOptimizer } from "../src/prompt-optimizer.js";
+import h3ObjectInfo from "./fixtures/h3-prompt-object-info.json" with { type: "json" };
 
 process.env.ALLOW_PRIVATE_CLOUD = "1";
 
@@ -42,6 +43,7 @@ test("local H3 optimize keeps all full-reference sections", async () => {
     const optimizer = createPromptOptimizer({
         config: { rootDir },
         comfy: {
+            objectInfo: async () => structuredClone(h3ObjectInfo),
             submit: async () => ({ promptId: "test-prompt" }),
             history: async () => ({ status: { completed: true }, outputs: { "4": { text: [REF_OUTPUT] } } }),
         },
@@ -284,6 +286,7 @@ test("local H3 passes the English language directive to the workflow", async () 
     const optimizer = createPromptOptimizer({
         config: { rootDir },
         comfy: {
+            objectInfo: async () => structuredClone(h3ObjectInfo),
             submit: async (workflow) => {
                 submitted = workflow;
                 return { promptId: "test-prompt" };
@@ -300,8 +303,8 @@ test("local H3 passes the English language directive to the workflow", async () 
         engine: "local",
     });
     assert.ok(submitted, "workflow was not submitted");
-    assert.match(submitted["3"].inputs["系统提示词"], /Write every field body in English/);
-    assert.match(submitted["3"].inputs["系统提示词"], /Chinese dialogue stays Chinese/);
+    assert.match(submitted["3"].inputs.system_prompt, /Write every field body in English/);
+    assert.match(submitted["3"].inputs.system_prompt, /Chinese dialogue stays Chinese/);
 });
 
 
@@ -398,6 +401,7 @@ test("local caption applies explicit model aliases before submitting", async () 
     const optimizer = createPromptOptimizer({
         config: { rootDir },
         comfy: {
+            objectInfo: async () => structuredClone(h3ObjectInfo),
             submit: async (workflow) => {
                 submitted = workflow;
                 return { promptId: "caption-alias" };
@@ -426,6 +430,7 @@ test("local image optimize applies aliases for the Qwen PE loader inputs", async
     const optimizer = createPromptOptimizer({
         config: { rootDir },
         comfy: {
+            objectInfo: async () => structuredClone(h3ObjectInfo),
             submit: async (workflow) => {
                 submitted = workflow;
                 return { promptId: "image-alias" };
@@ -454,6 +459,7 @@ test("templates stay untouched when no alias function is provided", async () => 
     const optimizer = createPromptOptimizer({
         config: { rootDir },
         comfy: {
+            objectInfo: async () => structuredClone(h3ObjectInfo),
             submit: async (workflow) => {
                 submitted = workflow;
                 return { promptId: "no-alias" };

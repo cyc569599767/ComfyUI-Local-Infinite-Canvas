@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import type { AgentTransport } from "@/lib/agent-cloud-config";
 
 export type DevAgentStatus = "idle" | "checking" | "connected" | "error";
 
@@ -9,6 +10,10 @@ export const PI_AGENT_DEV_MODEL = "openclaw/canvas-dev";
 
 type DevAgentStore = {
     enabled: boolean;
+    transport: AgentTransport;
+    localBaseUrl: string;
+    setTransport: (transport: AgentTransport) => void;
+    setLocalBaseUrl: (localBaseUrl: string) => void;
     status: DevAgentStatus;
     error: string;
     setEnabled: (enabled: boolean) => void;
@@ -19,6 +24,10 @@ export const useDevAgentStore = create<DevAgentStore>()(
     persist(
         (set) => ({
             enabled: false,
+            transport: "cloud",
+            localBaseUrl: PI_AGENT_BASE_URL,
+            setTransport: (transport) => set({ transport, status: "idle", error: "" }),
+            setLocalBaseUrl: (localBaseUrl) => set({ localBaseUrl, status: "idle", error: "" }),
             status: "idle",
             error: "",
             setEnabled: (enabled) => set({ enabled }),
@@ -26,7 +35,7 @@ export const useDevAgentStore = create<DevAgentStore>()(
         }),
         {
             name: "infinite-canvas:dev_agent_store",
-            partialize: (state) => ({ enabled: state.enabled }),
+            partialize: (state) => ({ enabled: state.enabled, transport: state.transport, localBaseUrl: state.localBaseUrl }),
         },
     ),
 );

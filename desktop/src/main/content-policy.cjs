@@ -29,6 +29,14 @@ function isExternalLink(url) {
 // Dedicated Electron session only: acknowledge legacy browser lifecycle traffic without
 // touching the gateway's global browser session tracker. Cancelling these requests would
 // trigger the canvas's gateway-down detector and its automatic reload loop.
+function resolveGatewayAssetUrl(value, gatewayUrl) {
+  if (typeof value !== 'string' || !value) return value;
+  try {
+    const resolved = new URL(value, `${gatewayUrl.replace(/\/+$/, '')}/`);
+    return resolved.origin === gatewayUrl ? resolved.toString() : value;
+  } catch { return value; }
+}
+
 function sessionResponse(request, gatewayUrl, canvasUrl) {
   if (!isSessionRequest(request.url, gatewayUrl) || !['POST', 'OPTIONS'].includes(request.method)) return null;
   const origin = request.headers.get('origin');
@@ -43,4 +51,4 @@ function sessionResponse(request, gatewayUrl, canvasUrl) {
     { status: request.method === 'OPTIONS' ? 204 : 200, headers });
 }
 
-module.exports = { originOf, isSessionRequest, isAllowedNavigation, isExternalLink, sessionResponse };
+module.exports = { originOf, isSessionRequest, isAllowedNavigation, isExternalLink, resolveGatewayAssetUrl, sessionResponse };

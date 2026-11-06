@@ -8,6 +8,8 @@ export const MODEL_LOADER_SPECS = [
     { classType: "SeedVR2LoadVAEModel", input: "model", key: "seedvr2Vae", dirs: ["upscale_models"] },
     { classType: "CLIPLoader", input: "clip_name", key: "clips", dirs: ["text_encoders"] },
     { classType: "ClipProjApply", input: "projection", key: "clipProjections", dirs: ["clip_projections"] },
+    { classType: "ClipProjLoader", input: "clip_name", key: "clips", dirs: ["text_encoders"] },
+    { classType: "ClipProjLoader", input: "projection", key: "clipProjections", dirs: ["clip_projections"] },
     { classType: "VAELoader", input: "vae_name", key: "vaes", dirs: ["vae"] },
     { classType: "LoraLoader", input: "lora_name", key: "loras", dirs: ["loras"] },
     { classType: "LoraLoaderModelOnly", input: "lora_name", key: "lorasModelOnly", dirs: ["loras"] },
