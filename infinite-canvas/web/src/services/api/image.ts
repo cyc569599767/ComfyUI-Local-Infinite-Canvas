@@ -1197,10 +1197,10 @@ export async function requestImagePromptOptimize(
     }
 }
 
-export type ImageCaptionEngine = "qwen35" | "florence" | "cloud";
-export type ImageCaptionResult = { prompt: string; engine?: ImageCaptionEngine; promptId?: string; elapsedMs?: number };
+export type ImageCaptionEngine = "qwen35" | "florence" | "kvmem" | "cloud";
+export type ImageCaptionResult = { prompt: string; engine?: ImageCaptionEngine; promptId?: string; elapsedMs?: number; released?: boolean; truncated?: boolean };
 
-export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; cloud?: { baseUrl: string; apiKey: string; model: string; apiFormat?: string } }, options?: RequestOptions): Promise<ImageCaptionResult> {
+export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; timeoutMs?: number; cloud?: { baseUrl: string; apiKey: string; model: string; apiFormat?: string } }, options?: RequestOptions): Promise<ImageCaptionResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const root = localGatewayRoot(requestConfig.baseUrl);
     if (!root) throw new Error(apiText("promptOptimizeLocalOnly"));
@@ -1220,7 +1220,7 @@ export async function requestImageCaption(config: AiConfig, params: { images: Re
         const response = await axios.post<ImageCaptionResult>(`${root}/v1/prompts/caption`, formData, {
             headers: aiHeaders(requestConfig),
             signal: options?.signal,
-            timeout: 240000,
+            timeout: Math.min(1230000, Math.max(240000, Number(params.timeoutMs) || 240000)),
         });
         if (!response.data?.prompt) throw new Error(apiText("promptOptimizeEmpty"));
         return response.data;

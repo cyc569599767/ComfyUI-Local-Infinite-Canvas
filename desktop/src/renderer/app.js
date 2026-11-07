@@ -58,7 +58,11 @@ $('settings-form').addEventListener('submit', async (event) => {
     if (!config) throw new Error('当前模式不支持设置');
     await window.desktop.saveConfig({ ...config, comfyUrl: $('setting-comfy-url').value,
       comfyDir: $('setting-comfy-dir').value, canvasPort: Number($('setting-canvas-port').value),
-      gatewayPort: Number($('setting-gateway-port').value) });
+      gatewayPort: Number($('setting-gateway-port').value),
+      kvmemEnabled: $('setting-kvmem-enabled').checked,
+      kvmemInstallDir: $('setting-kvmem-install-dir').value,
+      kvmemModelPath: $('setting-kvmem-model-path').value,
+      kvmemGpuDevice: $('setting-kvmem-gpu-device').value });
     $('settings-result').textContent = '已保存。完成当前生成后点击「重启应用」生效。';
   } catch (error) { $('settings-result').textContent = error.message; }
 });
@@ -66,6 +70,18 @@ $('choose-comfy').addEventListener('click', () => perform(async () => {
   const selected = await window.desktop.chooseComfy();
   if (selected) $('setting-comfy-dir').value = selected;
 }));
+// Older test/preview bridges may not provide KVMem pickers. Never invoke a
+// picker during initialization or settings save: paths require a user click.
+for (const [suffix, kind] of [['install-dir', 'installDir'], ['model-path', 'modelPath']]) {
+  const choose = $(`choose-kvmem-${suffix}`);
+  choose.disabled = typeof window.desktop.chooseKvmem !== 'function';
+  choose.addEventListener('click', () => perform(async () => {
+    if (typeof window.desktop.chooseKvmem !== 'function') return;
+    const selected = await window.desktop.chooseKvmem(kind);
+    if (selected) $(`setting-kvmem-${suffix}`).value = selected;
+  }));
+  $(`clear-kvmem-${suffix}`).addEventListener('click', () => { $(`setting-kvmem-${suffix}`).value = ''; });
+}
 $('open-data').addEventListener('click', () => perform(() => window.desktop.openData()));
 $('restart-app').addEventListener('click', () => perform(() => window.desktop.restart()));
 (async () => {
@@ -79,6 +95,10 @@ $('restart-app').addEventListener('click', () => perform(() => window.desktop.re
       $('setting-comfy-dir').value = config.comfyDir;
       $('setting-canvas-port').value = config.canvasPort;
       $('setting-gateway-port').value = config.gatewayPort;
+      $('setting-kvmem-enabled').checked = config.kvmemEnabled ?? true;
+      $('setting-kvmem-install-dir').value = config.kvmemInstallDir ?? '';
+      $('setting-kvmem-model-path').value = config.kvmemModelPath ?? '';
+      $('setting-kvmem-gpu-device').value = config.kvmemGpuDevice ?? '0';
       $('data-location').textContent = `用户数据：${settings.userData}`;
       if (settings.workflowConflicts?.length) $('settings-result').textContent = `升级保留了用户修改的工作流，需手动合并新版：${settings.workflowConflicts.join(', ')}`;
     }

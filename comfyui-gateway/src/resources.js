@@ -473,7 +473,7 @@ export function selectPipWheelForRuntime(resource, runtime) {
     return null;
 }
 
-export function createResourceManager({ config, setup, registry, logger, workflowVisibility = null, mainModels = null, hardware: hardwareOverride = null } = {}) {
+export function createResourceManager({ config, setup, registry, logger, workflowVisibility = null, mainModels = null, hardware: hardwareOverride = null, localCaptionCapability = null } = {}) {
     const indexPath = path.join(config.rootDir, "resources", "index.json");
     const indexCachePath = path.join(config.dataDir, "resources-index.json");
     const lockPath = path.join(config.dataDir, "resource-lock.json");
@@ -1406,7 +1406,9 @@ export function createResourceManager({ config, setup, registry, logger, workflo
                 reasons,
             };
         }
-        return { packId: "prompt-local", comfyReachable: reachable, engines };
+        const kvmem = localCaptionCapability?.();
+        if (kvmem) engines.kvmem = kvmem;
+        return { packId: "prompt-local", comfyReachable: reachable, engines, captionBackend: config.kvmem?.enabled ? "kvmem" : "comfy", captionTimeoutMs: config.kvmem?.enabled ? Math.min(1230000, config.kvmem.startupTimeoutMs + config.kvmem.requestTimeoutMs + 30000) : 240000 };
     }
 
     function status() {

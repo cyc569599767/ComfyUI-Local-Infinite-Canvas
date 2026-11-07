@@ -371,7 +371,7 @@ async function cloudOptimizeImage({ prompt, mode, language, imageCount = 0, clou
   return { prompt: result, mode, provider: "cloud", model, elapsedMs };
 }
 
-export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, userModelAliasFor = null, loaderSpecs = undefined }) {
+export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, userModelAliasFor = null, loaderSpecs = undefined, localCaption = null }) {
   // 反推/优化提交的是打包模板，模型名写死在模板里；必须和出图路径一样套别名。
   // loaderSpecs 允许传 getter：网关启动扫描可能还没完成，不能拿旧快照。
   function withAliases(workflow) {
@@ -617,7 +617,18 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
     }
   }
 
-  async function captionImage({ uploadedImages = [], cloudImages = [], language = "zh", instruction = "", engine = "qwen35", cloud = {}, signal }) {
+  async function captionImage({ uploadedImages = [], cloudImages = [], localImages = [], language = "zh", instruction = "", engine = "qwen35", cloud = {}, signal }) {
+    const selectedEngine = String(engine || "qwen35").toLowerCase();
+    if (!["qwen35", "florence", "kvmem", "cloud"].includes(selectedEngine)) throw new PromptOptimizeError("不支持的反推引擎", { status: 400, code: "invalid_caption_engine" });
+    if (selectedEngine !== "cloud" && localCaption) {
+      if (localImages.length !== 1) throw new PromptOptimizeError("KVMem 反推需要一张图片", { status: 400, code: "missing_reference_image" });
+      const english = String(language || "zh").toLowerCase() === "en";
+      const result = await localCaption({ imageDataUrl: localImages[0], systemPrompt: String(instruction || "").trim() || (english ? CAPTION_SYSTEM_EN : CAPTION_SYSTEM_ZH), userPrompt: english ? CAPTION_USER_EN : CAPTION_USER_ZH, signal });
+      const prompt = sanitizeCaption(result.prompt);
+      if (!prompt) throw new PromptOptimizeError("KVMem 没有返回有效提示词", { status: 502, code: "no_caption_output" });
+      return { ...result, prompt, engine: "kvmem" };
+    }
+    if (selectedEngine === "kvmem") throw new PromptOptimizeError("请先在桌面服务面板配置并启用 KVMem 本地反推", { status: 400, code: "kvmem_not_configured" });
     if (String(engine || "").toLowerCase() === "cloud") {
       const startedCloud = Date.now();
       if (!cloudImages.length) throw new PromptOptimizeError("云端反推需要 1 张图片", { status: 400, code: "missing_reference_image" });

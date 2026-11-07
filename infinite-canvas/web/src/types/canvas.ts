@@ -111,11 +111,11 @@ export type CanvasNodeMetadata = {
     videoSelfLiftMode?: string;
     frameMode?: "first" | "last" | "both";
     imageMode?: "t2i" | "edit" | "inpaint" | "outpaint" | "layout" | "remove";
-    captionEngine?: "qwen35" | "florence" | "cloud";
+    captionEngine?: "qwen35" | "florence" | "kvmem" | "cloud";
     captionStatus?: "running" | "done" | "error";
     captionPrompt?: string;
     captionError?: string;
-    captionEngineUsed?: "qwen35" | "florence" | "cloud";
+    captionEngineUsed?: "qwen35" | "florence" | "kvmem" | "cloud";
     promptOptimizeStatus?: "running" | "done" | "error";
     promptOptimizeKind?: "h3" | "image";
     promptOptimizePrompt?: string;

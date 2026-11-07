@@ -1560,12 +1560,15 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set());
         setSelectedConnectionId(null);
         setContextMenu(null);
+        // Undo may restore a saved loading snapshot after its observer finished.
+        // Resume only that task; never create another generation request.
+        queueMicrotask(() => entry.nodes.filter(hasResumableVideoTask).forEach((node) => void pollVideoNodeTask(node, true)));
         setTimeout(() => {
             lastHistoryRef.current = entry;
             applyingHistoryRef.current = false;
             setHistoryState({ canUndo: historyRef.current.past.length > 0, canRedo: historyRef.current.future.length > 0 });
         });
-    }, []);
+    }, [pollVideoNodeTask]);
 
     const undoCanvas = useCallback(() => {
         const previous = historyRef.current.past.pop();

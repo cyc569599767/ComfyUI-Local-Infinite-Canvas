@@ -35,6 +35,20 @@
           <label class="setting-directory">ComfyUI 安装目录 <small>可选；留空只连接，不自动启动</small><div class="input-row"><input id="setting-comfy-dir" type="text" /><button id="choose-comfy" type="button">选择目录</button></div></label>
           <label class="setting-canvas-port">画布端口<input id="setting-canvas-port" type="number" min="1024" max="65525" required /></label>
           <label class="setting-gateway-port">网关端口<input id="setting-gateway-port" type="number" min="1024" max="65525" required /></label>
+          <fieldset class="kvmem-settings" aria-describedby="kvmem-help">
+            <legend>本地图片反推</legend>
+            <label class="kvmem-toggle"><input id="setting-kvmem-enabled" type="checkbox" checked /> 本地反推使用KVMem（结束后释放显存）</label>
+            <div class="kvmem-path">
+              <label for="setting-kvmem-install-dir">KVMem 安装目录</label>
+              <div class="input-row"><input id="setting-kvmem-install-dir" type="text" readonly placeholder="未配置；通过本机选择器指定" /><button id="choose-kvmem-install-dir" type="button">选择目录</button><button id="clear-kvmem-install-dir" type="button" aria-label="清空 KVMem 安装目录">清空</button></div>
+            </div>
+            <div class="kvmem-path">
+              <label for="setting-kvmem-model-path">KVMem 模型文件（.ninfer）</label>
+              <div class="input-row"><input id="setting-kvmem-model-path" type="text" readonly placeholder="未配置；不捆绑模型" /><button id="choose-kvmem-model-path" type="button">选择模型</button><button id="clear-kvmem-model-path" type="button" aria-label="清空 KVMem 模型文件">清空</button></div>
+            </div>
+            <label class="kvmem-gpu">GPU 设备编号 <small>0–15，默认 0</small><input id="setting-kvmem-gpu-device" type="number" min="0" max="15" step="1" value="0" required /></label>
+            <p id="kvmem-help">KVMem 替代旧本地反推策略，不捆绑程序或模型，需自行安装并选择 .ninfer 模型。路径留空可保存，反推能力不可用但不影响应用启动。首次加载较慢；视频任务忙时拒绝反推，请待任务结束后重试。仅管理自己启动的 KVMem 进程，反推结束后退出自有进程释放显存，不停止外部进程。保存后重启应用生效。</p>
+          </fieldset>
           <p id="data-location"></p>
           <div class="input-row settings-actions"><button type="submit" class="primary">保存设置</button><button id="restart-app" type="button">重启应用</button><button id="open-data" type="button">打开数据目录</button></div>
           <p id="settings-result" role="status"></p>

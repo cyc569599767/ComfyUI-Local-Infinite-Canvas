@@ -261,6 +261,16 @@ function registerIPC() {
       const result = await dialog.showOpenDialog(mainWindow, { title: '选择 ComfyUI 安装目录', properties: ['openDirectory'] });
       return result.canceled ? null : result.filePaths[0];
     },
+    'app:choose-kvmem': async (_event, kind) => {
+      // This bridge is available only to the trusted native settings window,
+      // never to the canvas/gateway content views or their HTTP APIs.
+      if (!['installDir', 'modelPath'].includes(kind)) throw new Error('未知 KVMem 路径类型');
+      const options = kind === 'installDir'
+        ? { title: 'KVMem安装目录', properties: ['openDirectory'] }
+        : { title: '选择 KVMem 模型', properties: ['openFile'], filters: [{ name: 'KVMem 模型', extensions: ['ninfer'] }] };
+      const result = await dialog.showOpenDialog(mainWindow, options);
+      return result.canceled ? null : result.filePaths[0] || null;
+    },
     'app:open-data': () => application && shell.openPath(application.userData),
     'app:restart': () => requestQuit(true),
     'app:get-state': () => ({ ...manager.snapshot(), activePage }),

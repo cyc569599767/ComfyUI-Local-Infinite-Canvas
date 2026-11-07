@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('desktop', {
   getConfig: () => ipcRenderer.invoke('app:get-config'),
   saveConfig: (config) => ipcRenderer.invoke('app:save-config', config),
   chooseComfy: () => ipcRenderer.invoke('app:choose-comfy'),
+  chooseKvmem: (kind) => ipcRenderer.invoke('app:choose-kvmem', kind),
   openData: () => ipcRenderer.invoke('app:open-data'),
   restart: () => ipcRenderer.invoke('app:restart'),
   connect: () => ipcRenderer.invoke('app:connect'),

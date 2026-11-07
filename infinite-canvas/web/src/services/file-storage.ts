@@ -2,6 +2,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { withLocalProxy } from "@/stores/use-config-store";
+import { readMediaMetadata } from "@/lib/media-metadata";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
@@ -9,12 +10,15 @@ const store = localforage.createInstance({ name: "infinite-canvas", storeName: "
 const objectUrls = new Map<string, string>();
 
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
-    const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
+    const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input), { signal: AbortSignal.timeout(120000) })).blob() : input;
     const storageKey = `${prefix}:${nanoid()}`;
-    await store.setItem(storageKey, blob);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([store.setItem(storageKey, blob), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("保存视频或音频超时，请检查本地存储后重试取回结果。")), 30000); })]);
+    } finally { clearTimeout(timer); }
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
-    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
+    const meta = blob.type.startsWith("video/") ? await readMediaMetadata(url, "video") : blob.type.startsWith("audio/") ? await readMediaMetadata(url, "audio") : {};
     return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
 }
 
@@ -73,24 +77,4 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
     if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectMediaStorageKeys(child, keys)) : collectMediaStorageKeys(item, keys)));
     return keys;
-}
-
-function readVideoMeta(url: string) {
-    return new Promise<{ width: number; height: number; durationMs?: number }>((resolve) => {
-        const video = document.createElement("video");
-        const done = () => resolve({ width: video.videoWidth || 1280, height: video.videoHeight || 720, durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined });
-        video.onloadedmetadata = done;
-        video.onerror = done;
-        video.src = url;
-    });
-}
-
-function readAudioMeta(url: string) {
-    return new Promise<{ durationMs?: number }>((resolve) => {
-        const audio = document.createElement("audio");
-        const done = () => resolve({ durationMs: Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : undefined });
-        audio.onloadedmetadata = done;
-        audio.onerror = done;
-        audio.src = url;
-    });
 }

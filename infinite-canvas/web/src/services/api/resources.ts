@@ -185,6 +185,8 @@ export type PromptCapabilities = {
     packId: string;
     comfyReachable: boolean;
     engines: Record<string, PromptEngineCapability>;
+    captionBackend?: "comfy" | "kvmem";
+    captionTimeoutMs?: number;
 };
 
 export type ResourceStatus = {

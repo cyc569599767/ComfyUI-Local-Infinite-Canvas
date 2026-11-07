@@ -24,6 +24,9 @@ import { createSetupManager } from "./setup.js";
 import { pickWorkflowDir, workflowDirCandidates } from "./workflow-dir.js";
 import { createResourceManager } from "./resources.js";
 import { createPromptOptimizer } from "./prompt-optimizer.js";
+import { createKvmemRuntime } from "./kvmem-runtime.js";
+import { recoverCompletedVideo } from "./video-recovery.js";
+import { createGuardedCaption, createLocalGpuAdmission } from "./local-gpu-guard.js";
 import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } from "./qwen-edit.js";
 import { createVideoInterpolator } from "./video-interpolation.js";
 import { createPreviewHub } from "./preview-hub.js";
@@ -443,6 +446,9 @@ export async function stopGateway({ tasks, comfy, setup, server, abortActiveRequ
   } catch {
     /* 同上 */
   }
+  // Stop the request-owned inference process before allowing gateway shutdown.
+  // A failed cleanup must not be silently reported as successful VRAM release.
+  await comfy?.closeLocalCaption?.();
   const result = await tasks.cancelInFlight(comfy, { timeoutMs: 2500 });
   if (result.total) logger?.info?.(`关停取消 ${result.total} 个在途任务${result.timedOut ? "（等待超时）" : ""}`);
   await tasks.persistNow();
@@ -465,8 +471,12 @@ export async function createGatewayApp(overrides = {}) {
   } catch (error) {
     logger.warn(`恢复升级前工作流失败：${error.message}`);
   }
+  const gpuAdmission = createLocalGpuAdmission();
+  const kvmemRuntime = overrides.kvmemRuntime || createKvmemRuntime({ config: config.kvmem, logger });
   const previewHub = createPreviewHub({ comfyUrl: () => comfy.baseUrl(), logger });
   const comfy = createComfyClient({
+    gpuAdmission,
+    localOutputDir: config.desktopDistribution && config.comfyDir ? path.join(config.comfyDir, "output") : "",
     baseUrl: config.comfyUrl,
     autoDiscover: !config.desktopDistribution,
     timeoutMs: config.requestTimeoutMs,
@@ -491,6 +501,8 @@ export async function createGatewayApp(overrides = {}) {
     maxTasks: config.maxStoredTasks,
   });
   await tasks.load();
+  const guardedCaption = createGuardedCaption({ admission: gpuAdmission, comfy, runtime: kvmemRuntime, config: config.kvmem, pendingTasks: () => tasks.list() });
+  comfy.closeLocalCaption = guardedCaption.close;
   const taskResponse = (req, task) => {
     const data = tasks.publicTask(task);
     return { ...data, url: data.url ? absoluteTaskUrl(config, req, data.url) : null };
@@ -551,7 +563,7 @@ export async function createGatewayApp(overrides = {}) {
   if (config.allowRemote && !config.gatewayToken) {
     logger.warn("ALLOW_REMOTE=1 但未设置 GATEWAY_TOKEN：接口无令牌保护，仅可在可信内网使用，不要映射到公网。");
   }
-  const resources = createResourceManager({ config, setup, registry, logger, workflowVisibility, mainModels });
+  const resources = createResourceManager({ config, setup, registry, logger, workflowVisibility, mainModels, localCaptionCapability: () => kvmemRuntime.capability() });
   await resources.init();
   setup.setRuntimeProblemProvider?.((workflowId) => resources.runtimeProblemsFor(workflowId));
   // 启动器只靠端口接管 ComfyUI 时可能拿不到安装目录；自由卡片仍应能工作。
@@ -621,6 +633,7 @@ export async function createGatewayApp(overrides = {}) {
   };
   const promptOptimizer = createPromptOptimizer({
     config,
+    localCaption: config.kvmem.enabled ? guardedCaption.run : null,
     comfy,
     logger,
     userModelAliasFor: setup.userModelAliasFor,
@@ -2009,13 +2022,19 @@ export async function createGatewayApp(overrides = {}) {
     const files = orderedPromptImages(req.files || []);
     if (!files.length) throw new HttpError("反推提示词请求缺少图片", { status: 400, code: "missing_reference_image" });
     const useCloud = String(body.engine || "").toLowerCase() === "cloud";
-    const uploadedImages = useCloud ? [] : await uploadImages(comfy, files.slice(0, 1));
-    const cloudImages = useCloud ? files.slice(0, 1).map((file) => `data:${file.mimetype || "image/png"};base64,${file.buffer.toString("base64")}`) : [];
+    const useKvmem = !useCloud && config.kvmem.enabled;
     const abort = abortOnDisconnect(req, res, registerActiveRequest);
     try {
+      if (useKvmem && !isLoopbackPeer(req.socket.remoteAddress)) throw new HttpError("本地反推只允许本机请求", { status: 403, code: "kvmem_local_only" });
+      if (useKvmem && (files.length !== 1 || files[0].buffer.length > 20 * 1024 * 1024 || !/^image\/(png|jpeg|webp)$/i.test(files[0].mimetype))) {
+        throw new HttpError("KVMem 反推需要一张不超过 20 MB 的 PNG、JPEG 或 WebP 图片。", { status: 400, code: "invalid_caption_image" });
+      }
+      const uploadedImages = useCloud || useKvmem ? [] : await uploadImages(comfy, files.slice(0, 1));
+      const imageData = useCloud || useKvmem ? files.slice(0, 1).map((file) => `data:${file.mimetype || "image/png"};base64,${file.buffer.toString("base64")}`) : [];
       const result = await promptOptimizer.captionImage({
         uploadedImages,
-        cloudImages,
+        cloudImages: useCloud ? imageData : [],
+        localImages: useKvmem ? imageData : [],
         language: body.language,
         instruction: body.instruction,
         engine: body.engine,
@@ -2359,6 +2378,19 @@ export async function createGatewayApp(overrides = {}) {
     const file = tasks.contentPath(req.params.id);
     if (!file) throw new HttpError("视频文件还没有生成完成", { status: 409, code: "video_not_ready" });
     res.sendFile(path.basename(file), { root: path.dirname(file), dotfiles: "deny" });
+  });
+
+  app.post("/v1/videos/:id/recover", async (req, res) => {
+    const task = tasks.get(req.params.id);
+    if (!task) throw new HttpError("视频任务不存在", { status: 404, code: "video_not_found" });
+    if (task.status === "completed") { res.json(taskResponse(req, task)); return; }
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    const recoverySignal = AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]);
+    try {
+      const result = await recoverCompletedVideo({ task, comfy, signal: recoverySignal });
+      await tasks.recoverCompleted(task.id, result);
+      res.json(taskResponse(req, tasks.get(task.id)));
+    } finally { abort.cleanup(); }
   });
 
   app.post("/v1/videos/:id/cancel", async (req, res) => {

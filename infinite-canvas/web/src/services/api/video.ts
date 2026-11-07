@@ -19,6 +19,9 @@ type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoRe
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal; params?: Record<string, unknown> };
 type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: ReferenceAudio[] };
+const VIDEO_STATUS_TIMEOUT_MS = 15_000;
+const VIDEO_DOWNLOAD_TIMEOUT_MS = 120_000;
+const VIDEO_STATUS_MAX_ATTEMPTS = 3;
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
@@ -244,11 +247,9 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
     }
     if (result.url) {
         if (isStillImageUrl(result.url)) throw new Error(apiText("noPlayableVideo"));
-        try {
-            return await uploadMediaFile(result.url, "video");
-        } catch {
-            return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
-        }
+        // URL-only results include downloads that already timed out or were blocked by CORS.
+        // Keep the playable URL instead of starting a second, unbounded fetch in storage.
+        return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
     }
     throw new Error(apiText("noPlayableVideo"));
 }
@@ -350,17 +351,39 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     }
 }
 
+async function readVideoStatus<T>(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<T> {
+    // Retry only idempotent status reads, never task creation or remote cancellation.
+    for (let attempt = 1; ; attempt += 1) {
+        throwIfAborted(signal);
+        try {
+            const response = await axios.get<T>(url, { headers, signal, timeout: VIDEO_STATUS_TIMEOUT_MS });
+            throwIfAborted(signal);
+            return response.data;
+        } catch (error) {
+            rethrowRequestAbort(error, signal);
+            const retryable = axios.isAxiosError(error) && (
+                (!error.response && ["ERR_NETWORK", "ECONNABORTED", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(error.code || "")) ||
+                (error.response?.status !== undefined && error.response.status >= 500 && error.response.status < 600)
+            );
+            if (!retryable || attempt >= VIDEO_STATUS_MAX_ATTEMPTS) throw error;
+            await delay(500 * attempt, signal);
+        }
+    }
+}
+
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        const video = unwrapVideoResponse(await readVideoStatus<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), aiHeaders(config), options?.signal));
+        const status = video.status?.trim().toLowerCase();
         const url = videoResultUrl(video);
-        if (url && isFinalVideoResult(video.status)) return { status: "completed", result: await videoResultFromUrl(url, options) };
-        if (video.status === "completed") {
-            const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+        if (url && isFinalVideoResult(status)) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (status && isFinalVideoResult(status)) {
+            const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: VIDEO_DOWNLOAD_TIMEOUT_MS });
             await assertVideoBlob(content.data);
+            throwIfAborted(options?.signal);
             return { status: "completed", result: { blob: content.data } };
         }
-        if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+        if (status === "failed" || status === "cancelled" || status === "canceled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
         const preview = video.preview?.url
             ? {
                   url: resolvePreviewUrl(config, video.preview.url),
@@ -375,6 +398,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
             : undefined;
         return { status: "pending", preview, steps };
     } catch (error) {
+        rethrowRequestAbort(error, options?.signal);
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
 }
@@ -391,14 +415,15 @@ async function videoResultFromUrl(url: string, options?: RequestOptions): Promis
     if (isStillImageUrl(url)) throw new Error(apiText("noPlayableVideo"));
     let blob: Blob;
     try {
-        blob = (await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal })).data;
+        blob = (await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal, timeout: VIDEO_DOWNLOAD_TIMEOUT_MS })).data;
     } catch (error) {
-        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        rethrowRequestAbort(error, options?.signal);
         // Some hosted services prohibit JS downloads but allow direct video playback.
         return { url, mimeType: "video/mp4" };
     }
     // A received image/error is a validation failure, never a CORS URL fallback.
     await assertVideoBlob(blob);
+    throwIfAborted(options?.signal);
     return { blob };
 }
 
@@ -436,7 +461,7 @@ async function createGeminiVideoTask(config: AiConfig, model: string, prompt: st
 
 async function pollGeminiVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const state = unwrapEnvelope((await axios.get<ApiEnvelope<GeminiVideoOperation>>(geminiOperationUrl(config, task.id), { headers: geminiVideoHeaders(config), signal: options?.signal })).data, apiText("videoTaskQueryFailed"));
+        const state = unwrapEnvelope(await readVideoStatus<ApiEnvelope<GeminiVideoOperation>>(geminiOperationUrl(config, task.id), geminiVideoHeaders(config), options?.signal), apiText("videoTaskQueryFailed"));
         if (state.error) return { status: "failed", error: readApiErrorMessage(state.error.message) || apiText("videoGenerationFailed") };
         if (!state.done) return { status: "pending" };
         const uri = state.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
@@ -444,6 +469,7 @@ async function pollGeminiVideoTask(config: AiConfig, task: VideoGenerationTask, 
         const url = uri.includes("key=") ? uri : `${uri}${uri.includes("?") ? "&" : "?"}key=${config.apiKey}`;
         return { status: "completed", result: await videoResultFromUrl(url, options) };
     } catch (error) {
+        rethrowRequestAbort(error, options?.signal);
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
 }
@@ -616,20 +642,30 @@ function isPublicMediaUrl(value: string) {
     return /^https?:\/\//i.test(value || "");
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+}
+
+function rethrowRequestAbort(error: unknown, signal?: AbortSignal) {
+    if (axios.isCancel(error) || (error instanceof Error && error.name === "AbortError")) throw error;
+    throwIfAborted(signal);
+}
+
 function delay(ms: number, signal?: AbortSignal) {
     return new Promise<void>((resolve, reject) => {
         if (signal?.aborted) {
             reject(new DOMException("Aborted", "AbortError"));
             return;
         }
-        const timer = setTimeout(resolve, ms);
-        signal?.addEventListener(
-            "abort",
-            () => {
-                clearTimeout(timer);
-                reject(new DOMException("Aborted", "AbortError"));
-            },
-            { once: true },
-        );
+        const onAbort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("Aborted", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal?.addEventListener("abort", onAbort, { once: true });
     });
 }

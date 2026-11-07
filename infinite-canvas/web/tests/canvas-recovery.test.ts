@@ -17,7 +17,7 @@ afterAll(() => {
 });
 
 const { clearStaleNodeErrors, resetInterruptedGeneration } = await import("../src/lib/canvas/canvas-generation-helpers");
-const { removeBatchImage } = await import("../src/lib/canvas/canvas-node-factory");
+const { removeBatchImage, videoMetadata } = await import("../src/lib/canvas/canvas-node-factory");
 
 function image(id: string): CanvasNodeImage {
     return { id, status: "success", content: `blob:${id}`, storageKey: `image:${id}`, naturalWidth: id === "one" ? 100 : 200, naturalHeight: 50, bytes: 12, mimeType: "image/png" };
@@ -44,6 +44,16 @@ test("interrupted generation remains retryable while unrelated stale errors are 
     expect(restored[0].metadata?.images?.[0].status).toBe("success");
     expect(restored[1].metadata?.status).toBe("idle");
     expect(restored[1].metadata?.errorDetails).toBeUndefined();
+});
+
+test("completed video atomically clears stale sampling and preview state", () => {
+    const metadata = {status: "loading", stepProgress: {step:8,total:8}, previewUrl:"preview.png", generationStartedAt:123, errorDetails:"old", ...videoMetadata({url:"blob:finished",storageKey:"video:finished",bytes:12,mimeType:"video/mp4",width:640,height:360})};
+    expect(metadata.status).toBe("success");
+    expect(metadata.content).toBe("blob:finished");
+    expect(metadata.stepProgress).toBeUndefined();
+    expect(metadata.previewUrl).toBeUndefined();
+    expect(metadata.generationStartedAt).toBeUndefined();
+    expect(metadata.errorDetails).toBeUndefined();
 });
 
 test("deleting the primary batch image synchronizes all top-level media fields", () => {

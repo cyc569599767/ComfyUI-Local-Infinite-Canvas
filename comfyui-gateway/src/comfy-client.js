@@ -1,3 +1,5 @@
+import { readLocalOutput } from "./local-output.js";
+import path from "node:path";
 import { estimateStepPlan } from "./step-plan.js";
 import { randomId, sleep, truncate } from "./util.js";
 
@@ -25,7 +27,7 @@ function formatNodeErrors(nodeErrors) {
   return messages.slice(0, 8).join("；");
 }
 
-export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true } = {}) {
+export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true, gpuAdmission = null, localOutputDir = "", outputTimeoutMs = 60000 } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   if (!base) throw new Error("ComfyUI baseUrl 不能为空");
   let activeBase = base;
@@ -98,26 +100,34 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("ComfyUI 请求超时")), timeout);
     const onAbort = () => controller.abort(signal.reason);
+    // Race both headers and body: some fetch/body implementations fail to settle
+    // promptly when aborted mid-transfer (observed /view stalls for minutes).
+    const bounded = (operation) => new Promise((resolve, reject) => {
+      const abort = () => reject(controller.signal.reason);
+      if (controller.signal.aborted) { reject(controller.signal.reason); return; }
+      controller.signal.addEventListener("abort", abort, { once: true });
+      Promise.resolve(operation).then(resolve, reject).finally(() => controller.signal.removeEventListener("abort", abort));
+    });
     if (signal) {
       if (signal.aborted) controller.abort(signal.reason);
       else signal.addEventListener("abort", onAbort, { once: true });
     }
     try {
-      const response = await fetch(`${activeBase}${pathname}`, {
+      const response = await bounded(fetch(`${activeBase}${pathname}`, {
         method,
         headers,
         body,
         signal: controller.signal,
         redirect: "follow",
-      });
+      }));
       if (raw) {
         if (!response.ok) throw new ComfyUIError(`ComfyUI ${pathname} 返回 ${response.status}`, { status: 502, code: "comfy_http_error", httpStatus: response.status });
         return {
-          buffer: Buffer.from(await response.arrayBuffer()),
+          buffer: Buffer.from(await bounded(response.arrayBuffer())),
           contentType: response.headers.get("content-type") || "application/octet-stream",
         };
       }
-      const text = await response.text();
+      const text = await bounded(response.text());
       let data;
       try {
         data = text ? JSON.parse(text) : {};
@@ -178,24 +188,38 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
   }
 
   async function submit(workflow, { clientId = randomId("canvas-"), signal, requestId } = {}) {
-    if (previewHub) {
-      await previewHub.ensure(clientId).catch(() => false);
+    const releaseAdmission = gpuAdmission?.beginComfySubmission();
+    let sent = false;
+    let acknowledged = false;
+    try {
+      signal?.throwIfAborted();
+      if (previewHub) {
+        await previewHub.ensure(clientId).catch(() => false);
+      }
+      signal?.throwIfAborted();
+      sent = true;
+      const data = await request("/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: workflow, client_id: clientId }),
+        signal,
+      });
+      acknowledged = Boolean(data?.prompt_id);
+      const nodeErrors = formatNodeErrors(data?.node_errors);
+      if (nodeErrors) {
+        throw new ComfyUIError(`ComfyUI 工作流校验失败：${nodeErrors}`, { status: 400, code: "node_errors", details: data.node_errors });
+      }
+      if (!data?.prompt_id) {
+        throw new ComfyUIError(`ComfyUI 未返回 prompt_id：${truncate(JSON.stringify(data), 500)}`, { status: 502, code: "no_prompt_id", details: data });
+      }
+      previewHub?.bindPrompt(clientId, data.prompt_id, { requestId, plan: estimateStepPlan(workflow) });
+      return { promptId: data.prompt_id, number: data.number, raw: data };
+    } catch (error) {
+      if (error?.code === "comfy_http_error" && error.httpStatus === 400) acknowledged = true;
+      throw error;
+    } finally {
+      releaseAdmission?.({ uncertain: sent && !acknowledged });
     }
-    const data = await request("/prompt", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: workflow, client_id: clientId }),
-      signal,
-    });
-    const nodeErrors = formatNodeErrors(data?.node_errors);
-    if (nodeErrors) {
-      throw new ComfyUIError(`ComfyUI 工作流校验失败：${nodeErrors}`, { status: 400, code: "node_errors", details: data.node_errors });
-    }
-    if (!data?.prompt_id) {
-      throw new ComfyUIError(`ComfyUI 未返回 prompt_id：${truncate(JSON.stringify(data), 500)}`, { status: 502, code: "no_prompt_id", details: data });
-    }
-    previewHub?.bindPrompt(clientId, data.prompt_id, { requestId, plan: estimateStepPlan(workflow) });
-    return { promptId: data.prompt_id, number: data.number, raw: data };
   }
 
   async function history(promptId, { signal } = {}) {
@@ -204,12 +228,23 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
   }
 
   async function view(file, { signal } = {}) {
+    if (localOutputDir && loopbackHost() && activeBase === base && file?.type === "output") {
+      try {
+        const result = await readLocalOutput(path.resolve(localOutputDir), file, { signal });
+        if (result) return result;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        // Rejected paths are never read through another host-file route.
+        if (/Unsafe|escapes/.test(error.message)) throw new ComfyUIError("ComfyUI 输出路径无效", { status: 400, code: "invalid_output_path" });
+        logger?.warn?.("本机输出直读不可用，将使用有界 HTTP 取回");
+      }
+    }
     const params = new URLSearchParams({
       filename: String(file.filename || ""),
       subfolder: String(file.subfolder || ""),
       type: String(file.type || "output"),
     });
-    return request(`/view?${params.toString()}`, { raw: true, signal });
+    return request(`/view?${params.toString()}`, { raw: true, signal, timeout: outputTimeoutMs });
   }
 
   async function uploadImage(buffer, filename = "input.png", mimeType = "image/png") {

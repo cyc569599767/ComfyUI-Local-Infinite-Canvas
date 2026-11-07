@@ -33,7 +33,7 @@ export function imageMetadata(image: UploadedImage): CanvasNodeMetadata {
 }
 
 export function videoMetadata(video: UploadedFile): CanvasNodeMetadata {
-    return { content: video.url, storageKey: video.storageKey, status: "success", naturalWidth: video.width, naturalHeight: video.height, bytes: video.bytes, mimeType: video.mimeType || "video/mp4", durationMs: video.durationMs };
+    return { content: video.url, storageKey: video.storageKey, status: "success", naturalWidth: video.width, naturalHeight: video.height, bytes: video.bytes, mimeType: video.mimeType || "video/mp4", durationMs: video.durationMs, stepProgress: undefined, previewUrl: undefined, previewMime: undefined, previewStep: undefined, previewTotal: undefined, generationStartedAt: undefined, errorDetails: undefined };
 }
 
 export function audioMetadata(audio: UploadedFile): CanvasNodeMetadata {

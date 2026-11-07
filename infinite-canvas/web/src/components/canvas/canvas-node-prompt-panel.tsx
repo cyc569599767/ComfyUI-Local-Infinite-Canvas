@@ -82,7 +82,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         .filter((reference) => reference.kind === "text" && reference.text?.trim())
         .map((reference) => reference.text!.trim())
         .join("\n\n");
-    const captionEngine = node.metadata?.captionEngine;
+    const useKvmemCaption = capabilities?.captionBackend === "kvmem";
+    const storedCaptionEngine = node.metadata?.captionEngine;
+    const captionEngine = useKvmemCaption && (storedCaptionEngine === "qwen35" || storedCaptionEngine === "florence") ? "kvmem" : storedCaptionEngine;
     const rawWorkflowId = channelModelOf(config, config.model)?.model.workflowId || modelOptionName(config.model);
     const workflowId = baseVideoWorkflowId(rawWorkflowId);
     const isNoVdnModel = rawWorkflowId !== workflowId;
@@ -120,8 +122,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const captionEngineUsed = node.metadata?.captionEngineUsed || captionEngine || "qwen35";
     const captionQwenReady = engineAvailable("qwen");
     const captionFlorenceReady = engineAvailable("florence");
-    const captionLocalCapability = captionEngine === "qwen35" ? capabilities?.engines.qwen : captionEngine === "florence" ? capabilities?.engines.florence : null;
-    const captionLocalReady = captionEngine === "cloud" ? true : captionEngine === "qwen35" ? captionQwenReady : captionEngine === "florence" ? captionFlorenceReady : true;
+    const captionKvmemReady = capabilities?.engines.kvmem?.available === true;
+    const captionLocalCapability = captionEngine === "kvmem" ? capabilities?.engines.kvmem : captionEngine === "qwen35" ? capabilities?.engines.qwen : captionEngine === "florence" ? capabilities?.engines.florence : null;
+    const captionLocalReady = captionEngine === "cloud" ? true : captionEngine === "kvmem" ? captionKvmemReady : captionEngine === "qwen35" ? captionQwenReady : captionEngine === "florence" ? captionFlorenceReady : true;
     const canCaption = mode === "text" && Boolean(captionEngine) && captionLocalReady && (captionEngine !== "cloud" || optimizeCloudReady) && imageReferences.length > 0 && !isRunning && !captionRunning;
     const hasMediaReferences = mentionReferences.some((reference) => reference.kind !== "text");
     const textVideoHasReferences = isH3T2V && hasMediaReferences;
@@ -388,8 +391,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         try {
             const images = await resolveCanvasReferenceImages(imageReferences.slice(0, 1), nodes);
             if (!images.length) throw new Error(t("canvas.promptPanel.captionNoImage"));
-            const result = await requestImageCaption(config, { images, language: "zh", engine: captionEngine, cloud: captionEngine === "cloud" ? { baseUrl: (config.promptCloudBaseUrl || "").trim(), apiKey: (config.promptCloudApiKey || "").trim(), model: (config.promptCloudModel || "").trim() } : undefined }, { signal: controller.signal });
+            const result = await requestImageCaption(config, { images, language: "zh", engine: captionEngine, timeoutMs: captionEngine === "kvmem" ? capabilities?.captionTimeoutMs : undefined, cloud: captionEngine === "cloud" ? { baseUrl: (config.promptCloudBaseUrl || "").trim(), apiKey: (config.promptCloudApiKey || "").trim(), model: (config.promptCloudModel || "").trim() } : undefined }, { signal: controller.signal });
             onConfigChange(node.id, { captionStatus: "done", captionPrompt: result.prompt, captionEngineUsed: result.engine || captionEngine });
+            if (result.truncated) message.warning("反推结果已达到输出上限，内容可能不完整；模型已退出。" );
         } catch (error) {
             if (controller.signal.aborted) clearCaptionPreview();
             else onConfigChange(node.id, { captionStatus: "error", captionError: error instanceof Error ? error.message : t("canvas.promptPanel.optimizeFailed") });
@@ -531,13 +535,17 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 config={config}
                                 value={captionEngine ? `caption:${captionEngine}` : config.model}
                                 onChange={(model) => {
-                                    if (model === "caption:qwen35" || model === "caption:florence" || model === "caption:cloud") onConfigChange(node.id, { captionEngine: model.slice(8) as ImageCaptionEngine });
+                                    if (model === "caption:qwen35" || model === "caption:florence" || model === "caption:kvmem" || model === "caption:cloud") onConfigChange(node.id, { captionEngine: model.slice(8) as ImageCaptionEngine });
                                     else onConfigChange(node.id, { model, captionEngine: undefined });
                                 }}
                                 capability="text"
                                 extraOptions={[
-                                    { value: "caption:qwen35", label: `反推 · Qwen3.5-9B${captionQwenReady ? "" : `（${t("canvas.promptPanel.captionNotInstalled")}）`}`, disabled: !captionQwenReady },
-                                    { value: "caption:florence", label: `反推 · Florence-2 PromptGen${captionFlorenceReady ? "" : `（${t("canvas.promptPanel.captionNotInstalled")}）`}`, disabled: !captionFlorenceReady },
+                                    ...(useKvmemCaption ? [
+                                        { value: "caption:kvmem", label: `反推 · KVMem${captionKvmemReady ? "" : "（请配置桌面设置）"}`, disabled: !captionKvmemReady },
+                                    ] : [
+                                        { value: "caption:qwen35", label: `反推 · Qwen3.5-9B${captionQwenReady ? "" : `（${t("canvas.promptPanel.captionNotInstalled")}）`}`, disabled: !captionQwenReady },
+                                        { value: "caption:florence", label: `反推 · Florence-2 PromptGen${captionFlorenceReady ? "" : `（${t("canvas.promptPanel.captionNotInstalled")}）`}`, disabled: !captionFlorenceReady },
+                                    ]),
                                     { value: "caption:cloud", label: `反推 · ${t("canvas.promptPanel.optimizeEngineCloud")}${optimizeCloudReady ? `（${config.promptCloudModel}）` : `（${t("canvas.promptPanel.captionCloudNotConfigured")}）`}` },
                                 ]}
                                 onMissingConfig={() => openConfigDialog(true)}
@@ -588,11 +596,11 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
             {mode === "text" && captionEngine && captionEngine !== "cloud" && captionLocalCapability && !captionLocalCapability.available ? (
                 <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
                     <span className="min-w-0 truncate" title={captionLocalCapability.reasons.join("；")}>
-                        {t("canvas.promptPanel.captionLocalMissing")}
+                        {captionEngine === "kvmem" ? captionLocalCapability.reasons.join("；") : t("canvas.promptPanel.captionLocalMissing")}
                     </span>
-                    <button type="button" className="shrink-0 underline underline-offset-2" onClick={() => openConfigDialog(false, "resources")}>
+                    {captionEngine !== "kvmem" ? <button type="button" className="shrink-0 underline underline-offset-2" onClick={() => openConfigDialog(false, "resources")}>
                         {t("canvas.promptPanel.captionInstall")}
-                    </button>
+                    </button> : null}
                 </div>
             ) : null}
             {mode === "text" && captionEngine === "cloud" && !optimizeCloudReady ? (
@@ -633,7 +641,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                 return (
                 <div className="mt-2 rounded-xl border p-2" style={{ borderColor: theme.toolbar.border, background: theme.toolbar.panel }}>
                     <div className="mb-1 flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium">{t(isImage ? "canvas.promptPanel.optimizeImageTitle" : mode === "text" ? "canvas.promptPanel.captionTitle" : "canvas.promptPanel.optimizeTitle")}{mode === "text" ? ` · ${captionEngineUsed === "florence" ? "Florence" : captionEngineUsed === "cloud" ? t("canvas.promptPanel.optimizeEngineCloud") : "Qwen3.5-9B"}` : ""}</span>
+                        <span className="text-xs font-medium">{t(isImage ? "canvas.promptPanel.optimizeImageTitle" : mode === "text" ? "canvas.promptPanel.captionTitle" : "canvas.promptPanel.optimizeTitle")}{mode === "text" ? ` · ${captionEngineUsed === "kvmem" ? "KVMem / NInfer" : captionEngineUsed === "florence" ? "Florence" : captionEngineUsed === "cloud" ? t("canvas.promptPanel.optimizeEngineCloud") : "Qwen3.5-9B"}` : ""}</span>
                         <Button
                             type="text"
                             size="small"

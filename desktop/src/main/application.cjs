@@ -10,6 +10,8 @@ const { migrateQwenV2 } = require('./qwen-v2-migration.cjs');
 const DEFAULTS = {
   schemaVersion: 1, comfyUrl: 'http://127.0.0.1:8188', comfyDir: '', comfyWorkflowsDir: '',
   canvasPort: 23110, gatewayPort: 23111, comfyStartTimeoutSec: 300, gatewayStartTimeoutSec: 30,
+  kvmemEnabled: true, kvmemInstallDir: '', kvmemModelPath: '', kvmemGpuDevice: '0',
+  kvmemStartupTimeoutSec: 180, kvmemRequestTimeoutSec: 180,
 };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -38,6 +40,27 @@ function validateConfig(input, { checkDirectories = false } = {}) {
   for (const key of ['comfyStartTimeoutSec', 'gatewayStartTimeoutSec']) {
     const value = Number(input[key] ?? DEFAULTS[key]);
     if (!Number.isInteger(value) || value < 1 || value > 900) throw new Error(`${key} 必须在 1–900 秒之间`);
+    result[key] = value;
+  }
+  const enabled = input.kvmemEnabled ?? DEFAULTS.kvmemEnabled;
+  if (typeof enabled !== 'boolean') throw new Error('kvmemEnabled 必须为布尔值');
+  result.kvmemEnabled = enabled;
+  // Empty or not-yet-installed KVMem paths are valid settings. Availability is
+  // checked by the gateway on demand, never by the desktop startup path.
+  for (const key of ['kvmemInstallDir', 'kvmemModelPath']) {
+    const value = input[key] ?? DEFAULTS[key];
+    if (typeof value !== 'string' || value.includes('\0')) throw new Error(`${key} 必须是路径字符串`);
+    const trimmed = value.trim();
+    if (trimmed && !path.isAbsolute(trimmed)) throw new Error(`${key} 必须是绝对路径`);
+    if (key === 'kvmemModelPath' && trimmed && path.extname(trimmed).toLowerCase() !== '.ninfer') throw new Error('KVMem 模型必须为 .ninfer 文件');
+    result[key] = trimmed;
+  }
+  const gpu = input.kvmemGpuDevice ?? DEFAULTS.kvmemGpuDevice;
+  if (typeof gpu !== 'string' || !/^(?:[0-9]|1[0-5])$/.test(gpu)) throw new Error('kvmemGpuDevice 必须为 0–15 的整数字符串');
+  result.kvmemGpuDevice = gpu;
+  for (const key of ['kvmemStartupTimeoutSec', 'kvmemRequestTimeoutSec']) {
+    const value = input[key] ?? DEFAULTS[key];
+    if (!Number.isInteger(value) || value < 30 || value > 600) throw new Error(`${key} 必须在 30–600 秒之间（整数）`);
     result[key] = value;
   }
   return result;
@@ -126,6 +149,9 @@ function createApplication({ runtimeRoot, userData, env = process.env }) {
   // Clear inherited backend settings: a desktop app must not accidentally use
   // a terminal's source workspace, credentials, update server, or output folder.
   const childEnv = { ...env };
+  // Windows environment keys are case-insensitive; remove every inherited
+  // KVMem option, including unknown future flags, before applying native config.
+  for (const key of Object.keys(childEnv)) if (/^KVMEM_/i.test(key)) delete childEnv[key];
   for (const key of ['COMFY_URL', 'COMFYUI_DIR', 'COMFY_WORKFLOWS_DIR', 'COMFY_FRONTEND_DIR', 'CANVAS_PORT', 'GATEWAY_PORT',
     'LAUNCHER_CONTROL_PORT', 'GATEWAY_TOKEN', 'DATA_DIR', 'OUTPUT_DIR', 'WORKFLOW_DIR', 'CANVAS_DIST',
     'HOST', 'PORT', 'ALLOW_REMOTE', 'CORS_ORIGINS', 'PUBLIC_BASE_URL', 'LAUNCHER_CONTROL_URL', 'COMFY_PYTHON',
@@ -135,6 +161,10 @@ function createApplication({ runtimeRoot, userData, env = process.env }) {
     DESKTOP_CONFIG_PATH: configFile, DESKTOP_DISTRIBUTION: '1',
     ELECTRON_ENABLE_LOGGING: '0',
     COMFY_URL: config.comfyUrl, COMFYUI_DIR: config.comfyDir, COMFY_WORKFLOWS_DIR: config.comfyWorkflowsDir,
+    KVMEM_ENABLED: config.kvmemEnabled ? '1' : '0', KVMEM_INSTALL_DIR: config.kvmemInstallDir,
+    KVMEM_MODEL_PATH: config.kvmemModelPath, KVMEM_GPU_DEVICE: config.kvmemGpuDevice,
+    KVMEM_STARTUP_TIMEOUT_MS: String(config.kvmemStartupTimeoutSec * 1000),
+    KVMEM_REQUEST_TIMEOUT_MS: String(config.kvmemRequestTimeoutSec * 1000),
     CANVAS_PORT: String(config.canvasPort), GATEWAY_PORT: String(config.gatewayPort),
     DATA_DIR: path.join(userData, 'gateway'), OUTPUT_DIR: path.join(userData, 'gateway', 'outputs'), WORKFLOW_DIR: workflowDir,
     CANVAS_DIST: path.join(runtimeRoot, 'infinite-canvas/web/dist'),

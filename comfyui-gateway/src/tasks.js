@@ -31,6 +31,7 @@ function publicTask(task) {
 
 export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks = 0 } = {}) {
   const tasks = new Map();
+  const recoveries = new Map();
   const queue = [];
   const file = path.join(dataDir, "tasks.json");
   const outputDir = path.join(dataDir, "outputs");
@@ -247,6 +248,57 @@ export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks =
     return { file: target, url: fileUrl(filename), bytes: buffer.length };
   }
 
+  async function recoverCompleted(id, result) {
+    const task = tasks.get(id);
+    const recoveryError = (message, code, status = 409) => Object.assign(new Error(message), { code, status });
+    if (!task) throw recoveryError("视频任务不存在", "task_not_found", 404);
+    if (task.status === "completed") return publicTask(task);
+    if (task.status !== "failed") throw recoveryError("仅允许恢复失败的视频任务", "task_not_recoverable");
+    if (recoveries.has(id)) return recoveries.get(id);
+    if (!Buffer.isBuffer(result?.buffer) || !result.buffer.length) {
+      throw recoveryError("恢复视频内容为空或无效", "recovery_invalid_video", 502);
+    }
+    if (result.promptId && task.promptId && result.promptId !== task.promptId) {
+      throw recoveryError("恢复结果的 promptId 与原任务不一致", "recovery_prompt_mismatch");
+    }
+    if (result.completedAt != null && (typeof result.completedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(result.completedAt) || !Number.isFinite(Date.parse(result.completedAt)))) {
+      throw recoveryError("恢复完成时间必须是有效 ISO 时间", "recovery_invalid_completed_at", 400);
+    }
+    // 先快照结果，避免调用方在异步文件写入期间替换元数据。
+    const { buffer, ext = "mp4", mimeType = "video/mp4", promptId, completedAt } = result;
+    const recovery = (async () => {
+      // 独立文件名避免异步保存期间状态变化时覆盖已完成任务的输出。
+      const saved = await saveOutput(`${id}-recovered-${randomId()}`, buffer, ext);
+      const current = tasks.get(id);
+      if (current !== task || current.status !== "failed") {
+        await removeOutput(saved);
+        if (current?.status === "completed") return publicTask(current);
+        throw recoveryError("保存恢复视频期间任务已变化，请重新确认任务状态", "recovery_state_changed");
+      }
+      const updatedAt = nowIso();
+      Object.assign(task, {
+        status: "completed",
+        progress: 1,
+        promptId: promptId || task.promptId,
+        file: saved.file,
+        url: saved.url,
+        mimeType,
+        bytes: saved.bytes,
+        error: null,
+        completedAt: completedAt || updatedAt,
+        updatedAt,
+      });
+      await persistNow();
+      return publicTask(task);
+    })();
+    recoveries.set(id, recovery);
+    try {
+      return await recovery;
+    } finally {
+      if (recoveries.get(id) === recovery) recoveries.delete(id);
+    }
+  }
+
   async function cancel(id, comfy) {
     const task = tasks.get(id);
     if (!task) return null;
@@ -311,5 +363,5 @@ export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks =
     return resolved.startsWith(`${root}${path.sep}`) && fs.existsSync(resolved) ? resolved : null;
   }
 
-  return { load, create, enqueue, get, list, cancel, cancelInFlight, contentPath, publicTask, saveOutput, persistNow, cleanup };
+  return { load, create, enqueue, get, list, cancel, cancelInFlight, recoverCompleted, contentPath, publicTask, saveOutput, persistNow, cleanup };
 }
