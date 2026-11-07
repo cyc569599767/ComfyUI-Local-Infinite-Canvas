@@ -7,6 +7,7 @@ import { BaseModelPicker, ModelPicker, WorkflowModelPicker } from "@/components/
 import { channelModelOf, defaultConfig, modelImageInputs, modelOptionName, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
+import { normalizeLocalPromptTimeoutSeconds } from "@/lib/prompt-local-timeout";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
@@ -387,12 +388,12 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         if (!captionEngine || !canCaption) return;
         const controller = new AbortController();
         registerCaptionJob(node.id, controller);
-        onConfigChange(node.id, { captionStatus: "running", captionEngineUsed: captionEngine, captionPrompt: undefined, captionError: undefined });
+        onConfigChange(node.id, { captionStatus: "running", captionEngineUsed: captionEngine, captionPrompt: undefined, captionError: undefined, captionVisionMode: undefined, captionReleased: undefined });
         try {
             const images = await resolveCanvasReferenceImages(imageReferences.slice(0, 1), nodes);
             if (!images.length) throw new Error(t("canvas.promptPanel.captionNoImage"));
-            const result = await requestImageCaption(config, { images, language: "zh", engine: captionEngine, timeoutMs: captionEngine === "kvmem" ? capabilities?.captionTimeoutMs : undefined, cloud: captionEngine === "cloud" ? { baseUrl: (config.promptCloudBaseUrl || "").trim(), apiKey: (config.promptCloudApiKey || "").trim(), model: (config.promptCloudModel || "").trim() } : undefined }, { signal: controller.signal });
-            onConfigChange(node.id, { captionStatus: "done", captionPrompt: result.prompt, captionEngineUsed: result.engine || captionEngine });
+            const result = await requestImageCaption(config, { images, language: "zh", engine: captionEngine, timeoutMs: captionEngine === "kvmem" ? capabilities?.captionTimeoutMs : undefined, startupTimeoutMs: captionEngine === "kvmem" ? capabilities?.captionStartupTimeoutMs : undefined, cloud: captionEngine === "cloud" ? { baseUrl: (config.promptCloudBaseUrl || "").trim(), apiKey: (config.promptCloudApiKey || "").trim(), model: (config.promptCloudModel || "").trim() } : undefined }, { signal: controller.signal });
+            onConfigChange(node.id, { captionStatus: "done", captionPrompt: result.prompt, captionEngineUsed: result.engine || captionEngine, captionVisionMode: result.visionMode, captionReleased: result.released });
             if (result.truncated) message.warning("反推结果已达到输出上限，内容可能不完整；模型已退出。" );
         } catch (error) {
             if (controller.signal.aborted) clearCaptionPreview();
@@ -577,7 +578,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                         }
                         submit();
                     }}
-                    aria-label={t(isRunning || captionRunning ? "canvas.promptPanel.captionStop" : captionReady ? "canvas.promptPanel.caption" : "canvas.promptPanel.generate")}
+                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : captionRunning ? "canvas.promptPanel.captionStop" : captionReady ? "canvas.promptPanel.caption" : "canvas.promptPanel.generate")}
                 >
                     <span className="flex items-center gap-1.5">
                         {isRunning || captionRunning ? (
@@ -620,6 +621,8 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     cloudReady={optimizeCloudReady}
                     cloudModel={config.promptCloudModel}
                     localReady={isImage ? engineAvailable("imagePe") : engineAvailable("teMan")}
+                    localTimeoutSeconds={normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds)}
+                    onLocalTimeoutChange={(value) => updateConfig("promptLocalTimeoutSeconds", value)}
                     onEngineChange={(engine) => updateConfig("promptApiEngine", engine)}
                     onLanguageChange={(language) => updateConfig("promptOptimizeLanguage", language)}
                     onOpenSettings={() => openConfigDialog(true, "cloud-api")}
@@ -661,8 +664,13 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                             <span>{t(mode === "text" ? "canvas.promptPanel.captioning" : "canvas.promptPanel.optimizing")}</span>
                         </div>
                     ) : null}
+                    {mode === "text" && captionEngineUsed === "kvmem" && !previewRunning && previewPrompt && node.metadata?.captionVisionMode ? (
+                        <div className="text-[11px] opacity-70">
+                            启动配置：CUDA 主模型 · {node.metadata.captionVisionMode === "gpu" ? "GPU 视觉" : "CPU 视觉"}
+                            {node.metadata.captionReleased === true ? " · 反推进程已退出" : ""}
+                        </div>
+                    ) : null}
                     {previewError ? <div className="text-xs text-[#ef4444]">{previewError}</div> : null}
-                    {mode !== "text" && originalPrompt ? <OriginalPromptDisclosure text={originalPrompt} label={t("canvas.promptPanel.originalPrompt")} hint={t("canvas.promptPanel.originalPromptHint")} theme={theme} /> : null}
                     {previewPrompt ? (
                         <>
                             <textarea

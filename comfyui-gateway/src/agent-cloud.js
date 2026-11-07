@@ -149,12 +149,16 @@ function prepareBody(body, operation) {
   return { endpoint, apiKey: apiKey.trim(), apiFormat, payload: serialized };
 }
 
-function abortable(promise, signal) {
+function abortable(operation, signal) {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
-    const aborted = () => reject(signal.reason);
+    const cleanup = () => signal.removeEventListener("abort", aborted);
+    const aborted = () => { cleanup(); reject(signal.reason); };
     signal.addEventListener("abort", aborted, { once: true });
-    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+    Promise.resolve().then(() => {
+      if (signal.aborted) throw signal.reason;
+      return operation();
+    }).then((value) => { cleanup(); resolve(value); }, (error) => { cleanup(); reject(error); });
   });
 }
 
@@ -192,6 +196,7 @@ function writeChunk(res, text, signal) {
 
 function publicError(error) {
   if (error instanceof AgentCloudError) return error;
+  if (error?.name === "AbortError" || error?.code === "ABORT_ERR") return new AgentCloudError("cancelled", "请求已取消", 499);
   return new AgentCloudError("upstream_failed", "模型服务连接失败，请检查地址、网络和配置", 502);
 }
 
@@ -200,7 +205,8 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
   return async function transport({ endpoint, apiKey, payload, operation, signal, apiFormat = "openai" }, res) {
     const normalizer = createAgentCloudNormalizer(apiFormat);
     const controller = new AbortController();
-    const abort = () => controller.abort(signal.reason);
+    const abort = () => controller.abort(signal.reason instanceof AgentCloudError
+      ? signal.reason : new AgentCloudError("cancelled", "请求已取消", 499));
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
     const timeout = setTimeout(() => controller.abort(new AgentCloudError("upstream_timeout", "模型请求超时", 504)), timeoutMs);
@@ -208,10 +214,10 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
     let outgoing;
     let headerTimer;
     try {
-      const pinnedPool = await abortable(resolveAgentCloudTargets(endpoint, lookup), controller.signal);
+      const pinnedPool = await abortable(() => resolveAgentCloudTargets(endpoint, lookup), controller.signal);
       const pinned = pinnedPool[0];
       const multipleTargets = pinnedPool.length > 1;
-      upstream = await new Promise((resolve, reject) => {
+      upstream = await abortable(() => new Promise((resolve, reject) => {
         const request = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
         const headers = { accept: operation === "models" ? "application/json" : "text/event-stream, application/json", "accept-encoding": "identity" };
         Object.assign(headers, agentCloudAuthHeaders(apiFormat, apiKey));
@@ -225,10 +231,11 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
             ? callback(null, pinnedPool) : callback(null, pinned.address, pinned.family),
         }, resolve);
         outgoing.on("error", reject);
+        outgoing.once("close", () => reject(new AgentCloudError("upstream_failed", "模型服务连接中断", 502)));
         outgoing.setTimeout(idleTimeoutMs, () => controller.abort(new AgentCloudError("upstream_timeout", "模型响应读取超时", 504)));
         headerTimer = setTimeout(() => controller.abort(new AgentCloudError("upstream_timeout", "模型响应头超时", 504)), headerTimeoutMs);
         outgoing.end(payload);
-      });
+      }), controller.signal);
       clearTimeout(headerTimer);
       const status = upstream.statusCode || 502;
       if (status < 200 || status >= 300) {
@@ -275,7 +282,10 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
         for (const normalized of normalizer.event(sanitizeValue(item, apiKey), eventName)) await emitNormalized(normalized);
         return false;
       };
-      for await (const chunk of upstream) {
+      const iterator = upstream[Symbol.asyncIterator]();
+      for (;;) {
+        const { value: chunk, done } = await abortable(() => iterator.next(), controller.signal);
+        if (done) break;
         size += chunk.length;
         if (size > maxResponseBytes) fail("response_too_large", "模型响应超过大小限制", 502);
         buffer += decoder.decode(chunk, { stream: true });
@@ -318,7 +328,7 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
 
 // Internal consumers (e.g. prompt optimization) reuse exactly the same URL guards,
 // pinned transport, deadlines, normalization and redaction without an extra HTTP hop.
-export async function requestAgentCloudJson(body, { signal } = {}) {
+export async function requestAgentCloudJson(body, { signal, timeoutMs } = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body) || !body.request || typeof body.request !== "object" || Array.isArray(body.request)) {
     fail("invalid_request", "缺少模型请求");
   }
@@ -332,7 +342,14 @@ export async function requestAgentCloudJson(body, { signal } = {}) {
     write() { fail("invalid_response", "模型 API 未按请求返回 JSON", 502); },
     end() {},
   };
-  await createAgentCloudTransport()({ ...prepared, operation: "chat", signal: signal || new AbortController().signal }, sink);
+  // Internal opt-in only: slow non-streaming inference needs the same allowance
+  // for headers and socket inactivity. The separate total timer remains a hard
+  // limit even while bytes keep arriving. Public Agent routes keep their defaults.
+  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647)) {
+    fail("invalid_timeout", "内部模型请求超时无效");
+  }
+  const transportOptions = timeoutMs === undefined ? {} : { timeoutMs, headerTimeoutMs: timeoutMs, idleTimeoutMs: timeoutMs };
+  await createAgentCloudTransport(transportOptions)({ ...prepared, operation: "chat", signal: signal || new AbortController().signal }, sink);
   if (result === undefined) fail("invalid_response", "模型 API 未返回 JSON", 502);
   return result;
 }

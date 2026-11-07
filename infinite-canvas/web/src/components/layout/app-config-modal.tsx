@@ -1,4 +1,4 @@
-import { App, AutoComplete, Button, Form, Input, Modal, Progress, Radio, Select, Switch, Tabs } from "antd";
+import { App, AutoComplete, Button, Form, Input, InputNumber, Modal, Progress, Radio, Select, Switch, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { ArrowLeft, ArrowRight, Cloud, ChevronDown, Download, Lock, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -18,6 +18,8 @@ import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { fetchAgentCloudModels } from "@/services/api/agent-cloud";
 import { normalizeAgentBaseUrl } from "@/lib/agent-cloud-config";
+import { DEFAULT_PROMPT_CLOUD_TIMEOUT_SECONDS, MIN_PROMPT_CLOUD_TIMEOUT_SECONDS, MAX_PROMPT_CLOUD_TIMEOUT_SECONDS, normalizePromptCloudTimeoutSeconds } from "@/lib/prompt-cloud-timeout";
+import { MIN_LOCAL_PROMPT_TIMEOUT_SECONDS, MAX_LOCAL_PROMPT_TIMEOUT_SECONDS, normalizeLocalPromptTimeoutSeconds } from "@/lib/prompt-local-timeout";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
@@ -271,8 +273,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         setEditingCloudApiId(api?.id || "");
         resetCloudModelFetch();
         cloudApiForm.setFieldsValue(api
-            ? { name: api.name, baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model, apiFormat: api.apiFormat || "openai", rememberKey: api.rememberKey !== false }
-            : { name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", rememberKey: false });
+            ? { name: api.name, baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model, apiFormat: api.apiFormat || "openai", rememberKey: api.rememberKey !== false, promptTimeoutSeconds: normalizePromptCloudTimeoutSeconds(api.promptTimeoutSeconds) }
+            : { name: "", baseUrl: "", apiKey: "", model: "", apiFormat: "openai", rememberKey: false, promptTimeoutSeconds: DEFAULT_PROMPT_CLOUD_TIMEOUT_SECONDS });
         setCloudApiEditorOpen(true);
     };
 
@@ -539,6 +541,18 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         </>
                                     ) : null}
                                 </div>
+                                <Form.Item label={t("config.preferences.promptLocalTimeoutSeconds")} extra={t("config.preferences.promptLocalTimeoutHint")} className="mb-4">
+                                    <InputNumber
+                                        min={MIN_LOCAL_PROMPT_TIMEOUT_SECONDS}
+                                        max={MAX_LOCAL_PROMPT_TIMEOUT_SECONDS}
+                                        precision={0}
+                                        step={1}
+                                        value={normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds)}
+                                        onChange={(value) => updateConfig("promptLocalTimeoutSeconds", normalizeLocalPromptTimeoutSeconds(value))}
+                                        aria-label={t("config.preferences.promptLocalTimeoutSeconds")}
+                                        className="!w-full"
+                                    />
+                                </Form.Item>
                                 <Form.Item label={t("config.preferences.cardSkin")} extra={t("config.preferences.cardSkinDescription")} className="mb-4">
                                     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                                         {cardSkinIds.map((id) => {
@@ -840,6 +854,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 if (cloudModelState === "idle") void fetchCloudModels();
                             }}
                         />
+                    </Form.Item>
+                    <Form.Item
+                        label={t("config.cloudApi.promptTimeoutSeconds")}
+                        name="promptTimeoutSeconds"
+                        initialValue={DEFAULT_PROMPT_CLOUD_TIMEOUT_SECONDS}
+                        extra={t("config.cloudApi.promptTimeoutHint")}
+                        rules={[{ required: true, type: "integer", min: MIN_PROMPT_CLOUD_TIMEOUT_SECONDS, max: MAX_PROMPT_CLOUD_TIMEOUT_SECONDS, message: t("config.cloudApi.promptTimeoutInvalid") }]}
+                    >
+                        <InputNumber min={MIN_PROMPT_CLOUD_TIMEOUT_SECONDS} max={MAX_PROMPT_CLOUD_TIMEOUT_SECONDS} precision={0} className="!w-full" />
                     </Form.Item>
                     <Form.Item label={t("config.cloudApi.apiKey")} name="apiKey" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.keyRequired") }]}>
                         <Input.Password placeholder="sk-..." autoComplete="off" onBlur={() => void fetchCloudModels()} />

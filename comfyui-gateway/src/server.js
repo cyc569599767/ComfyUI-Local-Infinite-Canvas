@@ -1964,11 +1964,13 @@ export async function createGatewayApp(overrides = {}) {
         imageCount: files.length,
         signal: abort.signal,
         engine: body.engine,
+        localTimeoutSeconds: body.localTimeoutSeconds,
         cloud: {
           baseUrl: body.cloudBaseUrl,
           apiKey: body.cloudApiKey,
           model: body.cloudModel,
           apiFormat: body.cloudApiFormat || "openai",
+          timeoutSeconds: body.cloudTimeoutSeconds,
         },
       });
       res.json({ ok: true, ...result });
@@ -1997,11 +1999,13 @@ export async function createGatewayApp(overrides = {}) {
         uploadedImages,
         imageCount: Number(body.imageCount) || 0,
         engine: body.engine,
+        localTimeoutSeconds: body.localTimeoutSeconds,
         cloud: {
           baseUrl: body.cloudBaseUrl,
           apiKey: body.cloudApiKey,
           model: body.cloudModel,
           apiFormat: body.cloudApiFormat || "openai",
+          timeoutSeconds: body.cloudTimeoutSeconds,
         },
         signal: abort.signal,
       });
@@ -2038,7 +2042,8 @@ export async function createGatewayApp(overrides = {}) {
         language: body.language,
         instruction: body.instruction,
         engine: body.engine,
-        cloud: { baseUrl: body.cloudBaseUrl, apiKey: body.cloudApiKey, model: body.cloudModel, apiFormat: body.cloudApiFormat || "openai" },
+        localTimeoutSeconds: body.localTimeoutSeconds,
+        cloud: { baseUrl: body.cloudBaseUrl, apiKey: body.cloudApiKey, model: body.cloudModel, apiFormat: body.cloudApiFormat || "openai", timeoutSeconds: body.cloudTimeoutSeconds },
         signal: abort.signal,
       });
       res.json({ ok: true, ...result });

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { deepClone, isPlainObject, nowIso, readJsonFile, slugify, truncate, writeJsonAtomic } from "./util.js";
 import { baseModelDefault, decorateEntry, findUnetLoader, listBaseModels, listModelDescriptors, resolveBaseModelFile, resolveBaseModelVariant } from "./base-models.js";
+import { inferQwenOutputSize } from "./qwen-output-size.js";
 
 const REGISTRY_FILE = "registry.json";
 const TYPE_PREFIX = { image: "image", video: "video", audio: "audio", text: "text" };
@@ -254,6 +255,10 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
           workflow,
           bindings: raw.bindings && Object.keys(raw.bindings).length ? raw.bindings : inferBindings(workflow),
         };
+        // Runtime-only compatibility for already imported legacy Qwen graphs.
+        // Do not migrate/overwrite the user's registry or workflow JSON.
+        const inferredSize = raw.variants ? undefined : inferQwenOutputSize(workflow, entry);
+        if (inferredSize) entry.outputSize = inferredSize;
         if (raw.variants) {
           entry.variants = {};
           for (const [mode, variant] of Object.entries(raw.variants)) {
@@ -265,6 +270,8 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
               continue;
             }
             entry.variants[mode] = { ...variant, workflow: variantWorkflow, bindings: variant.bindings || entry.bindings, defaults: variant.defaults || entry.defaults };
+            const inferredVariantSize = inferQwenOutputSize(variantWorkflow, { ...entry, ...entry.variants[mode] });
+            if (inferredVariantSize) entry.variants[mode].outputSize = inferredVariantSize;
           }
         }
         nextCache.set(id, entry);

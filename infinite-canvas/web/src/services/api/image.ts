@@ -1,3 +1,5 @@
+import { normalizeLocalPromptTimeoutSeconds } from "@/lib/prompt-local-timeout";
+import { normalizePromptCloudTimeoutSeconds } from "@/lib/prompt-cloud-timeout";
 import axios from "axios";
 
 import i18n from "@/i18n";
@@ -1126,7 +1128,7 @@ export type PromptOptimizeResult = { prompt: string; mode: string; duration: num
 
 export async function requestPromptOptimize(
     config: AiConfig,
-    params: { prompt: string; mode: PromptOptimizeMode; duration?: number; referenceNote?: string; language?: "zh" | "en"; images?: ReferenceImage[]; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string } },
+    params: { prompt: string; mode: PromptOptimizeMode; duration?: number; referenceNote?: string; language?: "zh" | "en"; images?: ReferenceImage[]; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string; timeoutSeconds?: number } },
     options?: RequestOptions,
 ): Promise<PromptOptimizeResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
@@ -1143,6 +1145,10 @@ export async function requestPromptOptimize(
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
     formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
+    const cloudTimeoutSeconds = normalizePromptCloudTimeoutSeconds(params.cloud?.timeoutSeconds ?? config.promptCloudTimeoutSeconds);
+    if (params.engine === "cloud") formData.set("cloudTimeoutSeconds", String(cloudTimeoutSeconds));
+    const localTimeoutSeconds = normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds);
+    if (params.engine !== "cloud") formData.set("localTimeoutSeconds", String(localTimeoutSeconds));
     const images = params.images || [];
     const files = await Promise.all(images.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file, index) => formData.append(index === 0 ? "image" : `image${index + 1}`, file));
@@ -1150,7 +1156,7 @@ export async function requestPromptOptimize(
         const response = await axios.post<PromptOptimizeResult>(`${root}/v1/prompts/optimize`, formData, {
             headers: aiHeaders(requestConfig),
             signal: options?.signal,
-            timeout: 240000,
+            timeout: (params.engine === "cloud" ? cloudTimeoutSeconds : localTimeoutSeconds) * 1000 + 30000,
         });
         if (!response.data?.prompt) throw new Error(apiText("promptOptimizeEmpty"));
         return response.data;
@@ -1163,7 +1169,7 @@ export type ImagePromptOptimizeResult = { prompt: string; mode: string };
 
 export async function requestImagePromptOptimize(
     config: AiConfig,
-    params: { prompt: string; mode?: "text" | "image"; language?: "zh" | "en"; images?: ReferenceImage[]; imageCount?: number; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string } },
+    params: { prompt: string; mode?: "text" | "image"; language?: "zh" | "en"; images?: ReferenceImage[]; imageCount?: number; engine?: "local" | "cloud"; cloud?: { baseUrl?: string; apiKey?: string; model?: string; apiFormat?: string; timeoutSeconds?: number } },
     options?: RequestOptions,
 ): Promise<ImagePromptOptimizeResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
@@ -1178,6 +1184,10 @@ export async function requestImagePromptOptimize(
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
     formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
+    const cloudTimeoutSeconds = normalizePromptCloudTimeoutSeconds(params.cloud?.timeoutSeconds ?? config.promptCloudTimeoutSeconds);
+    if (params.engine === "cloud") formData.set("cloudTimeoutSeconds", String(cloudTimeoutSeconds));
+    const localTimeoutSeconds = normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds);
+    if (params.engine !== "cloud") formData.set("localTimeoutSeconds", String(localTimeoutSeconds));
     const images = params.images || [];
     formData.set("imageCount", String(params.imageCount ?? images.length));
     if (params.engine !== "cloud") {
@@ -1188,7 +1198,7 @@ export async function requestImagePromptOptimize(
         const response = await axios.post<ImagePromptOptimizeResult>(`${root}/v1/prompts/optimize-image`, formData, {
             headers: aiHeaders(requestConfig),
             signal: options?.signal,
-            timeout: 240000,
+            timeout: (params.engine === "cloud" ? cloudTimeoutSeconds : localTimeoutSeconds) * 1000 + 30000,
         });
         if (!response.data?.prompt) throw new Error(apiText("promptOptimizeEmpty"));
         return response.data;
@@ -1198,9 +1208,9 @@ export async function requestImagePromptOptimize(
 }
 
 export type ImageCaptionEngine = "qwen35" | "florence" | "kvmem" | "cloud";
-export type ImageCaptionResult = { prompt: string; engine?: ImageCaptionEngine; promptId?: string; elapsedMs?: number; released?: boolean; truncated?: boolean };
+export type ImageCaptionResult = { prompt: string; engine?: ImageCaptionEngine; promptId?: string; elapsedMs?: number; released?: boolean; truncated?: boolean; visionMode?: "cpu" | "gpu"; visionRequested?: "cpu" | "gpu" | "auto" };
 
-export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; timeoutMs?: number; cloud?: { baseUrl: string; apiKey: string; model: string; apiFormat?: string } }, options?: RequestOptions): Promise<ImageCaptionResult> {
+export async function requestImageCaption(config: AiConfig, params: { images: ReferenceImage[]; language?: "zh" | "en"; instruction?: string; engine?: ImageCaptionEngine; timeoutMs?: number; startupTimeoutMs?: number; cloud?: { baseUrl: string; apiKey: string; model: string; apiFormat?: string; timeoutSeconds?: number } }, options?: RequestOptions): Promise<ImageCaptionResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const root = localGatewayRoot(requestConfig.baseUrl);
     if (!root) throw new Error(apiText("promptOptimizeLocalOnly"));
@@ -1214,13 +1224,20 @@ export async function requestImageCaption(config: AiConfig, params: { images: Re
     if (params.cloud?.apiKey) formData.set("cloudApiKey", params.cloud.apiKey);
     if (params.cloud?.model) formData.set("cloudModel", params.cloud.model);
     formData.set("cloudApiFormat", params.cloud?.apiFormat || config.promptCloudApiFormat || "openai");
+    const cloudTimeoutSeconds = normalizePromptCloudTimeoutSeconds(params.cloud?.timeoutSeconds ?? config.promptCloudTimeoutSeconds);
+    if (params.engine === "cloud") formData.set("cloudTimeoutSeconds", String(cloudTimeoutSeconds));
+    const localTimeoutSeconds = normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds);
+    if (params.engine !== "cloud") formData.set("localTimeoutSeconds", String(localTimeoutSeconds));
     const file = await dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) });
     formData.append("image", file);
     try {
         const response = await axios.post<ImageCaptionResult>(`${root}/v1/prompts/caption`, formData, {
             headers: aiHeaders(requestConfig),
             signal: options?.signal,
-            timeout: Math.min(1230000, Math.max(240000, Number(params.timeoutMs) || 240000)),
+            timeout: params.engine === "cloud" ? cloudTimeoutSeconds * 1000 + 30000 : Math.max(
+                localTimeoutSeconds * 1000 + Math.min(600000, Math.max(0, Number(params.startupTimeoutMs) || (params.engine === "kvmem" ? 600000 : 0))) + 60000,
+                Math.min(2460000, Number(params.timeoutMs) || 0),
+            ),
         });
         if (!response.data?.prompt) throw new Error(apiText("promptOptimizeEmpty"));
         return response.data;

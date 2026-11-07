@@ -1,3 +1,6 @@
+import { normalizeLocalPromptTimeoutSeconds } from "./prompt-local-timeout.js";
+import { promptCloudFetch } from "./prompt-cloud-timeout.js";
+import { selectKvmemVision } from "./kvmem-vision.js";
 import fs from "node:fs";
 import path from "node:path";
 import net from "node:net";
@@ -97,7 +100,7 @@ function visionEnabled(props) {
  * module does not claim Windows Job Object protection after a host hard crash.
  */
 export function createKvmemRuntime({
-  config = {}, logger, spawnImpl = spawn, fetchImpl = globalThis.fetch,
+  config = {}, logger, spawnImpl = spawn, fetchImpl = promptCloudFetch,
   freePort = freeLoopbackPort, fileExists = isFile, now = Date.now,
   pollIntervalMs = 200, probeTimeoutMs = 2000, stopTimeoutMs = 5000,
 } = {}) {
@@ -106,16 +109,17 @@ export function createKvmemRuntime({
   const exe = config.installDir ? path.join(config.installDir, ...EXE) : "";
   const model = config.modelPath || "";
   const startupMs = positive(config.startupTimeoutMs, 180000);
-  const requestMs = positive(config.requestTimeoutMs, 180000);
+  const requestMs = positive(config.requestTimeoutMs, 600000);
 
   function capability() {
     const reasons = [];
     if (config.enabled !== true) reasons.push("KVMem 本地反推未启用");
     if (!exe || !path.isAbsolute(exe) || !fileExists(exe)) reasons.push("未找到指定安装目录的 NInfer worker");
     if (!model || !path.isAbsolute(model) || path.extname(model).toLowerCase() !== ".ninfer" || !fileExists(model)) reasons.push("请选择存在的 .ninfer 模型文件");
+    if (!['cpu', 'gpu', 'auto'].includes(config.visionMode ?? 'cpu')) reasons.push("KVMem 视觉模式必须是 cpu、gpu 或 auto");
     if (shuttingDown) reasons.push("KVMem runtime 已关闭");
     return { id: "kvmem", label: "KVMem / NInfer", enabled: config.enabled === true, available: !reasons.length,
-      reasons, missingResources: [], missingNodes: [] };
+      visionMode: config.visionMode ?? "cpu", reasons, missingResources: [], missingNodes: [] };
   }
 
   function ownChild(run, child) {
@@ -155,6 +159,7 @@ export function createKvmemRuntime({
     try {
       const response = await abortable(fetchImpl(run.base + route, {
         method: body ? "POST" : "GET", redirect: "error", signal: controller.signal,
+        timeoutMs: probe ? probeTimeoutMs : run.requestMs,
         headers: { Authorization: `Bearer ${run.key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
       }), controller.signal);
@@ -172,6 +177,7 @@ export function createKvmemRuntime({
       if (run.controller.signal.aborted) throw run.controller.signal.reason;
       if (controller.signal.aborted) throw controller.signal.reason;
       if (typeof error?.code === "string" && error.code.startsWith("kvmem_")) throw error;
+      if (error?.code === "cloud_api_timeout") throw failure(probe ? "kvmem_probe_timeout" : "kvmem_request_timeout", probe ? "KVMem 就绪探测超时" : "KVMem 图片反推超时", 504);
       throw failure("kvmem_connection_failed", "无法连接专有 KVMem worker");
     } finally {
       clearTimeout(timer);
@@ -179,14 +185,16 @@ export function createKvmemRuntime({
     }
   }
 
-  async function execute(run, { imageDataUrl, systemPrompt, userPrompt, signal }) {
+  async function execute(run, { imageDataUrl, systemPrompt, userPrompt, signal, hardware }) {
     const started = now();
+    const vision = selectKvmemVision(config.visionMode ?? "cpu", hardware);
     const abort = () => run.controller.abort(cancelled());
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
     let timer;
     try {
       if (run.controller.signal.aborted) throw run.controller.signal.reason;
+      if (vision.mode === "gpu" && !vision.admitted) throw failure("kvmem_insufficient_vram", "未确认 GPU 视觉模式所需空闲显存，未启动 worker", 409);
       timer = setTimeout(() => run.controller.abort(failure("kvmem_startup_timeout", "KVMem worker 启动超时", 504)), startupMs);
       const port = await abortable(freePort(), run.controller.signal);
       if (run.controller.signal.aborted) throw run.controller.signal.reason;
@@ -198,7 +206,7 @@ export function createKvmemRuntime({
         "--device", "0", "--max-context", "8192", "--max-concurrency", "1", "--default-max-tokens", "1024",
         "--prefill-chunk", "128", "--kv-dtype", "int8", "--kvmem", "--kvmem-budget", "2048",
         "--kvmem-gen-reserve", "512", "--kvmem-host-mib", "1024", "--kvmem-sink-tokens", "64",
-        "--kvmem-recent-tokens", "64", "--kvmem-sessions", "1", "--vision-cpu", "--vision-max-merged", "1024",
+        "--kvmem-recent-tokens", "64", "--kvmem-sessions", "1", ...(vision.mode === "gpu" ? ["--vision", "--vision-residency", "resident"] : ["--vision-cpu"]), "--vision-max-merged", "1024",
         "--spec", "none", "--ngram-draft-tokens", "0", "--no-thinking", "--device-profile", "off",
         "--no-cuda-graph", "--media-cache-mib", "0", "--no-webui"];
       try {
@@ -226,7 +234,7 @@ export function createKvmemRuntime({
         throw failure("kvmem_capability_mismatch", "专有 worker 未确认 NInfer 图像能力");
       }
       clearTimeout(timer);
-      timer = setTimeout(() => run.controller.abort(failure("kvmem_request_timeout", "KVMem 图片反推超时", 504)), requestMs);
+      timer = setTimeout(() => run.controller.abort(failure("kvmem_request_timeout", "KVMem 图片反推超时", 504)), run.requestMs);
       const response = await request(run, "/v1/chat/completions", { body: {
         model: run.modelId, stream: false, max_tokens: 1024, temperature: 0.2, reasoning_effort: "none",
         messages: [
@@ -243,7 +251,8 @@ export function createKvmemRuntime({
       if (run.controller.signal.aborted) throw run.controller.signal.reason;
       // finally must confirm close before this pending return becomes observable.
       return { prompt, engine: "kvmem", elapsedMs: Math.max(0, now() - started), released: true,
-        modelName: path.basename(model), truncated: choice.finish_reason === "length" };
+        modelName: path.basename(model), truncated: choice.finish_reason === "length", visionMode: vision.mode,
+        visionRequested: vision.requested, visionSelectionReason: vision.reason };
     } finally {
       clearTimeout(timer);
       try { await release(run); }
@@ -274,7 +283,10 @@ export function createKvmemRuntime({
         (input.systemPrompt != null && (typeof input.systemPrompt !== "string" || input.systemPrompt.length > 12000))) {
       return Promise.reject(failure("kvmem_invalid_prompt", "图片描述指令为空或超出限制", 400));
     }
-    const run = { controller: new AbortController(), child: null, closed: false, settled: false, stopping: false };
+    let effectiveRequestMs;
+    try { effectiveRequestMs = input.timeoutSeconds === undefined ? requestMs : normalizeLocalPromptTimeoutSeconds(input.timeoutSeconds) * 1000; }
+    catch (error) { return Promise.reject(error); }
+    const run = { controller: new AbortController(), child: null, closed: false, settled: false, stopping: false, requestMs: effectiveRequestMs };
     active = run; // Synchronous reservation rejects competing requests before any await.
     const operation = execute(run, input);
     run.done = operation.then(() => {}, () => {});

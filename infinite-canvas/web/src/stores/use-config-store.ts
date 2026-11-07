@@ -7,6 +7,8 @@ import i18n from "@/i18n";
 import { isLocalGatewayUrl, LOCAL_GATEWAY_BASE_URL, LOCAL_GATEWAY_CHANNEL_ID, LOCAL_GATEWAY_MODELS, LOCAL_GATEWAY_MODEL_VALUES, LOCAL_ONLY } from "@/constant/app-mode";
 import { normalizeProgressRingSkin, type ProgressRingSkinId } from "@/lib/canvas/progress-ring-skins";
 import { AGENT_API_FORMATS, normalizeAgentApiFormat, persistedPromptCloudConfig, type AgentApiFormat } from "@/lib/agent-cloud-config";
+import { DEFAULT_PROMPT_CLOUD_TIMEOUT_SECONDS, normalizePromptCloudTimeoutSeconds } from "@/lib/prompt-cloud-timeout";
+import { DEFAULT_LOCAL_PROMPT_TIMEOUT_SECONDS, normalizeLocalPromptTimeoutSeconds } from "@/lib/prompt-local-timeout";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -45,6 +47,7 @@ export type PromptCloudApi = {
     model: string;
     apiFormat?: PromptCloudApiFormat;
     rememberKey?: boolean;
+    promptTimeoutSeconds?: number;
 };
 
 export type AiConfig = {
@@ -71,10 +74,12 @@ export type AiConfig = {
     videoSelfLiftMode?: string;
     promptApiEngine?: string;
     promptOptimizeLanguage?: "zh" | "en";
+    promptLocalTimeoutSeconds?: number;
     promptCloudBaseUrl?: string;
     promptCloudApiKey?: string;
     promptCloudModel?: string;
     promptCloudApiFormat?: PromptCloudApiFormat;
+    promptCloudTimeoutSeconds?: number;
     promptCloudApis?: PromptCloudApi[];
     promptCloudApiId?: string;
     frameMode?: "first" | "last" | "both";
@@ -177,10 +182,12 @@ const cloudDefaultConfig: AiConfig = {
     videoSelfLiftMode: "fast",
     promptApiEngine: "local",
     promptOptimizeLanguage: "zh",
+    promptLocalTimeoutSeconds: DEFAULT_LOCAL_PROMPT_TIMEOUT_SECONDS,
     promptCloudBaseUrl: "",
     promptCloudApiKey: "",
     promptCloudModel: "",
     promptCloudApiFormat: "openai",
+    promptCloudTimeoutSeconds: DEFAULT_PROMPT_CLOUD_TIMEOUT_SECONDS,
     promptCloudApis: [],
     promptCloudApiId: "",
     systemPrompt: "",
@@ -411,7 +418,7 @@ export function normalizePromptCloudApis(value: unknown): PromptCloudApi[] {
         let id = String(raw.id || "").trim() || nanoid();
         if (seen.has(id)) id = nanoid();
         seen.add(id);
-        apis.push({ id, name: explicitName || suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(raw.apiFormat), rememberKey: raw.rememberKey !== false });
+        apis.push({ id, name: explicitName || suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(raw.apiFormat), rememberKey: raw.rememberKey !== false, promptTimeoutSeconds: normalizePromptCloudTimeoutSeconds(raw.promptTimeoutSeconds) });
     }
     return apis;
 }
@@ -425,6 +432,7 @@ function promptCloudMirror(apis: PromptCloudApi[], activeId: string) {
         promptCloudApiKey: active?.apiKey || "",
         promptCloudModel: active?.model || "",
         promptCloudApiFormat: normalizeAgentApiFormat(active?.apiFormat),
+        promptCloudTimeoutSeconds: normalizePromptCloudTimeoutSeconds(active?.promptTimeoutSeconds),
     };
 }
 
@@ -435,7 +443,7 @@ export function normalizePromptCloudConfig(config: AiConfig): AiConfig {
         const apiKey = String(config.promptCloudApiKey || "").trim();
         const model = normalizePromptCloudModel(baseUrl, String(config.promptCloudModel || "").trim());
         if (baseUrl || apiKey || model) {
-            apis.push({ id: nanoid(), name: suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(config.promptCloudApiFormat) });
+            apis.push({ id: nanoid(), name: suggestPromptCloudApiName(baseUrl, model), baseUrl, apiKey, model, apiFormat: normalizeAgentApiFormat(config.promptCloudApiFormat), promptTimeoutSeconds: normalizePromptCloudTimeoutSeconds(config.promptCloudTimeoutSeconds) });
         }
     }
     const activeId = apis.some((api) => api.id === config.promptCloudApiId) ? String(config.promptCloudApiId) : apis[0]?.id || "";
@@ -476,6 +484,7 @@ export const useConfigStore = create<ConfigStore>()(
                     model: String(input.model || "").trim(),
                     apiFormat: normalizeAgentApiFormat(input.apiFormat),
                     rememberKey: input.rememberKey === true,
+                    promptTimeoutSeconds: normalizePromptCloudTimeoutSeconds(input.promptTimeoutSeconds),
                 };
                 set((state) => {
                     const apis = [...(state.config.promptCloudApis || []), api];
@@ -496,6 +505,7 @@ export const useConfigStore = create<ConfigStore>()(
                                   apiKey: String((patch.apiKey ?? api.apiKey) || "").trim(),
                                   model: String((patch.model ?? api.model) || "").trim(),
                                   apiFormat: normalizeAgentApiFormat(patch.apiFormat ?? api.apiFormat),
+                                  promptTimeoutSeconds: normalizePromptCloudTimeoutSeconds("promptTimeoutSeconds" in patch ? patch.promptTimeoutSeconds : api.promptTimeoutSeconds),
                               }
                             : api,
                     );
@@ -606,12 +616,14 @@ export const useConfigStore = create<ConfigStore>()(
                         videoInterpolation: config.videoInterpolation === "2x" || config.videoInterpolation === "3x" ? config.videoInterpolation : "off",
                         videoSelfLiftMode: config.videoSelfLiftMode === "quality" ? "quality" : "fast",
                         promptApiEngine: config.promptApiEngine === "cloud" ? "cloud" : "local",
+                        promptLocalTimeoutSeconds: normalizeLocalPromptTimeoutSeconds(config.promptLocalTimeoutSeconds),
                         promptCloudApis: normalizedCloud.promptCloudApis,
                         promptCloudApiId: normalizedCloud.promptCloudApiId,
                         promptCloudBaseUrl: normalizedCloud.promptCloudBaseUrl,
                         promptCloudApiKey: normalizedCloud.promptCloudApiKey,
                         promptCloudModel: normalizedCloud.promptCloudModel,
                         promptCloudApiFormat: normalizedCloud.promptCloudApiFormat,
+                        promptCloudTimeoutSeconds: normalizedCloud.promptCloudTimeoutSeconds,
                         canvasImageCount: config.canvasImageCount || "3",
                         proxyEnabled: LOCAL_ONLY ? false : Boolean(config.proxyEnabled),
                         proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,

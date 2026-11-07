@@ -196,6 +196,30 @@ class SubprocessPolicyTests(unittest.TestCase):
                 self.assertEqual(FakePopen.calls[-1]["creationflags"], 0)
 
 
+class FileResponsePolicyTests(unittest.TestCase):
+    def test_windows_enables_native_chunked_fallback_only_in_child_environment(self):
+        with mock.patch.object(bootstrap.sys, "platform", "win32"), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(bootstrap.install_windows_file_response_policy())
+            self.assertEqual(os.environ["AIOHTTP_NOSENDFILE"], "1")
+            self.assertTrue(bootstrap.install_windows_file_response_policy())
+
+    def test_non_windows_does_not_change_file_response_environment(self):
+        with mock.patch.object(bootstrap.sys, "platform", "linux"), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(bootstrap.install_windows_file_response_policy())
+            self.assertNotIn("AIOHTTP_NOSENDFILE", os.environ)
+
+    def test_policy_precedes_application_import_without_editing_its_files(self):
+        with tempfile.TemporaryDirectory(prefix="canvas-file-policy-") as directory:
+            main = Path(directory) / "main.py"
+            source = "import os,json;print(json.dumps({'noSendfile':os.environ.get('AIOHTTP_NOSENDFILE')}))"
+            main.write_text(source, encoding="utf-8")
+            result = run_bootstrap(main, cwd=directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if sys.platform == "win32":
+                self.assertEqual(json.loads(result.stdout)["noSendfile"], "1")
+            self.assertEqual(main.read_text(encoding="utf-8"), source)
+
+
 class BootstrapExecutionTests(unittest.TestCase):
     def test_embedded_stdlib_path_is_preserved_and_script_path_is_replaced(self):
         main = str(BOOTSTRAP.parent / "fixture-app" / "main.py")
@@ -212,6 +236,7 @@ class BootstrapExecutionTests(unittest.TestCase):
                     mock.patch.object(bootstrap.sys, "path", list(initial)), \
                     mock.patch.object(bootstrap.sys, "argv", ["bootstrap"]), \
                     mock.patch.object(bootstrap, "install_windows_subprocess_policy"), \
+                    mock.patch.object(bootstrap, "install_windows_file_response_policy"), \
                     mock.patch.object(bootstrap.runpy, "run_path") as run_path:
                 bootstrap.main([main, "--port", "8188"])
                 self.assertEqual(sys.path, expected)

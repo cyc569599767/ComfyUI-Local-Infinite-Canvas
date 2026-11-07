@@ -54,6 +54,7 @@ export function loadConfig(overrides = {}) {
       installDir: String(process.env.KVMEM_INSTALL_DIR || "").trim(),
       modelPath: String(process.env.KVMEM_MODEL_PATH || "").trim(),
       gpuDevice: String(process.env.KVMEM_GPU_DEVICE || "0"),
+      visionMode: String(process.env.KVMEM_VISION_MODE || "cpu"),
       startupTimeoutMs: Math.min(600000, Math.max(30000, num(process.env.KVMEM_STARTUP_TIMEOUT_MS, 180000))),
       requestTimeoutMs: Math.min(600000, Math.max(30000, num(process.env.KVMEM_REQUEST_TIMEOUT_MS, 180000))),
     },

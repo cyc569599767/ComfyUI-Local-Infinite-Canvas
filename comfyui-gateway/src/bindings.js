@@ -289,18 +289,28 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
   }
 
   const outputSize = entry.outputSize?.fromSize ? context.size : context.outputSize;
-  const nativeResolution = Math.max(256, Math.round((Number(context.params?.resolution) || 1024) / 32) * 32);
+  // Compare with the latent actually consumed by the sampler, not params:
+  // imported workflows may not bind params.resolution to their encoder at all.
+  const nativeLink = next[entry.outputSize?.latentNode]?.inputs?.[entry.outputSize?.latentInput || "latent_image"];
+  const nativeNode = Array.isArray(nativeLink) ? next[nativeLink[0]] : undefined;
+  const nativeResolution = nativeNode?.class_type === "TextEncodeQwenImage21" && nativeLink[1] === 2
+    ? Number(nativeNode.inputs.resolution) || 1024
+    : undefined;
   const skipNativeSquare = Boolean(
     entry.outputSize?.skipNativeSquare &&
     outputSize &&
     outputSize.width === outputSize.height &&
-    Math.round(outputSize.width / 32) * 32 === nativeResolution,
+    outputSize.width === nativeResolution,
   );
   if (entry.outputSize && outputSize && !skipNativeSquare) {
     const sizeNode = next[entry.outputSize.node];
     const latentNode = next[entry.outputSize.latentNode];
     if (sizeNode?.inputs && latentNode?.inputs) {
-      const snap = (value) => Math.max(256, Math.round(Number(value) / 32) * 32);
+      // T2I sizes are explicit 16-aligned pixels from the image settings/API.
+      // Qwen 2.1 VAE uses 16x compression; 32-rounding silently changes valid
+      // presets (e.g. 1360 -> 1376). Reference/edit canvas sizing stays on 32.
+      const step = entry.outputSize.fromSize ? 16 : 32;
+      const snap = (value) => Math.max(256, Math.round(Number(value) / step) * step);
       sizeNode.inputs.width = snap(outputSize.width);
       sizeNode.inputs.height = snap(outputSize.height);
       latentNode.inputs[entry.outputSize.latentInput || "latent_image"] = [entry.outputSize.latentSource || entry.outputSize.node, 0];

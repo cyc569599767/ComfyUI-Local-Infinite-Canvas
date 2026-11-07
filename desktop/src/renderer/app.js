@@ -62,7 +62,8 @@ $('settings-form').addEventListener('submit', async (event) => {
       kvmemEnabled: $('setting-kvmem-enabled').checked,
       kvmemInstallDir: $('setting-kvmem-install-dir').value,
       kvmemModelPath: $('setting-kvmem-model-path').value,
-      kvmemGpuDevice: $('setting-kvmem-gpu-device').value });
+      kvmemGpuDevice: $('setting-kvmem-gpu-device').value,
+      kvmemVisionMode: $('setting-kvmem-vision-mode').value });
     $('settings-result').textContent = '已保存。完成当前生成后点击「重启应用」生效。';
   } catch (error) { $('settings-result').textContent = error.message; }
 });
@@ -99,6 +100,7 @@ $('restart-app').addEventListener('click', () => perform(() => window.desktop.re
       $('setting-kvmem-install-dir').value = config.kvmemInstallDir ?? '';
       $('setting-kvmem-model-path').value = config.kvmemModelPath ?? '';
       $('setting-kvmem-gpu-device').value = config.kvmemGpuDevice ?? '0';
+      $('setting-kvmem-vision-mode').value = config.kvmemVisionMode ?? 'cpu';
       $('data-location').textContent = `用户数据：${settings.userData}`;
       if (settings.workflowConflicts?.length) $('settings-result').textContent = `升级保留了用户修改的工作流，需手动合并新版：${settings.workflowConflicts.join(', ')}`;
     }

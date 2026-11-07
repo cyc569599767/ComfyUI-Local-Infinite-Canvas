@@ -1,8 +1,9 @@
-import { Button } from "antd";
+import { Button, InputNumber } from "antd";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
+import { DEFAULT_LOCAL_PROMPT_TIMEOUT_SECONDS, MIN_LOCAL_PROMPT_TIMEOUT_SECONDS, MAX_LOCAL_PROMPT_TIMEOUT_SECONDS, normalizeLocalPromptTimeoutSeconds } from "@/lib/prompt-local-timeout";
 
 export type PromptOptimizeEngine = "local" | "cloud";
 export type PromptOptimizeLanguage = "zh" | "en";
@@ -13,6 +14,8 @@ type PromptOptimizeOptionsProps = {
     cloudReady: boolean;
     cloudModel?: string;
     localReady?: boolean;
+    localTimeoutSeconds?: number;
+    onLocalTimeoutChange?: (seconds: number) => void;
     title?: string;
     disabled?: boolean;
     className?: string;
@@ -30,6 +33,8 @@ export function PromptOptimizeOptions({
     cloudReady,
     cloudModel,
     localReady = true,
+    localTimeoutSeconds = DEFAULT_LOCAL_PROMPT_TIMEOUT_SECONDS,
+    onLocalTimeoutChange,
     title,
     disabled = false,
     className = "",
@@ -92,6 +97,24 @@ export function PromptOptimizeOptions({
                     </div>
                 ) : null}
             </div>
+            {engine === "local" && onLocalTimeoutChange ? (
+                <div>
+                    <div className="mb-1 text-[11px] opacity-70">{t("config.preferences.promptLocalTimeoutSeconds")}</div>
+                    <InputNumber
+                        size="small"
+                        min={MIN_LOCAL_PROMPT_TIMEOUT_SECONDS}
+                        max={MAX_LOCAL_PROMPT_TIMEOUT_SECONDS}
+                        precision={0}
+                        step={1}
+                        value={normalizeLocalPromptTimeoutSeconds(localTimeoutSeconds)}
+                        onChange={(value) => onLocalTimeoutChange(normalizeLocalPromptTimeoutSeconds(value))}
+                        aria-label={t("config.preferences.promptLocalTimeoutSeconds")}
+                        disabled={disabled}
+                        className="!w-full"
+                    />
+                    <div className="mt-1 text-[11px] opacity-70">{t("config.preferences.promptLocalTimeoutHint")}</div>
+                </div>
+            ) : null}
             <div>
                 <div className="mb-1 text-[11px] opacity-70">{t("canvas.promptPanel.optimizeLanguage")}</div>
                 <div className="grid grid-cols-2 gap-2">

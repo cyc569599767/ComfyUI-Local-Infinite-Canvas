@@ -58,7 +58,7 @@ async function waitFor(testCondition) {
 test("capability is synchronous, explicit opt-in, checks paths without spawning", () => {
   const h = harness();
   assert.deepEqual(h.runtime.capability(), { id: "kvmem", label: "KVMem / NInfer", enabled: true, available: true,
-    reasons: [], missingResources: [], missingNodes: [] });
+    visionMode: "cpu", reasons: [], missingResources: [], missingNodes: [] });
   assert.equal(h.children.length, 0);
   assert.equal(harness({ configuration: { enabled: false } }).runtime.capability().available, false);
   assert.equal(harness({ configuration: { modelPath: path.resolve("model.gguf") } }).runtime.capability().available, false);
@@ -104,6 +104,41 @@ test("successful caption uses private native argv, authenticates identity and wa
   assert.equal(body.messages[1].content[1].image_url.url, image);
   assert.equal(h.logs.length, 0);
   await h.runtime.close();
+});
+
+test("GPU vision uses resident flags while text stays on CUDA and cleanup remains confirmed", async () => {
+  const h = harness({ configuration: { visionMode: "gpu" } });
+  const result = await h.runtime.caption({ ...input, hardware: { modelBytes: 12 * 1024 ** 3, availableVramBytes: 16 * 1024 ** 3 } });
+  const args = h.children[0].argv;
+  assert.equal(args.includes("--vision-cpu"), false);
+  assert.equal(args[args.indexOf("--vision-residency") + 1], "resident");
+  assert.equal(args[args.indexOf("--device") + 1], "0");
+  assert.equal(result.visionMode, "gpu");
+  assert.equal(result.visionRequested, "gpu");
+  assert.equal(result.released, true);
+  assert.equal(h.children[0].closed, true);
+});
+
+test("auto selects CPU under pressure; explicit GPU refuses before spawning", async () => {
+  const hardware = { modelBytes: 12 * 1024 ** 3, availableVramBytes: 14 * 1024 ** 3 };
+  const auto = harness({ configuration: { visionMode: "auto" } });
+  const result = await auto.runtime.caption({ ...input, hardware });
+  assert.equal(result.visionMode, "cpu");
+  assert.equal(result.visionSelectionReason, "cpu-preserve-vram");
+  assert.ok(auto.children[0].argv.includes("--vision-cpu"));
+  const gpu = harness({ configuration: { visionMode: "gpu" } });
+  await assert.rejects(gpu.runtime.caption({ ...input, hardware }), { code: "kvmem_insufficient_vram" });
+  assert.equal(gpu.children.length, 0);
+  assert.equal(gpu.runtime.isBusy(), false);
+  await assert.rejects(gpu.runtime.caption(input), { code: "kvmem_insufficient_vram" });
+});
+
+test("GPU failure is not silently retried as CPU", async () => {
+  const h = harness({ configuration: { visionMode: "gpu" }, fetchRoute: ({ route }) => route === "/v1/chat/completions" ? json({}, 500) : undefined });
+  await assert.rejects(h.runtime.caption({ ...input, hardware: { modelBytes: 12 * 1024 ** 3, availableVramBytes: 16 * 1024 ** 3 } }), { code: "kvmem_http_error" });
+  assert.equal(h.children.length, 1);
+  assert.equal(h.children[0].closed, true);
+  assert.equal(h.runtime.isBusy(), false);
 });
 
 test("a second finished caption starts a new child and new model/key identities", async () => {
@@ -193,6 +228,42 @@ test("startup timeout and request timeout are bounded even if fetch ignores abor
   const request = harness({ configuration: { requestTimeoutMs: 12 }, fetchRoute: ({ route }) => route === "/v1/chat/completions" ? new Promise(() => {}) : undefined });
   await assert.rejects(request.runtime.caption(input), { code: "kvmem_request_timeout" });
   assert.equal(request.children[0].closed, true);
+});
+
+test("per-caption local timeout overrides an older desktop request timeout without changing startup or cleanup", async (t) => {
+  const realTimer = globalThis.setTimeout;
+  const deadlines = [];
+  t.mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
+    deadlines.push(ms);
+    return realTimer(callback, ms === 900000 ? 1000 : ms, ...args);
+  });
+  const h = harness({ configuration: { requestTimeoutMs: 12 }, fetchRoute: async ({ route }) => {
+    if (route === "/v1/chat/completions") await new Promise(resolve => realTimer(resolve, 30));
+    return undefined;
+  } });
+  const result = await h.runtime.caption({ ...input, timeoutSeconds: 900 });
+  assert.equal(result.released, true);
+  assert.ok(deadlines.includes(900000));
+  assert.equal(h.requests.at(-1).options.timeoutMs, 900000);
+  assert.equal(h.children[0].closed, true);
+});
+
+test("invalid per-caption local timeouts are rejected before spawning", async () => {
+  for (const timeoutSeconds of [29, 1801, 'bad', 30.5]) {
+    const h = harness();
+    await assert.rejects(h.runtime.caption({ ...input, timeoutSeconds }), { code: 'local_invalid_timeout' });
+    assert.equal(h.children.length, 0);
+    assert.equal(h.runtime.isBusy(), false);
+  }
+});
+
+test("configured long local deadline still aborts HTTP and waits for worker exit", async (t) => {
+  const realTimer = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => realTimer(callback, ms === 30000 ? 15 : ms, ...args));
+  const h = harness({ fetchRoute: ({route}) => route === '/v1/chat/completions' ? new Promise(()=>{}) : undefined });
+  await assert.rejects(h.runtime.caption({ ...input, timeoutSeconds: 30 }), { code: 'kvmem_request_timeout' });
+  assert.equal(h.children[0].closed, true);
+  assert.equal(h.runtime.isBusy(), false);
 });
 
 test("concurrent caption is rejected; close aborts and awaits active cleanup, then stays closed", async () => {

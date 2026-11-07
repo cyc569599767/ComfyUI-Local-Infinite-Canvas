@@ -23,7 +23,7 @@ function fixture(t) {
 }
 
 const kvmemDefaults = {
-  kvmemEnabled: true, kvmemInstallDir: '', kvmemModelPath: '', kvmemGpuDevice: '0',
+  kvmemEnabled: true, kvmemInstallDir: '', kvmemModelPath: '', kvmemGpuDevice: '0', kvmemVisionMode: 'cpu',
   kvmemStartupTimeoutSec: 180, kvmemRequestTimeoutSec: 180,
 };
 const onlyKvmem = config => Object.fromEntries(Object.keys(kvmemDefaults).map(key => [key, config[key]]));
@@ -47,6 +47,17 @@ test('KVMem settings require a boolean and canonical 0..15 GPU integer strings',
   }
   for (const value of ['', '-1', '16', '1.5', '1e0', '01', '+1', ' 0 ', '0,1', 0, 1, false, [], {}]) {
     assert.throws(() => validateConfig({ kvmemGpuDevice: value }), /kvmemGpuDevice/);
+  }
+});
+
+test('KVMem vision mode is a strict enum and defaults only when absent', () => {
+  assert.equal(validateConfig({}).kvmemVisionMode, 'cpu');
+  assert.equal(validateConfig({ kvmemVisionMode: undefined }).kvmemVisionMode, 'cpu');
+  for (const value of ['cpu', 'gpu', 'auto']) {
+    assert.equal(validateConfig({ kvmemVisionMode: value }).kvmemVisionMode, value);
+  }
+  for (const value of [null, '', 'CPU', 'GPU', 'AUTO', ' cpu ', 'cuda', '0', 0, 1, true, false, [], ['cpu'], {}]) {
+    assert.throws(() => validateConfig({ kvmemVisionMode: value }), /kvmemVisionMode/);
   }
 });
 
@@ -79,18 +90,20 @@ test('KVMem paths may be empty or absolute without installed binaries; models mu
 test('application starts with empty KVMem paths and clears every inherited KVMEM_* setting', t => {
   const f = fixture(t);
   const inherited = { SAFE_MARKER: 'retained', KVMEM_ENABLED: '0', KVMEM_INSTALL_DIR: 'untrusted',
-    KVMEM_MODEL_PATH: 'untrusted', KVMEM_GPU_DEVICE: '15', KVMEM_STARTUP_TIMEOUT_MS: '1',
+    KVMEM_MODEL_PATH: 'untrusted', KVMEM_GPU_DEVICE: '15', KVMEM_VISION_MODE: 'gpu', KVMEM_STARTUP_TIMEOUT_MS: '1',
     KVMEM_REQUEST_TIMEOUT_MS: '2', KVMEM_SERVER_URL: 'http://untrusted', KVMEM_FUTURE_FLAG: 'unsafe',
-    kVmEm_Enabled: '0', kvmem_unknown_option: 'unsafe' };
+    kVmEm_Enabled: '0', kvmem_vision_mode: 'auto', kvmem_unknown_option: 'unsafe' };
   const application = createApplication({ ...f, env: inherited });
   assert.deepEqual(onlyKvmem(application.readConfig()), kvmemDefaults);
   assert.deepEqual(Object.fromEntries(Object.entries(application.env).filter(([key]) => /^KVMEM_/i.test(key))), {
-    KVMEM_ENABLED: '1', KVMEM_INSTALL_DIR: '', KVMEM_MODEL_PATH: '', KVMEM_GPU_DEVICE: '0',
+    KVMEM_ENABLED: '1', KVMEM_INSTALL_DIR: '', KVMEM_MODEL_PATH: '', KVMEM_GPU_DEVICE: '0', KVMEM_VISION_MODE: 'cpu',
     KVMEM_STARTUP_TIMEOUT_MS: '180000', KVMEM_REQUEST_TIMEOUT_MS: '180000',
   });
   assert.equal(application.env.SAFE_MARKER, 'retained');
   assert.equal(inherited.KVMEM_FUTURE_FLAG, 'unsafe', 'caller environment must not be mutated');
   assert.equal(inherited.kVmEm_Enabled, '0');
+  assert.equal(inherited.KVMEM_VISION_MODE, 'gpu');
+  assert.equal(inherited.kvmem_vision_mode, 'auto');
   assert.deepEqual(onlyKvmem(application.saveConfig({ ...DEFAULTS })), kvmemDefaults);
 });
 
@@ -99,19 +112,34 @@ test('saved KVMem settings persist, preserve legacy fields and reach only the ne
   const app = createApplication({ ...f, env: {} });
   const next = { ...DEFAULTS, canvasPort: 24000, gatewayPort: 24001, comfyStartTimeoutSec: 500,
     gatewayStartTimeoutSec: 45, kvmemEnabled: false, kvmemInstallDir: path.join(f.root, 'not-installed'),
-    kvmemModelPath: path.join(f.root, 'not-downloaded.ninfer'), kvmemGpuDevice: '15',
+    kvmemModelPath: path.join(f.root, 'not-downloaded.ninfer'), kvmemGpuDevice: '15', kvmemVisionMode: 'gpu',
     kvmemStartupTimeoutSec: 30, kvmemRequestTimeoutSec: 600 };
   assert.deepEqual(app.saveConfig(next), next);
   assert.deepEqual(app.readConfig(), next);
   assert.equal(app.env.KVMEM_ENABLED, '1', 'saving must not reconfigure or restart a running service');
+  assert.equal(app.env.KVMEM_VISION_MODE, 'cpu');
   const restarted = createApplication({ ...f, env: {} });
   assert.equal(restarted.env.KVMEM_ENABLED, '0');
   assert.equal(restarted.env.KVMEM_INSTALL_DIR, next.kvmemInstallDir);
   assert.equal(restarted.env.KVMEM_MODEL_PATH, next.kvmemModelPath);
   assert.equal(restarted.env.KVMEM_GPU_DEVICE, '15');
+  assert.equal(restarted.env.KVMEM_VISION_MODE, 'gpu');
   assert.equal(restarted.env.KVMEM_STARTUP_TIMEOUT_MS, '30000');
   assert.equal(restarted.env.KVMEM_REQUEST_TIMEOUT_MS, '600000');
   const before = fs.readFileSync(app.configFile, 'utf8');
   assert.throws(() => app.saveConfig({ ...next, kvmemGpuDevice: '16' }), /kvmemGpuDevice/);
+  assert.throws(() => app.saveConfig({ ...next, kvmemVisionMode: 'GPU' }), /kvmemVisionMode/);
   assert.equal(fs.readFileSync(app.configFile, 'utf8'), before);
+});
+
+test('every saved vision mode overrides inherited environment on the next launch', t => {
+  const f = fixture(t);
+  const app = createApplication({ ...f, env: {} });
+  for (const mode of ['cpu', 'gpu', 'auto']) {
+    app.saveConfig({ ...DEFAULTS, kvmemVisionMode: mode });
+    const restarted = createApplication({ ...f, env: { KVMEM_VISION_MODE: 'unsafe', kVmEm_ViSiOn_MoDe: 'gpu' } });
+    assert.equal(restarted.readConfig().kvmemVisionMode, mode);
+    assert.equal(restarted.env.KVMEM_VISION_MODE, mode);
+    assert.equal(restarted.env.kVmEm_ViSiOn_MoDe, undefined);
+  }
 });

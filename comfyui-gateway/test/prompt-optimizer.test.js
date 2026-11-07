@@ -342,9 +342,38 @@ test("cloud caption sends the image as image_url and returns the prompt", async 
     }
 });
 
-test("cloud chat rejects private base urls by default", async () => {
+test("cloud chat permits private base urls when unset or explicitly enabled", async () => {
     const previous = process.env.ALLOW_PRIVATE_CLOUD;
-    delete process.env.ALLOW_PRIVATE_CLOUD;
+    let requests = 0;
+    const server = http.createServer((req, res) => {
+        req.resume();
+        requests++;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ choices: [{ message: { content: "a local test caption" } }] }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+        const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
+        for (const value of [undefined, "1"]) {
+            if (value === undefined) delete process.env.ALLOW_PRIVATE_CLOUD;
+            else process.env.ALLOW_PRIVATE_CLOUD = value;
+            const result = await optimizer.captionImage({
+                cloudImages: ["data:image/png;base64,AAAA"], engine: "cloud",
+                cloud: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "test-only", model: "fixture" },
+            });
+            assert.equal(result.prompt, "a local test caption");
+        }
+        assert.equal(requests, 2);
+    } finally {
+        if (previous === undefined) delete process.env.ALLOW_PRIVATE_CLOUD;
+        else process.env.ALLOW_PRIVATE_CLOUD = previous;
+        await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
+    }
+});
+
+test("cloud chat still rejects private base urls when explicitly disabled", async () => {
+    const previous = process.env.ALLOW_PRIVATE_CLOUD;
+    process.env.ALLOW_PRIVATE_CLOUD = "0";
     try {
         const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
         await assert.rejects(
@@ -356,7 +385,8 @@ test("cloud chat rejects private base urls by default", async () => {
             /内网|本机/,
         );
     } finally {
-        process.env.ALLOW_PRIVATE_CLOUD = previous;
+        if (previous === undefined) delete process.env.ALLOW_PRIVATE_CLOUD;
+        else process.env.ALLOW_PRIVATE_CLOUD = previous;
     }
 });
 

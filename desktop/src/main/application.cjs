@@ -10,7 +10,7 @@ const { migrateQwenV2 } = require('./qwen-v2-migration.cjs');
 const DEFAULTS = {
   schemaVersion: 1, comfyUrl: 'http://127.0.0.1:8188', comfyDir: '', comfyWorkflowsDir: '',
   canvasPort: 23110, gatewayPort: 23111, comfyStartTimeoutSec: 300, gatewayStartTimeoutSec: 30,
-  kvmemEnabled: true, kvmemInstallDir: '', kvmemModelPath: '', kvmemGpuDevice: '0',
+  kvmemEnabled: true, kvmemInstallDir: '', kvmemModelPath: '', kvmemGpuDevice: '0', kvmemVisionMode: 'cpu',
   kvmemStartupTimeoutSec: 180, kvmemRequestTimeoutSec: 180,
 };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -58,6 +58,9 @@ function validateConfig(input, { checkDirectories = false } = {}) {
   const gpu = input.kvmemGpuDevice ?? DEFAULTS.kvmemGpuDevice;
   if (typeof gpu !== 'string' || !/^(?:[0-9]|1[0-5])$/.test(gpu)) throw new Error('kvmemGpuDevice 必须为 0–15 的整数字符串');
   result.kvmemGpuDevice = gpu;
+  const visionMode = input.kvmemVisionMode === undefined ? DEFAULTS.kvmemVisionMode : input.kvmemVisionMode;
+  if (!['cpu', 'gpu', 'auto'].includes(visionMode)) throw new Error('kvmemVisionMode 必须为 cpu、gpu 或 auto');
+  result.kvmemVisionMode = visionMode;
   for (const key of ['kvmemStartupTimeoutSec', 'kvmemRequestTimeoutSec']) {
     const value = input[key] ?? DEFAULTS[key];
     if (!Number.isInteger(value) || value < 30 || value > 600) throw new Error(`${key} 必须在 30–600 秒之间（整数）`);
@@ -163,6 +166,7 @@ function createApplication({ runtimeRoot, userData, env = process.env }) {
     COMFY_URL: config.comfyUrl, COMFYUI_DIR: config.comfyDir, COMFY_WORKFLOWS_DIR: config.comfyWorkflowsDir,
     KVMEM_ENABLED: config.kvmemEnabled ? '1' : '0', KVMEM_INSTALL_DIR: config.kvmemInstallDir,
     KVMEM_MODEL_PATH: config.kvmemModelPath, KVMEM_GPU_DEVICE: config.kvmemGpuDevice,
+    KVMEM_VISION_MODE: config.kvmemVisionMode,
     KVMEM_STARTUP_TIMEOUT_MS: String(config.kvmemStartupTimeoutSec * 1000),
     KVMEM_REQUEST_TIMEOUT_MS: String(config.kvmemRequestTimeoutSec * 1000),
     CANVAS_PORT: String(config.canvasPort), GATEWAY_PORT: String(config.gatewayPort),

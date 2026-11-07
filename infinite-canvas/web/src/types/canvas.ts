@@ -115,6 +115,8 @@ export type CanvasNodeMetadata = {
     captionStatus?: "running" | "done" | "error";
     captionPrompt?: string;
     captionError?: string;
+    captionVisionMode?: "cpu" | "gpu";
+    captionReleased?: boolean;
     captionEngineUsed?: "qwen35" | "florence" | "kvmem" | "cloud";
     promptOptimizeStatus?: "running" | "done" | "error";
     promptOptimizeKind?: "h3" | "image";

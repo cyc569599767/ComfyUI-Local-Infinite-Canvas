@@ -1408,7 +1408,8 @@ export function createResourceManager({ config, setup, registry, logger, workflo
         }
         const kvmem = localCaptionCapability?.();
         if (kvmem) engines.kvmem = kvmem;
-        return { packId: "prompt-local", comfyReachable: reachable, engines, captionBackend: config.kvmem?.enabled ? "kvmem" : "comfy", captionTimeoutMs: config.kvmem?.enabled ? Math.min(1230000, config.kvmem.startupTimeoutMs + config.kvmem.requestTimeoutMs + 30000) : 240000 };
+        const captionStartupTimeoutMs = config.kvmem?.enabled ? Math.min(600000, Math.max(30000, Number(config.kvmem.startupTimeoutMs) || 180000)) : 0;
+        return { packId: "prompt-local", comfyReachable: reachable, engines, captionBackend: config.kvmem?.enabled ? "kvmem" : "comfy", captionStartupTimeoutMs, captionTimeoutMs: captionStartupTimeoutMs + 600000 + 60000 };
     }
 
     function status() {

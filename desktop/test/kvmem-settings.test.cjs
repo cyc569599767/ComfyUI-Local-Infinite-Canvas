@@ -43,6 +43,7 @@ test('legacy renderer fixtures without chooseKvmem initialize and save without a
   assert.equal(f.get('setting-kvmem-install-dir').value, '');
   assert.equal(f.get('setting-kvmem-model-path').value, '');
   assert.equal(f.get('setting-kvmem-gpu-device').value, '0');
+  assert.equal(f.get('setting-kvmem-vision-mode').value, 'cpu');
   for (const id of ['choose-kvmem-install-dir', 'choose-kvmem-model-path']) {
     assert.equal(f.get(id).disabled, true);
     await f.get(id).fire('click'); // Even a synthetic event must not call an absent method.
@@ -51,6 +52,7 @@ test('legacy renderer fixtures without chooseKvmem initialize and save without a
   assert.match(f.get('settings-result').textContent, /已保存.*重启/);
   assert.equal(f.saves.length, 1);
   assert.equal(f.saves[0].kvmemEnabled, true);
+  assert.equal(f.saves[0].kvmemVisionMode, 'cpu');
   assert.equal(f.saves[0].comfyUrl, legacyConfig.comfyUrl);
   assert.equal(f.saves[0].gatewayPort, legacyConfig.gatewayPort);
   assert.deepEqual(f.calls, []);
@@ -85,17 +87,29 @@ test('KVMem picker runs only on explicit click; cancel preserves paths and clear
 test('renderer restores disabled KVMem and saves visible fields while preserving hidden timeout/legacy settings', async () => {
   const config = { ...legacyConfig, comfyWorkflowsDir: path.resolve('test-workflows'), comfyStartTimeoutSec: 400,
     gatewayStartTimeoutSec: 50, kvmemEnabled: false, kvmemInstallDir: path.resolve('test-kvmem'),
-    kvmemModelPath: path.resolve('test-model.ninfer'), kvmemGpuDevice: '14',
+    kvmemModelPath: path.resolve('test-model.ninfer'), kvmemGpuDevice: '14', kvmemVisionMode: 'gpu',
     kvmemStartupTimeoutSec: 60, kvmemRequestTimeoutSec: 600 };
   const f = await rendererFixture({ config });
   assert.equal(f.get('setting-kvmem-enabled').checked, false);
   assert.equal(f.get('setting-kvmem-install-dir').value, config.kvmemInstallDir);
   assert.equal(f.get('setting-kvmem-model-path').value, config.kvmemModelPath);
   assert.equal(f.get('setting-kvmem-gpu-device').value, '14');
+  assert.equal(f.get('setting-kvmem-vision-mode').value, 'gpu');
   f.get('setting-kvmem-enabled').checked = true;
   f.get('setting-kvmem-gpu-device').value = '15';
+  f.get('setting-kvmem-vision-mode').value = 'auto';
   await f.get('settings-form').fire('submit');
-  assert.deepEqual(JSON.parse(JSON.stringify(f.saves[0])), { ...config, kvmemEnabled: true, kvmemGpuDevice: '15' });
+  assert.deepEqual(JSON.parse(JSON.stringify(f.saves[0])), { ...config, kvmemEnabled: true, kvmemGpuDevice: '15', kvmemVisionMode: 'auto' });
+});
+
+test('renderer restores and saves each supported vision mode without starting a service', async () => {
+  for (const mode of ['cpu', 'gpu', 'auto']) {
+    const f = await rendererFixture({ config: { ...legacyConfig, kvmemVisionMode: mode } });
+    assert.equal(f.get('setting-kvmem-vision-mode').value, mode);
+    await f.get('settings-form').fire('submit');
+    assert.equal(f.saves[0].kvmemVisionMode, mode);
+    assert.deepEqual(f.calls, []);
+  }
 });
 
 test('settings-disabled test mode does not save or open KVMem pickers at startup', async () => {
@@ -106,12 +120,26 @@ test('settings-disabled test mode does not save or open KVMem pickers at startup
   assert.match(f.get('settings-result').textContent, /不支持设置/);
 });
 
+test('KVMem HTML offers CPU/GPU/auto vision modes with CPU selected by default', () => {
+  const select = html.match(/<select\b[^>]*id="setting-kvmem-vision-mode"[^>]*>([\s\S]*?)<\/select>/);
+  assert.ok(select, 'vision mode select must exist');
+  const options = [...select[1].matchAll(/<option\b([^>]*)>([^<]*)<\/option>/g)];
+  assert.deepEqual(options.map(option => option[1].match(/value="([^"]+)"/)[1]), ['cpu', 'gpu', 'auto']);
+  assert.match(options[0][1], /\bselected\b/);
+  assert.ok(options.slice(1).every(option => !/\bselected\b/.test(option[1])));
+  assert.match(options[0][2], /CPU.*省显存.*默认/);
+  assert.match(options[1][2], /GPU.*更高显存/);
+  assert.match(options[2][2], /自动.*空闲显存/);
+});
+
 test('KVMem HTML paths use readonly native pickers and describe lifecycle/availability constraints', () => {
   for (const id of ['setting-kvmem-install-dir', 'setting-kvmem-model-path']) {
     assert.match(html, new RegExp(`<input[^>]+id="${id}"[^>]+readonly`));
   }
   for (const text of ['本地反推使用KVMem（结束后释放显存）', '.ninfer', '替代旧本地反推策略', '不捆绑程序或模型',
-    '不影响应用启动', '首次加载较慢', '视频任务忙时拒绝反推', '不停止外部进程', '保存后重启应用生效']) {
+    'CPU 模式仅将视觉编码放在 CPU', '主模型仍使用 CUDA', '保守容量判断', '不代表必然加速', '不保证不会 OOM',
+    '不影响应用启动', '首次加载较慢', '视频任务忙时拒绝反推', '每次反推结束后退出自有进程释放显存',
+    '不停止外部进程', '保存后重启应用生效']) {
     assert.ok(html.includes(text), text);
   }
 });
@@ -134,6 +162,7 @@ function ipcFixture() {
       if (name === 'electron') return electron;
       if (name === './runtime.cjs') return { isTrustedSender };
       if (name === './services.cjs') return { ServiceManager: class { on() {} } };
+      if (name === './response-headers.cjs') return require('../src/main/response-headers.cjs');
       if (name === './application.cjs' || name === './content-policy.cjs') return {};
       if (name.startsWith('node:')) return require(name);
       throw new Error(`Unexpected test dependency: ${name}`);

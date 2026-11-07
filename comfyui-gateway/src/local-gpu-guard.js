@@ -1,3 +1,4 @@
+import { selectKvmemVision } from "./kvmem-vision.js";
 import fs from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -62,7 +63,8 @@ export function createGuardedCaption({ admission, comfy, runtime, config, pendin
       // someone else's task. Physical release is checked before loading NInfer.
       await comfy.freeMemory();
       const deadline = now() + settleTimeoutMs;
-      const required = fs.statSync(config.modelPath).size + 1024 ** 3;
+      const modelBytes = fs.statSync(config.modelPath).size;
+      let hardware;
       while (true) {
         params.signal?.throwIfAborted();
         assertIdle(await comfy.queue(), pendingTasks());
@@ -71,11 +73,13 @@ export function createGuardedCaption({ admission, comfy, runtime, config, pendin
         const available = Number(device?.vram_free) - Number(device?.torch_vram_free);
         // Comfy's vram_free includes allocator-reclaimable cache; an external
         // process needs the driver-free amount, not that optimistic total.
-        if (device && Number.isFinite(available) && available >= required) break;
-        if (now() >= deadline) throw failure("ComfyUI 缓存已请求卸载，但未确认足够空闲显存。请关闭其他占用显存的程序后重试；未启动 KVMem。", "kvmem_insufficient_vram", 409);
+        hardware = { modelBytes, availableVramBytes: available };
+        const vision = selectKvmemVision(config.visionMode ?? "cpu", hardware);
+        if (device && vision.admitted) break;
+        if (now() >= deadline) throw failure("ComfyUI 缓存已请求卸载，但未确认所选视觉模式有足够空闲显存。可选择 CPU 视觉模式或关闭其他占用显存的程序后重试；未启动 KVMem。", "kvmem_insufficient_vram", 409);
         await sleep(250, undefined, { signal: params.signal });
       }
-      return await runtime.caption(params);
+      return await runtime.caption({ ...params, hardware });
     } finally {
       if (runtime.isBusy()) retainedRelease = release;
       else release();

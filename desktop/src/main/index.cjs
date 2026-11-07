@@ -8,6 +8,7 @@ const { getRuntimeInfo, isTrustedSender } = require('./runtime.cjs');
 const { ServiceManager, request } = require('./services.cjs');
 const { createApplication } = require('./application.cjs');
 const { isAllowedNavigation, isExternalLink, resolveGatewayAssetUrl, sessionResponse } = require('./content-policy.cjs');
+const { installResponseHeaderGuard } = require('./response-headers.cjs');
 
 const rendererPath = path.join(__dirname, '../renderer/index.html');
 const rendererUrl = pathToFileURL(rendererPath).href;
@@ -96,6 +97,7 @@ function secureContents(contents) {
 
 async function configureContentSession() {
   contentSession = session.fromPartition(contentSessionName);
+  installResponseHeaderGuard(contentSession);
   const canvasClipboard = (contents) => Boolean(contents && trustedContents.has(contents.id)
     && isAllowedNavigation(contents.getURL(), new Set([manager.state.services?.canvas.url])));
   contentSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) =>

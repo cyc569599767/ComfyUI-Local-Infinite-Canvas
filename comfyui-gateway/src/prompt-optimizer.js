@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import { applyModelAliases } from "./runner.js";
 import { ensureSpeakerTags } from "./speaker-tags.js";
-import { deepClone, sleep, truncate } from "./util.js";
+import { deepClone, truncate } from "./util.js";
 import { requestAgentCloudJson } from "./agent-cloud.js";
+import { createPromptCloudDeadline, normalizePromptCloudTimeoutSeconds, promptCloudFetch } from "./prompt-cloud-timeout.js";
 import { validateLocalH3Workflow } from "./h3-prompt-workflow.js";
+import { executeLocalPrompt, normalizeLocalPromptTimeoutSeconds } from "./prompt-local-timeout.js";
 
 const MODES = new Set([
   "全参考模式(Reference to Video)",
@@ -24,22 +26,6 @@ export class PromptOptimizeError extends Error {
     this.code = code;
     this.details = details;
   }
-}
-
-function historyCompleted(history) {
-  if (!history) return false;
-  if (history.status?.completed === true) return true;
-  if (history.status?.status_str === "success") return true;
-  return Boolean(history.outputs && Object.keys(history.outputs).length);
-}
-
-function historyError(history) {
-  if (history?.status?.status_str !== "error") return "";
-  const messages = Array.isArray(history.status.messages) ? history.status.messages.flat() : [];
-  return messages
-    .map((item) => (typeof item === "string" ? item : item?.message || JSON.stringify(item)))
-    .filter(Boolean)
-    .join("；") || "ComfyUI 执行失败";
 }
 
 function imageValue(uploaded) {
@@ -227,73 +213,68 @@ function assertCloudBaseUrl(raw) {
     /^(fc|fd)[0-9a-f]{2}:/.test(host) ||
     /^fe80:/.test(host) ||
     host.endsWith(".local");
-  if (isPrivate && String(process.env.ALLOW_PRIVATE_CLOUD || "") !== "1") {
-    throw new PromptOptimizeError("云端 Base URL 指向本机或内网地址，已拒绝；如确需本地模型，请设置 ALLOW_PRIVATE_CLOUD=1", { status: 400, code: "cloud_private_url" });
+  if (isPrivate && String(process.env.ALLOW_PRIVATE_CLOUD ?? "1") !== "1") {
+    throw new PromptOptimizeError("云端 Base URL 指向本机或内网地址，当前 ALLOW_PRIVATE_CLOUD 未启用；请设为 1，或移除该变量恢复默认允许", { status: 400, code: "cloud_private_url" });
   }
   return url.toString();
 }
 
-async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096 }) {
+async function cloudChat({ system, userText, images = [], cloud = {}, signal, cloudFetch = promptCloudFetch, temperature = 0.6, maxTokens = 4096 }) {
+  const timeoutMs = normalizePromptCloudTimeoutSeconds(cloud.timeoutSeconds) * 1000;
   const baseUrl = String(cloud.baseUrl || "").trim();
   const apiKey = String(cloud.apiKey || "").trim();
   const model = String(cloud.model || "").trim();
   if (!baseUrl || !apiKey || !model) {
     throw new PromptOptimizeError("云端 API 未配置：请先在设置中填写 Base URL、API Key 和模型", { status: 400, code: "cloud_not_configured" });
   }
-  if (cloud.apiFormat && cloud.apiFormat !== "openai") {
-    const started = Date.now();
-    try {
-      const content = images.length ? [{ type: "text", text: userText }, ...images.map(url => ({ type: "image_url", image_url: { url } }))] : userText;
-      const data = await requestAgentCloudJson({ baseUrl, apiKey, apiFormat: cloud.apiFormat, request: {
-        model, messages: [{ role: "system", content: system }, { role: "user", content }], max_tokens: maxTokens,
-      } }, { signal });
-      return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
-    } catch (error) {
-      throw new PromptOptimizeError("云端 API 请求失败，请检查所选协议、模型和服务配置", { status: error?.status || 502, code: error?.code || "cloud_api_failed" });
-    }
-  }
-  assertCloudBaseUrl(baseUrl);
-  const endpoint = cloudChatUrl(baseUrl);
+  const nativeProtocol = cloud.apiFormat && cloud.apiFormat !== "openai";
+  if (!nativeProtocol) assertCloudBaseUrl(baseUrl);
   const userContent = images.length
     ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))]
     : userText;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("云端 API 超时")), 120000);
-  const onAbort = () => controller.abort(signal?.reason);
-  if (signal) {
-    if (signal.aborted) controller.abort(signal.reason);
-    else signal.addEventListener("abort", onAbort, { once: true });
-  }
   const started = Date.now();
-  const post = async (requestTemperature) => {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userContent },
-        ],
-        temperature: requestTemperature,
-        max_tokens: maxTokens,
-      }),
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let data = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = null;
-    }
-    return { response, text, data };
-  };
+  const deadline = createPromptCloudDeadline({ timeoutMs, signal });
   try {
+    if (nativeProtocol) {
+      const data = await deadline.run(() => requestAgentCloudJson({ baseUrl, apiKey, apiFormat: cloud.apiFormat, request: {
+        model, messages: [{ role: "system", content: system }, { role: "user", content: userContent }], max_tokens: maxTokens,
+      } }, { signal: deadline.signal, timeoutMs }));
+      return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
+    }
+    const endpoint = cloudChatUrl(baseUrl);
+    const post = async (requestTemperature) => {
+      const response = await deadline.run(() => cloudFetch(endpoint, {
+        timeoutMs,
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: userContent },
+          ],
+          temperature: requestTemperature,
+          max_tokens: maxTokens,
+        }),
+        signal: deadline.signal,
+      }));
+      if (response.status >= 300 && response.status < 400) {
+        throw new PromptOptimizeError("云端 API 返回重定向；请填写最终 API 地址", { status: 502, code: "cloud_api_failed" });
+      }
+      const text = await deadline.run(() => response.text());
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      deadline.throwIfAborted();
+      return { response, text, data };
+    };
     let { response, text, data } = await post(temperature);
     if (!response.ok && temperature !== 1) {
       const message = data?.error?.message || data?.message || text || "";
-      // Kimi 等思考模型只接受 temperature=1；按报错重试一次，不维护模型名白名单。
+      // Kimi 等思考模型只接受 temperature=1；共用总截止时间，按报错只重试一次。
       if (/invalid temperature|only\s+1\s+is\s+allowed|temperature.*not\s+supported/i.test(String(message))) {
         ({ response, text, data } = await post(1));
       }
@@ -307,18 +288,24 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
     }
     return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
   } catch (error) {
+    const reason = deadline.signal.aborted ? deadline.signal.reason : error;
+    if (reason?.code === "cloud_api_timeout" || reason?.code === "upstream_timeout") {
+      throw new PromptOptimizeError("云端 API 请求超时", { status: 504, code: "cloud_api_timeout" });
+    }
+    if (reason?.code === "cloud_api_cancelled" || reason?.code === "cancelled" || reason?.name === "AbortError" || reason?.code === "ABORT_ERR") {
+      throw new PromptOptimizeError("云端 API 请求已取消", { status: 499, code: "cloud_api_cancelled" });
+    }
     if (error instanceof PromptOptimizeError) throw error;
-    if (error?.name === "AbortError") {
-      throw new PromptOptimizeError("云端 API 请求已取消或超时", { status: 504, code: "cloud_api_timeout" });
+    if (nativeProtocol) {
+      throw new PromptOptimizeError("云端 API 请求失败，请检查所选协议、模型和服务配置", { status: error?.status || 502, code: error?.code || "cloud_api_failed" });
     }
     throw new PromptOptimizeError(`云端 API 请求失败：${error?.message || error}`, { status: 502, code: "cloud_api_failed" });
   } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", onAbort);
+    deadline.dispose();
   }
 }
 
-async function cloudOptimize({ prompt, mode, duration, referenceNote, language, uploadedImages = [], cloudImages = [], imageCount = 0, cloud = {}, signal }) {
+async function cloudOptimize({ prompt, mode, duration, referenceNote, language, uploadedImages = [], cloudImages = [], imageCount = 0, cloud = {}, signal, cloudFetch }) {
   const outputLanguage = normalizePromptLanguage(language);
   const imageTotal = cloudImages.length || uploadedImages.length || Number(imageCount) || 0;
   const imageLine = imageTotal
@@ -343,7 +330,7 @@ async function cloudOptimize({ prompt, mode, duration, referenceNote, language, 
     `用户原始提示词：\n${prompt}`,
   ].filter(Boolean).join("\n");
   const system = buildCloudH3System(mode, duration, outputLanguage);
-  const { content, model, elapsedMs } = await cloudChat({ system, userText, images: cloudImages, cloud, signal });
+  const { content, model, elapsedMs } = await cloudChat({ system, userText, images: cloudImages, cloud, signal, cloudFetch });
   const sanitized = sanitizeH3Prompt(content);
   if (!sanitized) throw new PromptOptimizeError("云端 API 没有返回提示词", { status: 502, code: "no_prompt_output" });
   const speaker = ensureSpeakerTags(sanitized);
@@ -358,20 +345,20 @@ async function cloudOptimize({ prompt, mode, duration, referenceNote, language, 
   };
 }
 
-async function cloudOptimizeImage({ prompt, mode, language, imageCount = 0, cloud = {}, signal }) {
+async function cloudOptimizeImage({ prompt, mode, language, imageCount = 0, cloud = {}, signal, cloudFetch }) {
   const userText = [
     `任务模式：${mode}`,
     `输出语言：${String(language || "zh").toLowerCase() === "en" ? "英文" : "中文"}`,
     imageCount ? `参考图片：${imageCount} 张（云端模式仅使用文字说明）` : "",
     `用户原始提示词：\n${prompt}`,
   ].filter(Boolean).join("\n");
-  const { content, model, elapsedMs } = await cloudChat({ system: CLOUD_IMAGE_SYSTEM_PROMPT, userText, cloud, signal });
+  const { content, model, elapsedMs } = await cloudChat({ system: CLOUD_IMAGE_SYSTEM_PROMPT, userText, cloud, signal, cloudFetch });
   const result = sanitizeImagePrompt(content);
   if (!result) throw new PromptOptimizeError("云端 API 没有返回提示词", { status: 502, code: "no_prompt_output" });
   return { prompt: result, mode, provider: "cloud", model, elapsedMs };
 }
 
-export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, userModelAliasFor = null, loaderSpecs = undefined, localCaption = null }) {
+export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = null, userModelAliasFor = null, loaderSpecs = undefined, localCaption = null, cloudFetch = promptCloudFetch }) {
   // 反推/优化提交的是打包模板，模型名写死在模板里；必须和出图路径一样套别名。
   // loaderSpecs 允许传 getter：网关启动扫描可能还没完成，不能拿旧快照。
   function withAliases(workflow) {
@@ -408,7 +395,23 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
     return deepClone(captionTemplate);
   }
 
-  async function optimize({ prompt, mode, duration, referenceNote, language, uploadedImages = [], cloudImages = [], imageCount = 0, signal, engine = "local", cloud = {} }) {
+  async function execute(workflow, { timeoutSeconds, signal, preflight, caption = false }) {
+    try {
+      return await executeLocalPrompt({ comfy, workflow, timeoutSeconds, signal, preflight, logger });
+    } catch (error) {
+      // Keep each public operation's existing error contract. Cancellation
+      // failures must remain explicit rather than being hidden by the timeout.
+      const label = caption ? "反推提示词" : "提示词优化";
+      if (error?.code === "local_prompt_timeout") {
+        error.code = caption ? "caption_timeout" : "prompt_optimize_timeout";
+        error.message = `${label}超时`;
+      } else if (error?.code === "cancelled") error.message = `${label}已取消`;
+      else if (error?.code === "comfy_execution_failed") error.message = `${label}失败：${truncate(error.details, 1200)}`;
+      throw error;
+    }
+  }
+
+  async function optimize({ prompt, mode, duration, referenceNote, language, uploadedImages = [], cloudImages = [], imageCount = 0, signal, engine = "local", cloud = {}, localTimeoutSeconds }) {
     const text = String(prompt || "").trim();
     if (!text) throw new PromptOptimizeError("缺少提示词", { status: 400, code: "missing_prompt" });
     if (text.length > 8000) throw new PromptOptimizeError("提示词过长", { status: 400, code: "prompt_too_long" });
@@ -420,10 +423,11 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
     const images = uploadedImages.slice(0, 8);
 
     if (String(engine || "local").toLowerCase() === "cloud") {
-      const cloudResult = await cloudOptimize({ prompt: text, mode: taskType, duration: optimizeSeconds, referenceNote, language: outputLanguage, uploadedImages: images, cloudImages: cloudImages.slice(0, 8), imageCount, cloud, signal });
+      const cloudResult = await cloudOptimize({ prompt: text, mode: taskType, duration: optimizeSeconds, referenceNote, language: outputLanguage, uploadedImages: images, cloudImages: cloudImages.slice(0, 8), imageCount, cloud, signal, cloudFetch });
       return { ...cloudResult, prompt: ensureFrameAlignmentPrompt(cloudResult.prompt, taskType, optimizeSeconds) };
     }
 
+    const timeoutSeconds = normalizeLocalPromptTimeoutSeconds(localTimeoutSeconds);
     const workflow = workflowTemplate();
     workflow["2"].inputs["输入提示词"] = text;
     workflow["2"].inputs["任务类型"] = taskType;
@@ -458,80 +462,41 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
       { classType: "llama_cpp_model_loader", input: "model" },
       ...(images.length ? [{ classType: "llama_cpp_model_loader", input: "mmproj" }] : []),
     ]);
-    if (signal?.aborted) throw new PromptOptimizeError("提示词优化已取消", { status: 400, code: "cancelled" });
-    const objectInfo = await comfy.objectInfo({ signal });
-    validateLocalH3Workflow(selectedWorkflow, objectInfo, { hasImages: images.length > 0 });
-    const started = Date.now();
-    const submitted = await comfy.submit(selectedWorkflow, { signal });
-    const promptId = submitted.promptId;
-    let running = true;
-    let cancelPromise = null;
-    const cancel = () => {
-      if (!running) return Promise.resolve();
-      if (!cancelPromise) cancelPromise = typeof comfy.cancel === "function" ? comfy.cancel(promptId) : comfy.interrupt(promptId);
-      return cancelPromise;
-    };
-    const onAbort = () => {
-      void cancel();
-    };
-    if (signal) signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      const deadline = Date.now() + 180000;
-      let history = null;
-      while (Date.now() < deadline) {
-        if (signal?.aborted) {
-          await cancel();
-          throw new PromptOptimizeError("提示词优化已取消", { status: 400, code: "cancelled" });
-        }
-        history = await comfy.history(promptId);
-        const failure = historyError(history);
-        if (failure) {
-          running = false;
-          throw new PromptOptimizeError(`提示词优化失败：${truncate(failure, 1200)}`, {
-            status: 502,
-            code: "comfy_execution_failed",
-            details: failure,
-          });
-        }
-        if (historyCompleted(history)) break;
-        await sleep(1000);
-      }
-      running = false;
-      if (!historyCompleted(history)) {
-        throw new PromptOptimizeError("提示词优化超时", { status: 504, code: "prompt_optimize_timeout" });
-      }
-      // TE_H3_Prompt_Enhancer is also an output node. Never mistake its
-      // intermediate template for the generated response if inference is empty.
-      const raw = String(history.outputs?.["4"]?.text?.[0] || history.outputs?.["4"]?.input_text?.[0] || "").trim();
-      const result = sanitizeH3Prompt(raw);
-      if (raw !== result) logger?.info?.(`prompt optimize sanitized ${raw.length}->${result.length}`);
-      if (!result) {
-        throw new PromptOptimizeError("提示词工作流没有返回文本", {
-          status: 502,
-          code: "no_prompt_output",
-          details: history.outputs,
-        });
-      }
-      logger?.info?.(`prompt optimize ${taskType} images=${images.length} ${promptId} ${Date.now() - started}ms`);
-      const speaker = ensureSpeakerTags(result);
-      if (speaker.fixed) logger?.info?.(`prompt optimize fixed ${speaker.fixed} speaker tag(s)`);
-      if (speaker.issues.length) logger?.info?.(`prompt optimize speaker issues ${speaker.issues.length}`);
-      return {
-        prompt: ensureFrameAlignmentPrompt(speaker.prompt, taskType, optimizeSeconds),
-        mode: taskType,
-        duration: optimizeSeconds,
-        promptId,
-        elapsedMs: Date.now() - started,
-        provider: "local",
-        speakerTags: { fixed: speaker.fixed, issues: speaker.issues },
-      };
-    } finally {
-      running = false;
-      signal?.removeEventListener("abort", onAbort);
+    const { history, promptId, elapsedMs } = await execute(selectedWorkflow, {
+      timeoutSeconds, signal,
+      preflight: async ({ signal: deadlineSignal }) => {
+        const objectInfo = await comfy.objectInfo({ signal: deadlineSignal });
+        validateLocalH3Workflow(selectedWorkflow, objectInfo, { hasImages: images.length > 0 });
+      },
+    });
+    // TE_H3_Prompt_Enhancer is also an output node. Never mistake its
+    // intermediate template for the generated response if inference is empty.
+    const raw = String(history.outputs?.["4"]?.text?.[0] || history.outputs?.["4"]?.input_text?.[0] || "").trim();
+    const result = sanitizeH3Prompt(raw);
+    if (raw !== result) logger?.info?.(`prompt optimize sanitized ${raw.length}->${result.length}`);
+    if (!result) {
+      throw new PromptOptimizeError("提示词工作流没有返回文本", {
+        status: 502,
+        code: "no_prompt_output",
+        details: history.outputs,
+      });
     }
+    logger?.info?.(`prompt optimize ${taskType} images=${images.length} ${promptId} ${elapsedMs}ms`);
+    const speaker = ensureSpeakerTags(result);
+    if (speaker.fixed) logger?.info?.(`prompt optimize fixed ${speaker.fixed} speaker tag(s)`);
+    if (speaker.issues.length) logger?.info?.(`prompt optimize speaker issues ${speaker.issues.length}`);
+    return {
+      prompt: ensureFrameAlignmentPrompt(speaker.prompt, taskType, optimizeSeconds),
+      mode: taskType,
+      duration: optimizeSeconds,
+      promptId,
+      elapsedMs,
+      provider: "local",
+      speakerTags: { fixed: speaker.fixed, issues: speaker.issues },
+    };
   }
 
-  async function optimizeImage({ prompt, mode, language, uploadedImages = [], imageCount = 0, signal, engine = "local", cloud = {} }) {
+  async function optimizeImage({ prompt, mode, language, uploadedImages = [], imageCount = 0, signal, engine = "local", cloud = {}, localTimeoutSeconds }) {
     const text = String(prompt || "").trim();
     if (!text) throw new PromptOptimizeError("缺少提示词", { status: 400, code: "missing_prompt" });
     if (text.length > 8000) throw new PromptOptimizeError("提示词过长", { status: 400, code: "prompt_too_long" });
@@ -543,9 +508,10 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
       throw new PromptOptimizeError("图生图提示词优化需要至少 1 张参考图", { status: 400, code: "missing_reference_image" });
     }
     if (useCloud) {
-      return cloudOptimizeImage({ prompt: text, mode: taskMode, language, imageCount: referenceCount, cloud, signal });
+      return cloudOptimizeImage({ prompt: text, mode: taskMode, language, imageCount: referenceCount, cloud, signal, cloudFetch });
     }
 
+    const timeoutSeconds = normalizeLocalPromptTimeoutSeconds(localTimeoutSeconds);
     const workflow = imageWorkflowTemplate();
     workflow["1"].inputs["输入提示词"] = text;
     workflow["1"].inputs["任务模式"] = taskMode;
@@ -562,68 +528,29 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
       workflow["1"].inputs[index === 0 ? "图片" : `图片${index + 1}`] = [nodeId, 0];
     });
 
-    const started = Date.now();
-    const submitted = await comfy.submit(withAliases(workflow), { signal });
-    const promptId = submitted.promptId;
-    let running = true;
-    let cancelPromise = null;
-    const cancel = () => {
-      if (!running) return Promise.resolve();
-      if (!cancelPromise) cancelPromise = typeof comfy.cancel === "function" ? comfy.cancel(promptId) : comfy.interrupt(promptId);
-      return cancelPromise;
-    };
-    const onAbort = () => void cancel();
-    if (signal) signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      const deadline = Date.now() + 180000;
-      let history = null;
-      while (Date.now() < deadline) {
-        if (signal?.aborted) {
-          await cancel();
-          throw new PromptOptimizeError("提示词优化已取消", { status: 400, code: "cancelled" });
-        }
-        history = await comfy.history(promptId);
-        const failure = historyError(history);
-        if (failure) {
-          running = false;
-          throw new PromptOptimizeError(`提示词优化失败：${truncate(failure, 1200)}`, {
-            status: 502,
-            code: "comfy_execution_failed",
-            details: failure,
-          });
-        }
-        if (historyCompleted(history)) break;
-        await sleep(1000);
-      }
-      running = false;
-      if (!historyCompleted(history)) {
-        throw new PromptOptimizeError("提示词优化超时", { status: 504, code: "prompt_optimize_timeout" });
-      }
-      const raw = outputText(history).trim();
-      const result = sanitizeImagePrompt(raw);
-      if (raw !== result) logger?.info?.(`image prompt optimize sanitized ${raw.length}->${result.length}`);
-      if (!result) {
-        throw new PromptOptimizeError("提示词工作流没有返回文本", {
-          status: 502,
-          code: "no_prompt_output",
-          details: history.outputs,
-        });
-      }
-      logger?.info?.(`image prompt optimize ${taskMode} images=${images.length} ${promptId} ${Date.now() - started}ms`);
-      return { prompt: result, mode: taskMode, promptId, elapsedMs: Date.now() - started, provider: "local" };
-    } finally {
-      running = false;
-      signal?.removeEventListener("abort", onAbort);
+    const { history, promptId, elapsedMs } = await execute(withAliases(workflow), { timeoutSeconds, signal });
+    const raw = outputText(history).trim();
+    const result = sanitizeImagePrompt(raw);
+    if (raw !== result) logger?.info?.(`image prompt optimize sanitized ${raw.length}->${result.length}`);
+    if (!result) {
+      throw new PromptOptimizeError("提示词工作流没有返回文本", {
+        status: 502,
+        code: "no_prompt_output",
+        details: history.outputs,
+      });
     }
+    logger?.info?.(`image prompt optimize ${taskMode} images=${images.length} ${promptId} ${elapsedMs}ms`);
+    return { prompt: result, mode: taskMode, promptId, elapsedMs, provider: "local" };
   }
 
-  async function captionImage({ uploadedImages = [], cloudImages = [], localImages = [], language = "zh", instruction = "", engine = "qwen35", cloud = {}, signal }) {
+  async function captionImage({ uploadedImages = [], cloudImages = [], localImages = [], language = "zh", instruction = "", engine = "qwen35", cloud = {}, signal, localTimeoutSeconds }) {
     const selectedEngine = String(engine || "qwen35").toLowerCase();
     if (!["qwen35", "florence", "kvmem", "cloud"].includes(selectedEngine)) throw new PromptOptimizeError("不支持的反推引擎", { status: 400, code: "invalid_caption_engine" });
+    const timeoutSeconds = selectedEngine === "cloud" ? undefined : normalizeLocalPromptTimeoutSeconds(localTimeoutSeconds);
     if (selectedEngine !== "cloud" && localCaption) {
       if (localImages.length !== 1) throw new PromptOptimizeError("KVMem 反推需要一张图片", { status: 400, code: "missing_reference_image" });
       const english = String(language || "zh").toLowerCase() === "en";
-      const result = await localCaption({ imageDataUrl: localImages[0], systemPrompt: String(instruction || "").trim() || (english ? CAPTION_SYSTEM_EN : CAPTION_SYSTEM_ZH), userPrompt: english ? CAPTION_USER_EN : CAPTION_USER_ZH, signal });
+      const result = await localCaption({ imageDataUrl: localImages[0], systemPrompt: String(instruction || "").trim() || (english ? CAPTION_SYSTEM_EN : CAPTION_SYSTEM_ZH), userPrompt: english ? CAPTION_USER_EN : CAPTION_USER_ZH, signal, timeoutSeconds });
       const prompt = sanitizeCaption(result.prompt);
       if (!prompt) throw new PromptOptimizeError("KVMem 没有返回有效提示词", { status: 502, code: "no_caption_output" });
       return { ...result, prompt, engine: "kvmem" };
@@ -640,6 +567,7 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
         images: cloudImages,
         cloud,
         signal,
+        cloudFetch,
       });
       return { prompt: content, engine: "cloud", model, elapsedMs: Date.now() - startedCloud };
     }
@@ -654,60 +582,19 @@ export function createPromptOptimizer({ config, comfy, logger, modelAliasFor = n
       workflow["3"].inputs["custom_prompt"] = english ? CAPTION_USER_EN : CAPTION_USER_ZH;
     }
 
-    const started = Date.now();
-    const submitted = await comfy.submit(withAliases(workflow), { signal });
-    const promptId = submitted.promptId;
-    let running = true;
-    let cancelPromise = null;
-    const cancel = () => {
-      if (!running) return Promise.resolve();
-      if (!cancelPromise) cancelPromise = typeof comfy.cancel === "function" ? comfy.cancel(promptId) : comfy.interrupt(promptId);
-      return cancelPromise;
-    };
-    const onAbort = () => {
-      void cancel();
-    };
-    if (signal) signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      const deadline = Date.now() + 180000;
-      let history = null;
-      while (Date.now() < deadline) {
-        if (signal?.aborted) {
-          await cancel();
-          throw new PromptOptimizeError("反推提示词已取消", { status: 400, code: "cancelled" });
-        }
-        history = await comfy.history(promptId);
-        const failure = historyError(history);
-        if (failure) {
-          throw new PromptOptimizeError(`反推提示词失败：${truncate(failure, 1200)}`, {
-            status: 502,
-            code: "comfy_execution_failed",
-            details: failure,
-          });
-        }
-        if (historyCompleted(history)) break;
-        await sleep(1000);
-      }
-      running = false;
-      if (!historyCompleted(history)) {
-        throw new PromptOptimizeError("反推提示词超时", { status: 504, code: "caption_timeout" });
-      }
-      const raw = outputText(history).trim();
-      const result = sanitizeCaption(raw);
-      if (raw !== result) logger?.info?.(`image caption sanitized ${raw.length}->${result.length}`);
-      if (!result) {
-        throw new PromptOptimizeError("反推工作流没有返回文本", {
-          status: 502,
-          code: "no_caption_output",
-          details: history.outputs,
-        });
-      }
-      logger?.info?.(`image caption ${engineName} ${english ? "en" : "zh"} ${promptId} ${Date.now() - started}ms`);
-      return { prompt: result, engine: engineName, promptId, elapsedMs: Date.now() - started };
-    } finally {
-      running = false;
-      signal?.removeEventListener("abort", onAbort);
+    const { history, promptId, elapsedMs } = await execute(withAliases(workflow), { timeoutSeconds, signal, caption: true });
+    const raw = outputText(history).trim();
+    const result = sanitizeCaption(raw);
+    if (raw !== result) logger?.info?.(`image caption sanitized ${raw.length}->${result.length}`);
+    if (!result) {
+      throw new PromptOptimizeError("反推工作流没有返回文本", {
+        status: 502,
+        code: "no_caption_output",
+        details: history.outputs,
+      });
     }
+    logger?.info?.(`image caption ${engineName} ${english ? "en" : "zh"} ${promptId} ${elapsedMs}ms`);
+    return { prompt: result, engine: engineName, promptId, elapsedMs };
   }
 
   return { optimize, optimizeImage, captionImage };

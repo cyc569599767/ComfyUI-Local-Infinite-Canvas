@@ -46,6 +46,22 @@ def install_windows_subprocess_policy():
     return True
 
 
+def install_windows_file_response_policy():
+    """Use aiohttp's supported chunked file sender in this owned process.
+
+    On some Windows event-loop/driver combinations FileResponse sends correct
+    200/206 headers but loop.sendfile never delivers the body. HEAD still works,
+    which makes video players wait forever. The documented fallback preserves
+    Content-Length, byte ranges and MIME; it does not transcode or buffer a whole
+    video. Set this before main.py imports aiohttp, without editing ComfyUI or
+    site-packages, and never change another already-running service.
+    """
+    if sys.platform != "win32":
+        return False
+    os.environ["AIOHTTP_NOSENDFILE"] = "1"
+    return True
+
+
 def main(arguments=None):
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     if not arguments or not os.path.isabs(arguments[0]):
@@ -55,6 +71,7 @@ def main(arguments=None):
 
     main_path = arguments[0]
     install_windows_subprocess_policy()
+    install_windows_file_response_policy()
     sys.argv = arguments
     main_directory = os.path.dirname(main_path)
     bootstrap_directory = os.path.dirname(os.path.abspath(__file__))

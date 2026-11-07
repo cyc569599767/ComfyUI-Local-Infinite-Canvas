@@ -62,6 +62,7 @@ node src/server.js
 | `COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI 地址 |
 | `COMFY_WORKFLOWS_DIR` | 空 | ComfyUI 用户工作流目录，用于自动发现 API 工作流 |
 | `LAUNCHER_CONTROL_URL` | 空 | 启动器控制地址，由 `start-local.bat` 注入 |
+| `ALLOW_PRIVATE_CLOUD` | `1` | OpenAI 兼容云端提示词优化/反推允许本机或内网 Base URL；显式设 `0` 恢复私有地址限制。仅使用可信接口，不要将网关暴露到不可信网络。 |
 | `REQUEST_TIMEOUT_MS` | `600000` | 图片请求超时 |
 | `VIDEO_TIMEOUT_MS` | `0` | 视频超时；0 表示不设上限 |
 | `INTERPOLATION_MODEL` | 空 | 固定插帧权重文件名（`models/frame_interpolation` 下的名字）；留空则按 ComfyUI 实际选项自动挑选，优先 `rife_v4.26` |
@@ -78,6 +79,20 @@ node src/server.js
 | `UPDATE_REMOTE` / `UPDATE_BRANCH` | `origin` / `main` | Git 更新远端与分支 |
 | `UPDATE_FETCH_TIMEOUT_MS` | `30000` | `git fetch` / 清单请求超时 |
 | `UPDATE_APPLY_TIMEOUT_MS` | `600000` | 补丁下载 / `git pull` 超时 |
+
+## 云端提示词请求超时
+
+在「配置 → 云端 API → 添加/编辑 API」中设置「提示词请求超时（秒）」。每个 API 单独保存，默认 **600 秒（10 分钟）**，范围 **30–1800 秒**；旧配置未指定时自动使用默认值。此设置用于 H3 云端提示词优化、生图云端优化和云端图片反推，不改变本地 KVMem、ComfyUI 优化或 Agent 聊天的超时。
+
+前端通过 `cloudTimeoutSeconds` 传给 `/v1/prompts/optimize`、`optimize-image`、`caption`；网关将该时限覆盖上游响应头、响应体和允许的兼容重试，前端另保留30秒接收余量。手动取消仍会中断上游请求；服务商或中间代理自己的超时不会被这个设置延长。网关拒绝超出范围或非整数的值。
+
+## 本地提示词请求超时
+
+本地 H3 优化、生图优化和图片反推使用独立的「本地提示词请求超时（秒）」：在「配置 → 偏好设置」或 H3/生图优化弹层选择「本地」后修改，共享默认 **600 秒**、范围 **30–1800 秒**。前端发送 `localTimeoutSeconds`，不借用当前云端 API 的超时，也不改变 Agent 聊天。
+
+ComfyUI 路径的总预算覆盖节点预检、提交、历史查询及轮询等待；超时/手动取消会按原 promptId 取消一次，并等待至多10秒清理反馈，取消失败明确报错。中间模板输出不算执行完成。第三方节点可能延迟响应中断，不能把取消请求成功当成显存已经清空，也不会全局卸载其他任务模型。
+
+KVMem 使用同一个本地设置作为每次反推的推理预算，独立保留启动预算；前端另加启动与清理余量，不再先于后台3分钟/4分钟结束。HTTP 使用可配置的原生传输，避免内置 fetch 的隐藏等待上限；完成、失败、超时或取消仍等待专用 worker 退出。
 
 ## 无 GPU 联调
 

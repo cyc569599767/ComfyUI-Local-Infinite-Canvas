@@ -187,6 +187,7 @@ export type PromptCapabilities = {
     engines: Record<string, PromptEngineCapability>;
     captionBackend?: "comfy" | "kvmem";
     captionTimeoutMs?: number;
+    captionStartupTimeoutMs?: number;
 };
 
 export type ResourceStatus = {
