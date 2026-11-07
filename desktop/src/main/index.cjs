@@ -36,6 +36,8 @@ let activePage = 'dashboard';
 let quitting = false;
 let allowQuit = false;
 let navigationId = 0;
+// Populated only by the isolated packaged smoke, never during normal startup.
+let distributionModelCatalog = null;
 const popups = new Set();
 const pageViews = new Map();
 const trustedContents = new Set();
@@ -114,6 +116,13 @@ async function configureContentSession() {
   });
   await contentSession.protocol.handle('http', (req) => {
     const services = manager.state.services;
+    if (isDistributionTest && distributionModelCatalog && req.method === 'GET'
+      && req.url === `${services.gateway.url}/v1/models`) {
+      return new Response(JSON.stringify(distributionModelCatalog), { headers: {
+        'content-type': 'application/json', 'cache-control': 'no-store',
+        'access-control-allow-origin': services.canvas.url,
+      } });
+    }
     const response = services && sessionResponse(req, services.gateway.url, services.canvas.url);
     // Preserve POST bodies, streaming/SSE, cookies and CORS of ordinary requests.
     return response || contentSession.fetch(req, { bypassCustomProtocolHandlers: true, redirect: 'manual' }).catch(() =>
@@ -309,6 +318,13 @@ async function runSmokeTest() {
     throw new Error(`Smoke test failed: ${JSON.stringify(result)}`);
   }
   result.serviceLogs = await require('./log-smoke.cjs').verifyServiceLogView(mainWindow.webContents, manager);
+  result.dashboardLayout = await mainWindow.webContents.executeJavaScript(`(() => {
+    const logs = document.getElementById('logs').getBoundingClientRect();
+    const panel = document.getElementById('logs-panel').getBoundingClientRect();
+    if (document.getElementById('settings-panel').open || document.querySelector('.hero')) throw new Error('Dashboard compact default regressed');
+    if (panel.top > 330 || logs.height < 170 || document.documentElement.scrollWidth > innerWidth + 1) throw new Error('Dashboard wastes space or overflows');
+    return { compact: true, logPanelTop: panel.top, logHeight: logs.height, viewport: {width:innerWidth,height:innerHeight} };
+  })()`);
   if (isIntegrationTest) {
     await connect(!isManagedTest); // Managed integration uses an explicitly isolated test workspace.
     const url = manager.state.services.gateway.url;
@@ -490,9 +506,16 @@ async function runSmokeTest() {
     if (fs.readFileSync(downloadPath, 'utf8') !== 'desktop-download-ok') throw new Error('Blob download content mismatch');
     result.blobDownload = true;
     await captureTestImage(contentView.webContents, path.join(artifactDir, 'canvas.png'));
+    if (isDistributionTest) {
+      result.webSync = await require('./web-sync-smoke.cjs').verifyWebSync({ contents: contentView.webContents,
+        canvasUrl: manager.state.services.canvas.url, gatewayUrl: manager.state.services.gateway.url,
+        runtimeRoot, artifactDir, captureTestImage: captureTestImage,
+        setModelCatalog: value => { distributionModelCatalog = value; } });
+    }
     await showPage('dashboard');
     await mainWindow.webContents.executeJavaScript("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     await captureTestImage(mainWindow.webContents, path.join(artifactDir, 'dashboard.png'));
+    fs.writeFileSync(path.join(artifactDir, 'integration-result.json'), JSON.stringify(result, null, 2));
   }
   console.log(`${isIntegrationTest ? 'INTEGRATION' : 'SMOKE'}_TEST_OK ${JSON.stringify(result)}`);
   await requestQuit();

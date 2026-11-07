@@ -1,0 +1,8 @@
+import { expect, test } from 'bun:test';
+import { assetDropPosition, CANVAS_ASSET_MIME, decodeCanvasAssetDrag, encodeCanvasAssetDrag, resolveDraggedAsset } from '../src/lib/canvas/asset-drag';
+import type { Asset } from '../src/stores/use-asset-store';
+const asset={id:'asset-1',kind:'text',title:'Original',data:{content:'trusted local data'}} as Asset;
+test('asset drag transfers identity only, never media URLs or content',()=>{const data=encodeCanvasAssetDrag(asset.id);expect(CANVAS_ASSET_MIME).toBe('application/x-infinite-canvas-asset');expect(decodeCanvasAssetDrag(data)).toBe(asset.id);expect(data).not.toContain('trusted');expect(resolveDraggedAsset(data,[asset])).toBe(asset);});
+test('malformed or stale asset payload is rejected without treating URLs as assets',()=>{for(const raw of ['', '{','null','[]','"https://example.com/a.png"','{"version":2,"assetId":"asset-1"}','{"version":1,"assetId":9}','x'.repeat(3000)])expect(decodeCanvasAssetDrag(raw)).toBeNull();expect(resolveDraggedAsset(encodeCanvasAssetDrag('deleted'),[asset])).toBeNull();});
+test('drop resolves current catalog instead of trusting forged payload fields',()=>{const raw=JSON.stringify({version:1,assetId:'asset-1',kind:'image',data:{dataUrl:'https://malicious.invalid/'}});expect(resolveDraggedAsset(raw,[asset])).toBe(asset);});
+test('drop position accounts for left panel, zoom and pan without reading changing viewport later',()=>{expect(assetDropPosition({x:780,y:450},{left:280,top:64},{x:100,y:-50,k:2})).toEqual({x:200,y:218});expect(assetDropPosition({x:600,y:400},{left:200,top:0},{x:-100,y:100,k:0.5})).toEqual({x:1000,y:600});});

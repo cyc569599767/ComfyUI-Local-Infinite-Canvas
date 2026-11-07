@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { comfyPythonArguments, comfySpawnEnvironment, desktopLocalUrl, isDesktopGatewayHealth, isDesktopCanvasConfig, isDesktopCanvasIndex, resolveDesktopComfyPlan } from "../desktop-protocol.mjs";
+import { DESKTOP_COMFY_BOOTSTRAP, comfyPythonArguments, comfySpawnEnvironment, desktopLocalUrl, isDesktopGatewayHealth, isDesktopCanvasConfig, isDesktopCanvasIndex, resolveDesktopComfyPlan } from "../desktop-protocol.mjs";
 
 const launcherDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const indexHtml = '<!doctype html><title>无界工作台</title><div id="root"></div><script type="module" src="/assets/index.js"></script><script src="/config.js"></script>';
@@ -87,7 +87,7 @@ async function fixture(t, overrides = {}) {
   // Never execute the workspace launcher: even failure paths use this private copy.
   t.after(async () => { await fs.rm(root, { recursive: true, force: true }); });
   await fs.mkdir(path.join(root, "launcher"), { recursive: true });
-  for (const name of ["start.mjs", "desktop-protocol.mjs", "bootstrap-nodes.mjs"]) {
+  for (const name of ["start.mjs", "desktop-protocol.mjs", "bootstrap-nodes.mjs", "desktop-comfy-bootstrap.py"]) {
     await fs.copyFile(path.join(launcherDir, name), path.join(root, "launcher", name));
   }
   await fs.mkdir(path.join(root, "gateway", "src"), { recursive: true });
@@ -317,7 +317,7 @@ test("desktop portable BAT preserves original Python/Comfy options and suppresse
   const plan = resolveDesktopComfyPlan(install, { kind: "script", file: bat, cwd });
   assert.equal(plan.kind, "python"); assert.equal(plan.cwd, cwd);
   const argv = comfyPythonArguments(plan, 18188, true);
-  assert.deepEqual(argv, ["-s", install.mainPy, "--windows-standalone-build", "--auto-launch", "--reserve-vram", "2",
+  assert.deepEqual(argv, ["-s", DESKTOP_COMFY_BOOTSTRAP, install.mainPy, "--windows-standalone-build", "--auto-launch", "--reserve-vram", "2",
     "--port", "18188", "--listen", "127.0.0.1", "--disable-auto-launch"]);
   assert.equal(await fs.readFile(bat, "utf8"), original, "installed BAT must stay unchanged");
   assert.equal(comfyPythonArguments({ mainPy: install.mainPy }, 8188).includes("--disable-auto-launch"), false, "legacy CLI behavior stays unchanged");

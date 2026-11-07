@@ -3420,6 +3420,70 @@
       "presets": {},
       "parameters": [],
       "lora": null
+    },
+    {
+      "id": "video-h3_referenceimage_songvideo_fulllength_api",
+      "name": "video-h3_referenceimage_songvideo_fulllength_api",
+      "type": "video",
+      "description": "",
+      "file": "video-h3_referenceimage_songvideo_fulllength_api.json",
+      "bindings": {
+        "image": {
+          "node": "6",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "width": {
+          "node": "10",
+          "input": "width",
+          "from": "size.width",
+          "default": 1024,
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "10",
+          "input": "height",
+          "from": "size.height",
+          "default": 768,
+          "transform": "snap32"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null
+    },
+    {
+      "id": "video-h3_referenceimage_songvideo_fulllength_api-2",
+      "name": "video-H3_ReferenceImage_SongVideo_FullLength_API",
+      "type": "video",
+      "description": "",
+      "file": "video-h3_referenceimage_songvideo_fulllength_api-2.json",
+      "bindings": {
+        "image": {
+          "node": "6",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "width": {
+          "node": "10",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "10",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null
     }
   ]
 }

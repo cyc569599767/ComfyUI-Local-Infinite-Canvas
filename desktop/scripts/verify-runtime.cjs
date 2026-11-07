@@ -30,7 +30,7 @@ const INCLUDED_ASSETS = Object.freeze([
 const REQUIRED_FILES = Object.freeze([
   'VERSION', 'LICENSE', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md',
   'infinite-canvas/LICENSE', 'DEPENDENCY-LICENSES.txt',
-  'launcher/start.mjs', 'launcher/bootstrap-nodes.mjs', 'launcher/desktop-protocol.mjs',
+  'launcher/start.mjs', 'launcher/bootstrap-nodes.mjs', 'launcher/desktop-protocol.mjs', 'launcher/desktop-comfy-bootstrap.py',
   `${RENDERER}/index.html`, `${RENDERER}/config.js`, `${RENDERER}/plugins/index.json`,
   `${GATEWAY}/package.json`, `${GATEWAY}/package-lock.json`,
   `${GATEWAY}/src/server.js`, `${GATEWAY}/src/config.js`, `${GATEWAY}/src/admin.html`,
@@ -109,6 +109,7 @@ function assertAllowedRuntimeFile(relative) {
   const rootLegal = !relative.includes('/') && LEGAL_NAME.test(relative);
   const canvasLegal = relative.startsWith('infinite-canvas/') && relative.split('/').length === 2 && LEGAL_NAME.test(path.posix.basename(relative));
   const allowed = rootLegal || canvasLegal || ['VERSION', 'infinite-canvas/VERSION', MANIFEST, 'DEPENDENCY-LICENSES.txt'].includes(relative)
+    || relative === 'launcher/desktop-comfy-bootstrap.py'
     || /^launcher\/(?:start|bootstrap-nodes|desktop-protocol)\.mjs$/.test(relative)
     || relative.startsWith(`${RENDERER}/`)
     || [`${GATEWAY}/package.json`, `${GATEWAY}/package-lock.json`, `${GATEWAY}/workflow-baseline.json`, `${GATEWAY}/resources/index.json`].includes(relative)

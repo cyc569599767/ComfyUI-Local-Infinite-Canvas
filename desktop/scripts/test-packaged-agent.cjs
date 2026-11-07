@@ -27,6 +27,11 @@ const { readAgentChatResponse } = require('../../infinite-canvas/web/src/lib/age
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
     const [ready] = await Promise.race([once(child,'message'), once(child,'exit').then(()=>{throw new Error('Packaged gateway exited before ready')}), new Promise((_,reject)=>{const timer=setTimeout(()=>reject(new Error('Packaged gateway startup timeout')),20000);timer.unref();})]);
+    for (const body of [{baseUrl:model.url,apiKey:FIXTURE_KEY,model:FIXTURE_MODEL},{clear:true}]) {
+      const response=await fetch(`${ready.url}/api/agent/provider`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      assert.equal(response.status,409);assert.equal((await response.json()).error.code,'desktop_provider_sync_disabled');
+    }
+    await assert.rejects(fs.stat(path.join(runtime,'assistant','agent-provider.json')),{code:'ENOENT'});
     const request = async (operation, payload) => {
       const response = await fetch(`${ready.url}/api/agent/cloud/${operation}`, { method:'POST',headers:{'content-type':'application/json',origin:'http://127.0.0.1:24183'},
         body:JSON.stringify({baseUrl:model.url,apiKey:FIXTURE_KEY,...(payload?{request:payload}:{})}),signal:AbortSignal.timeout(15000) });

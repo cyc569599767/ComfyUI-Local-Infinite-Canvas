@@ -1,0 +1,976 @@
+{
+  "sourceCommit": "39b7965",
+  "graphs": {
+    "image-qwen21-edit-turbo.json": {
+      "1": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "weight_dtype": "default"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 Turbo"
+        }
+      },
+      "2": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+          "type": "qwen_image",
+          "device": "default"
+        },
+        "_meta": {
+          "title": "Qwen3VL 8B"
+        }
+      },
+      "3": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 VAE"
+        }
+      },
+      "4": {
+        "class_type": "QwenImage21Cache",
+        "inputs": {
+          "model": [
+            "1",
+            0
+          ],
+          "device": "auto",
+          "dtype": "default"
+        }
+      },
+      "5": {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {
+          "clip": [
+            "2",
+            0
+          ],
+          "prompt": "",
+          "negative_prompt": "artifacts, low quality, blurry, deformed, watermark",
+          "vae": [
+            "3",
+            0
+          ],
+          "resolution": 1024
+        }
+      },
+      "6": {
+        "class_type": "CFGGuider",
+        "inputs": {
+          "model": [
+            "4",
+            0
+          ],
+          "positive": [
+            "5",
+            0
+          ],
+          "negative": [
+            "5",
+            1
+          ],
+          "cfg": 1
+        }
+      },
+      "7": {
+        "class_type": "RandomNoise",
+        "inputs": {
+          "noise_seed": 123456789
+        }
+      },
+      "8": {
+        "class_type": "KSamplerSelect",
+        "inputs": {
+          "sampler_name": "euler"
+        }
+      },
+      "9": {
+        "class_type": "ManualSigmas",
+        "inputs": {
+          "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+        }
+      },
+      "10": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+          "noise": [
+            "7",
+            0
+          ],
+          "guider": [
+            "6",
+            0
+          ],
+          "sampler": [
+            "8",
+            0
+          ],
+          "sigmas": [
+            "9",
+            0
+          ],
+          "latent_image": [
+            "5",
+            2
+          ]
+        }
+      },
+      "11": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "10",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        }
+      },
+      "12": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "11",
+            0
+          ],
+          "filename_prefix": "Qwen21Edit"
+        }
+      },
+      "13": {
+        "class_type": "EmptyImage",
+        "inputs": {
+          "width": 1024,
+          "height": 1024,
+          "batch_size": 1,
+          "color": 0
+        },
+        "_meta": {
+          "title": "Output canvas"
+        }
+      },
+      "14": {
+        "class_type": "VAEEncode",
+        "inputs": {
+          "pixels": [
+            "13",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        },
+        "_meta": {
+          "title": "Output latent"
+        }
+      }
+    },
+    "image-qwen21-inpaint.json": {
+      "1": {
+        "class_type": "LoadImage",
+        "inputs": {
+          "image": "source.png"
+        },
+        "_meta": {
+          "title": "Source Image"
+        }
+      },
+      "2": {
+        "class_type": "LoadImage",
+        "inputs": {
+          "image": "mask.png"
+        },
+        "_meta": {
+          "title": "Binary Mask"
+        }
+      },
+      "3": {
+        "class_type": "ImageToMask",
+        "inputs": {
+          "image": [
+            "2",
+            0
+          ],
+          "channel": "red"
+        }
+      },
+      "4": {
+        "class_type": "InpaintCropImproved",
+        "inputs": {
+          "image": [
+            "1",
+            0
+          ],
+          "mask": [
+            "3",
+            0
+          ],
+          "downscale_algorithm": "bilinear",
+          "upscale_algorithm": "bicubic",
+          "preresize": false,
+          "preresize_mode": "ensure minimum resolution",
+          "preresize_min_width": 1024,
+          "preresize_min_height": 1024,
+          "preresize_max_width": 16384,
+          "preresize_max_height": 16384,
+          "mask_fill_holes": true,
+          "mask_expand_pixels": 32,
+          "mask_invert": false,
+          "mask_blend_pixels": 32,
+          "mask_hipass_filter": 0.1,
+          "extend_for_outpainting": false,
+          "extend_up_factor": 1,
+          "extend_down_factor": 1,
+          "extend_left_factor": 1,
+          "extend_right_factor": 1,
+          "context_from_mask_extend_factor": 1.5,
+          "output_resize_to_target_size": true,
+          "output_target_width": 1024,
+          "output_target_height": 1024,
+          "output_padding": "32",
+          "device_mode": "cpu (compatible)"
+        }
+      },
+      "5": {
+        "class_type": "VAEEncode",
+        "inputs": {
+          "pixels": [
+            "4",
+            1
+          ],
+          "vae": [
+            "19",
+            0
+          ]
+        }
+      },
+      "6": {
+        "class_type": "SetLatentNoiseMask",
+        "inputs": {
+          "samples": [
+            "5",
+            0
+          ],
+          "mask": [
+            "4",
+            2
+          ]
+        }
+      },
+      "7": {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {
+          "clip": [
+            "18",
+            0
+          ],
+          "prompt": "",
+          "negative_prompt": "artifacts, low quality, blurry, deformed, watermark",
+          "vae": [
+            "19",
+            0
+          ],
+          "resolution": 1024,
+          "images.image_1": [
+            "4",
+            1
+          ]
+        }
+      },
+      "8": {
+        "class_type": "QwenImage21Cache",
+        "inputs": {
+          "model": [
+            "17",
+            0
+          ],
+          "device": "auto",
+          "dtype": "default"
+        }
+      },
+      "9": {
+        "class_type": "CFGGuider",
+        "inputs": {
+          "model": [
+            "8",
+            0
+          ],
+          "positive": [
+            "7",
+            0
+          ],
+          "negative": [
+            "7",
+            1
+          ],
+          "cfg": 1
+        }
+      },
+      "10": {
+        "class_type": "RandomNoise",
+        "inputs": {
+          "noise_seed": 123456789
+        }
+      },
+      "11": {
+        "class_type": "KSamplerSelect",
+        "inputs": {
+          "sampler_name": "euler"
+        }
+      },
+      "12": {
+        "class_type": "ManualSigmas",
+        "inputs": {
+          "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+        }
+      },
+      "13": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+          "noise": [
+            "10",
+            0
+          ],
+          "guider": [
+            "9",
+            0
+          ],
+          "sampler": [
+            "11",
+            0
+          ],
+          "sigmas": [
+            "12",
+            0
+          ],
+          "latent_image": [
+            "6",
+            0
+          ]
+        }
+      },
+      "14": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "13",
+            0
+          ],
+          "vae": [
+            "19",
+            0
+          ]
+        }
+      },
+      "15": {
+        "class_type": "InpaintStitchImproved",
+        "inputs": {
+          "stitcher": [
+            "4",
+            0
+          ],
+          "inpainted_image": [
+            "14",
+            0
+          ]
+        }
+      },
+      "16": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "15",
+            0
+          ],
+          "filename_prefix": "Qwen21Inpaint"
+        }
+      },
+      "17": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "weight_dtype": "default"
+        }
+      },
+      "18": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+          "type": "qwen_image",
+          "device": "default"
+        }
+      },
+      "19": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+        }
+      }
+    },
+    "image-qwen21-outpaint.json": {
+      "1": {
+        "class_type": "LoadImage",
+        "inputs": {
+          "image": "source.png"
+        },
+        "_meta": {
+          "title": "Source Image"
+        }
+      },
+      "2": {
+        "class_type": "ImagePadForOutpaint",
+        "inputs": {
+          "image": [
+            "1",
+            0
+          ],
+          "left": 0,
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "feathering": 40
+        }
+      },
+      "3": {
+        "class_type": "DrawMaskOnImage",
+        "inputs": {
+          "image": [
+            "2",
+            0
+          ],
+          "mask": [
+            "2",
+            1
+          ],
+          "color": "128, 128, 128",
+          "device": "cpu"
+        }
+      },
+      "4": {
+        "class_type": "ImageScaleToTotalPixels",
+        "inputs": {
+          "image": [
+            "3",
+            0
+          ],
+          "upscale_method": "lanczos",
+          "megapixels": 1.5,
+          "resolution_steps": 32
+        }
+      },
+      "5": {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {
+          "model": [
+            "7",
+            0
+          ],
+          "lora_name": "Qwen-功能2.1\\Qwen21-图像扩展qwen-image-2.1-outpaint-v2.safetensors",
+          "strength_model": 1
+        }
+      },
+      "6": {
+        "class_type": "QwenImage21Cache",
+        "inputs": {
+          "model": [
+            "5",
+            0
+          ],
+          "device": "auto",
+          "dtype": "default"
+        }
+      },
+      "7": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "weight_dtype": "default"
+        }
+      },
+      "8": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+          "type": "qwen_image",
+          "device": "default"
+        }
+      },
+      "9": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+        }
+      },
+      "10": {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {
+          "clip": [
+            "8",
+            0
+          ],
+          "prompt": "",
+          "negative_prompt": "artifacts, low quality, blurry, deformed, watermark",
+          "vae": [
+            "9",
+            0
+          ],
+          "resolution": 0,
+          "images.image_1": [
+            "4",
+            0
+          ]
+        }
+      },
+      "11": {
+        "class_type": "CFGGuider",
+        "inputs": {
+          "model": [
+            "6",
+            0
+          ],
+          "positive": [
+            "10",
+            0
+          ],
+          "negative": [
+            "10",
+            1
+          ],
+          "cfg": 1
+        }
+      },
+      "12": {
+        "class_type": "RandomNoise",
+        "inputs": {
+          "noise_seed": 123456789
+        }
+      },
+      "13": {
+        "class_type": "KSamplerSelect",
+        "inputs": {
+          "sampler_name": "euler"
+        }
+      },
+      "14": {
+        "class_type": "ManualSigmas",
+        "inputs": {
+          "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+        }
+      },
+      "15": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+          "noise": [
+            "12",
+            0
+          ],
+          "guider": [
+            "11",
+            0
+          ],
+          "sampler": [
+            "13",
+            0
+          ],
+          "sigmas": [
+            "14",
+            0
+          ],
+          "latent_image": [
+            "10",
+            2
+          ]
+        }
+      },
+      "16": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "15",
+            0
+          ],
+          "vae": [
+            "9",
+            0
+          ]
+        }
+      },
+      "17": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "18",
+            0
+          ],
+          "filename_prefix": "Qwen21Outpaint"
+        }
+      },
+      "18": {
+        "class_type": "ImageScale",
+        "inputs": {
+          "image": [
+            "16",
+            0
+          ],
+          "upscale_method": "lanczos",
+          "width": 1024,
+          "height": 1024,
+          "crop": "disabled"
+        },
+        "_meta": {
+          "title": "Final outpaint size"
+        }
+      }
+    },
+    "image-qwen21-t2i.json": {
+      "1": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "weight_dtype": "default"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 Turbo"
+        }
+      },
+      "2": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+          "type": "qwen_image",
+          "device": "default"
+        },
+        "_meta": {
+          "title": "Qwen3VL 8B"
+        }
+      },
+      "3": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 VAE"
+        }
+      },
+      "4": {
+        "class_type": "QwenImage21Cache",
+        "inputs": {
+          "model": [
+            "1",
+            0
+          ],
+          "device": "auto",
+          "dtype": "default"
+        }
+      },
+      "5": {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {
+          "clip": [
+            "2",
+            0
+          ],
+          "prompt": "",
+          "negative_prompt": "artifacts, low quality, blurry, deformed, watermark",
+          "vae": [
+            "3",
+            0
+          ],
+          "resolution": 1024
+        }
+      },
+      "6": {
+        "class_type": "CFGGuider",
+        "inputs": {
+          "model": [
+            "4",
+            0
+          ],
+          "positive": [
+            "5",
+            0
+          ],
+          "negative": [
+            "5",
+            1
+          ],
+          "cfg": 1
+        }
+      },
+      "7": {
+        "class_type": "RandomNoise",
+        "inputs": {
+          "noise_seed": 123456789
+        }
+      },
+      "8": {
+        "class_type": "KSamplerSelect",
+        "inputs": {
+          "sampler_name": "euler"
+        }
+      },
+      "9": {
+        "class_type": "ManualSigmas",
+        "inputs": {
+          "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+        }
+      },
+      "10": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+          "noise": [
+            "7",
+            0
+          ],
+          "guider": [
+            "6",
+            0
+          ],
+          "sampler": [
+            "8",
+            0
+          ],
+          "sigmas": [
+            "9",
+            0
+          ],
+          "latent_image": [
+            "5",
+            2
+          ]
+        }
+      },
+      "11": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "10",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        }
+      },
+      "12": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "11",
+            0
+          ],
+          "filename_prefix": "Qwen21T2I"
+        }
+      },
+      "13": {
+        "class_type": "EmptyImage",
+        "inputs": {
+          "width": 1024,
+          "height": 1024,
+          "batch_size": 1,
+          "color": 0
+        },
+        "_meta": {
+          "title": "Output canvas"
+        }
+      },
+      "14": {
+        "class_type": "VAEEncode",
+        "inputs": {
+          "pixels": [
+            "13",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        },
+        "_meta": {
+          "title": "Output latent"
+        }
+      }
+    },
+    "image-qwen21-angle.json": {
+      "1": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+          "weight_dtype": "default"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 Turbo"
+        }
+      },
+      "2": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+          "type": "qwen_image",
+          "device": "default"
+        },
+        "_meta": {
+          "title": "Qwen3VL 8B"
+        }
+      },
+      "3": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+        },
+        "_meta": {
+          "title": "Qwen 2.1 VAE"
+        }
+      },
+      "4": {
+        "class_type": "QwenImage21Cache",
+        "inputs": {
+          "model": [
+            "1",
+            0
+          ],
+          "device": "auto",
+          "dtype": "default"
+        }
+      },
+      "5": {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {
+          "clip": [
+            "2",
+            0
+          ],
+          "prompt": [
+            "21",
+            0
+          ],
+          "negative_prompt": "artifacts, low quality, blurry, deformed, watermark",
+          "vae": [
+            "3",
+            0
+          ],
+          "resolution": 1024
+        }
+      },
+      "6": {
+        "class_type": "CFGGuider",
+        "inputs": {
+          "model": [
+            "4",
+            0
+          ],
+          "positive": [
+            "5",
+            0
+          ],
+          "negative": [
+            "5",
+            1
+          ],
+          "cfg": 1
+        }
+      },
+      "7": {
+        "class_type": "RandomNoise",
+        "inputs": {
+          "noise_seed": 123456789
+        }
+      },
+      "8": {
+        "class_type": "KSamplerSelect",
+        "inputs": {
+          "sampler_name": "euler"
+        }
+      },
+      "9": {
+        "class_type": "ManualSigmas",
+        "inputs": {
+          "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+        }
+      },
+      "10": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+          "noise": [
+            "7",
+            0
+          ],
+          "guider": [
+            "6",
+            0
+          ],
+          "sampler": [
+            "8",
+            0
+          ],
+          "sigmas": [
+            "9",
+            0
+          ],
+          "latent_image": [
+            "5",
+            2
+          ]
+        }
+      },
+      "11": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "10",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        }
+      },
+      "12": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "11",
+            0
+          ],
+          "filename_prefix": "Qwen21Edit"
+        }
+      },
+      "20": {
+        "class_type": "QwenMultiangleCameraNode",
+        "inputs": {
+          "horizontal_angle": 0,
+          "vertical_angle": 0,
+          "zoom": 5,
+          "default_prompts": true,
+          "camera_view": false
+        },
+        "_meta": {
+          "title": "Qwen Multiangle Camera"
+        }
+      },
+      "21": {
+        "class_type": "QwenAnglePromptConcat",
+        "inputs": {
+          "base_prompt": "保持主体、颜色、材质和画面风格一致，只改变相机视角与构图。",
+          "camera_text": [
+            "20",
+            0
+          ]
+        },
+        "_meta": {
+          "title": "Angle prompt concat"
+        }
+      }
+    }
+  }
+}

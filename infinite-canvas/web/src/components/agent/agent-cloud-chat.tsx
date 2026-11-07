@@ -5,7 +5,7 @@ import { Bot, Gauge, LoaderCircle, MessagesSquare, Plus, ShieldCheck, Trash2 } f
 import { useTranslation } from "react-i18next";
 
 import { AgentChatComposer } from "./agent-chat-composer";
-import { AgentChatMessage, AgentPendingToolCard, type AgentChatAttachment, type AgentChatMessageItem } from "./agent-chat-message";
+import { AgentChatMessage, AgentPendingToolCard, type AgentChatMessageItem } from "./agent-chat-message";
 import { summarizeCanvasAgentOps, type CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
@@ -19,12 +19,16 @@ import { resolveAgentRuntime, type AgentRuntime } from "@/lib/agent-cloud-config
 import { readAgentChatResponse, redactAgentError, type StreamDelta } from "@/lib/agent-chat-stream";
 import { requestAgentChat } from "@/services/api/agent-cloud";
 import { deleteHistoryMessage, rebuildChatHistory, regenerationPlan, requiresUnavailableAttachments } from "@/lib/agent-chat-history";
+import { AGENT_CHAT_RECOVERY_KEY, applyApprovedCanvasOps, createChatPersistence, encodeChatRecoveryCheckpoint, recoverChatCheckpoint } from "@/lib/agent-chat-lifecycle";
 
-type CloudAttachment = AgentChatAttachment & { dataUrl: string; mimeType: string; size: number };
+import { MAX_CLOUD_IMAGES, MAX_CLOUD_IMAGE_PAYLOAD_BYTES, prepareCloudReferences, type CloudReferenceAttachment, type PreparedCloudReferences } from "@/lib/agent-cloud-references";
+
+type CloudAttachment = CloudReferenceAttachment;
+type CloudSubmission = PreparedCloudReferences & { text: string };
 type ApiMessage = { role: "system" | "user" | "assistant" | "tool"; content?: unknown; tool_calls?: unknown[]; tool_call_id?: string; name?: string; provider_metadata?: unknown };
 
-const MAX_ATTACHMENTS = 6;
-const MAX_PAYLOAD_BYTES = 30 * 1024 * 1024;
+const MAX_ATTACHMENTS = MAX_CLOUD_IMAGES;
+const MAX_PAYLOAD_BYTES = MAX_CLOUD_IMAGE_PAYLOAD_BYTES;
 const MAX_TOOL_STEPS = 8;
 
 function readFileDataUrl(file: File) {
@@ -214,16 +218,27 @@ export function AgentCloudChat() {
     const hydrated = useAgentChatStore((state) => state.hydrated);
     const activeConversation = conversations.find((conversation) => conversation.id === activeId);
     const loadedConversationRef = useRef<string | null>(null);
-    const lastSavedActiveIdRef = useRef(activeId);
+    const recoveryCheckedRef = useRef(false);
     const [prompt, setPrompt] = useState("");
     const [attachments, setAttachments] = useState<CloudAttachment[]>([]);
-    const [messages, setMessages] = useState<AgentChatMessageItem[]>([]);
+    const [messages, setMessagesState] = useState<AgentChatMessageItem[]>([]);
     const [sending, setSending] = useState(false);
     const sendingRef = useRef(false);
     const mountedRef = useRef(true);
     const historyAttachmentsRef = useRef(new Map<string, CloudAttachment[]>());
     const messagesRef = useRef<AgentChatMessageItem[]>([]);
-    messagesRef.current = messages;
+    const persistenceRef = useRef<ReturnType<typeof createChatPersistence<AgentChatMessageItem>> | null>(null);
+    if (!persistenceRef.current) persistenceRef.current = createChatPersistence({
+        save: (id, next) => useAgentChatStore.getState().saveMessages(id, next),
+    });
+    const setMessages = (update: AgentChatMessageItem[] | ((current: AgentChatMessageItem[]) => AgentChatMessageItem[])) => {
+        // Keep the latest stream delta synchronous for pagehide/turn-end flushes.
+        if (!mountedRef.current || loadedConversationRef.current !== activeId) return;
+        const next = typeof update === "function" ? update(messagesRef.current) : update;
+        messagesRef.current = next;
+        setMessagesState(next);
+        if (useAgentChatStore.getState().hydrated) persistenceRef.current?.stage(activeId, next);
+    };
     const activeIdRef = useRef(activeId);
     activeIdRef.current = activeId;
     const [pending, setPending] = useState<{ summary: string; resolve: (approved: boolean) => void } | null>(null);
@@ -235,7 +250,10 @@ export function AgentCloudChat() {
     const pendingRef = useRef<{ resolve: (approved: boolean) => void } | null>(null);
     const attachmentUrlsRef = useRef(new Set<string>());
     const scrollTimerRef = useRef<number | null>(null);
-    const queueRef = useRef<Array<{ text: string; attachments: CloudAttachment[] }>>([]);
+    const queueRef = useRef<CloudSubmission[]>([]);
+    const preparationRef = useRef<AbortController | null>(null);
+    const draftRef = useRef({ prompt, attachments });
+    draftRef.current = { prompt, attachments };
     const [queueCount, setQueueCount] = useState(0);
     const confirmTools = useAgentStore((state) => state.confirmTools);
     const skin = useEffectiveCardSkin() as string;
@@ -244,8 +262,19 @@ export function AgentCloudChat() {
         mountedRef.current = true;
         const state = useAgentStore.getState();
         if (state.canvasReferences.length || state.attachments.length) state.setAgentState({ canvasReferences: [], attachments: [] });
+        const flushOnLeave = () => {
+            const id = loadedConversationRef.current;
+            if (!id || !useAgentChatStore.getState().hydrated) return;
+            persistenceRef.current?.flush();
+            try { localStorage.setItem(AGENT_CHAT_RECOVERY_KEY, encodeChatRecoveryCheckpoint(id, Date.now(), messagesRef.current)); } catch { /* storage quota cannot break close */ }
+        };
+        window.addEventListener("pagehide", flushOnLeave);
         return () => {
+            flushOnLeave();
+            window.removeEventListener("pagehide", flushOnLeave);
             mountedRef.current = false;
+            preparationRef.current?.abort();
+            useAgentStore.getState().setAgentState({ sending: false, waiting: false });
             queueRef.current = [];
             historyAttachmentsRef.current.clear();
             pendingRef.current?.resolve(false);
@@ -258,23 +287,25 @@ export function AgentCloudChat() {
         useAgentStore.getState().setAgentState({ sending, waiting: sending });
     }, [sending]);
     useEffect(() => {
+        if (!hydrated) return;
+        if (!recoveryCheckedRef.current) {
+            recoveryCheckedRef.current = true;
+            try {
+                const recovered = recoverChatCheckpoint(localStorage.getItem(AGENT_CHAT_RECOVERY_KEY), useAgentChatStore.getState().conversations);
+                if (recovered) useAgentChatStore.getState().saveMessages(recovered.id, recovered.messages);
+                localStorage.removeItem(AGENT_CHAT_RECOVERY_KEY);
+            } catch { /* Keep the normal IndexedDB history on storage failures. */ }
+        }
         const state = useAgentChatStore.getState();
         const active = state.conversations.find((conversation) => conversation.id === state.activeId);
-        if (!hydrated || !active || loadedConversationRef.current === active.id) return;
+        if (!active || loadedConversationRef.current === active.id) return;
+        persistenceRef.current?.flush();
         loadedConversationRef.current = active.id;
-        setMessages(active.messages);
         messagesRef.current = active.messages;
+        setMessagesState(active.messages);
         apiMessagesRef.current = rebuildChatHistory(active.messages, id => historyAttachmentsRef.current.get(id));
         setError("");
     }, [conversations, activeId, hydrated]);
-    useEffect(() => {
-        if (!hydrated || sending || loadedConversationRef.current !== activeId || messagesRef.current !== messages) return;
-        if (lastSavedActiveIdRef.current !== activeId) {
-            lastSavedActiveIdRef.current = activeId;
-            return;
-        }
-        useAgentChatStore.getState().saveMessages(activeId, messages);
-    }, [messages, sending, activeId, hydrated]);
     useEffect(() => {
         // Switching a configured profile never probes the provider.
         setError("");
@@ -342,7 +373,7 @@ export function AgentCloudChat() {
         useAgentStore.getState().setAgentState({ confirmTools: next });
     };
 
-    const executeTool = async (name: string, input: Record<string, unknown>) => {
+    const executeTool = async (name: string, input: Record<string, unknown>, signal: AbortSignal) => {
         if (name === "canvas_get_state") return compactCanvasState();
         if (name === "canvas_get_features") return canvasFeatureCatalog();
         if (name === "site_navigate") {
@@ -352,16 +383,18 @@ export function AgentCloudChat() {
             return { ok: true, path };
         }
         if (name === "canvas_apply_ops") {
-            const context = useAgentStore.getState().canvasContext;
-            if (!context) return { error: "当前不在画布页面，请先打开一个画布。" };
             const ops = Array.isArray(input.ops) ? (input.ops as CanvasAgentOp[]) : [];
             if (!ops.length) return { error: "ops 不能为空。" };
-            if (useAgentStore.getState().confirmTools) {
-                const summary = summarizeCanvasAgentOps(ops) || "修改当前画布";
-                const approved = await requestApproval(summary);
-                if (!approved) return { error: "用户拒绝了本次画布操作。" };
-            }
-            const result = context.applyOps(ops);
+            const applied = await applyApprovedCanvasOps({
+                ops,
+                summary: summarizeCanvasAgentOps(ops) || "修改当前画布",
+                confirmTools: useAgentStore.getState().confirmTools,
+                readContext: () => useAgentStore.getState().canvasContext,
+                requestApproval,
+                signal,
+            });
+            if ("error" in applied) return applied;
+            const result = applied.snapshot;
             return {
                 ok: true,
                 nodeCount: result.nodes.length,
@@ -373,7 +406,8 @@ export function AgentCloudChat() {
         return { error: `未知工具：${name}` };
     };
 
-    const runChat = async (userText: string, userAttachments: CloudAttachment[], replaceHistory?: AgentChatMessageItem[]) => {
+    const runChat = async (userText: string, userAttachments: CloudAttachment[], options: { source: "submit" | "queued" | "regenerate"; replaceHistory?: AgentChatMessageItem[]; submission?: CloudSubmission }) => {
+        const { replaceHistory, submission } = options;
         if (sendingRef.current || !mountedRef.current) return;
         let runtime: AgentRuntime;
         // Keep the centralized native-protocol cloud path independent of the optional pi runtime.
@@ -434,14 +468,15 @@ export function AgentCloudChat() {
         const systemMessage: ApiMessage = { role: "system", content: systemPrompt };
         if (apiMessagesRef.current[0]?.role === "system") apiMessagesRef.current[0] = systemMessage;
         else apiMessagesRef.current.unshift(systemMessage);
+        const requestText = submission?.requestText ?? userText;
         const content: unknown = userAttachments.length
-            ? [{ type: "text", text: userText || "请查看这些图片。" }, ...userAttachments.map((item) => ({ type: "image_url", image_url: { url: item.dataUrl } }))]
-            : userText;
+            ? [{ type: "text", text: requestText || "请查看这些图片。" }, ...userAttachments.map((item) => ({ type: "image_url", image_url: { url: item.dataUrl } }))]
+            : requestText;
         apiMessagesRef.current.push({ role: "user", content });
         if (userAttachments.length) historyAttachmentsRef.current.set(turnId, userAttachments);
-        setMessages(current => [...current, { id: turnId, turnId, role: "user", text: userText || (userAttachments.length ? `发送了 ${userAttachments.length} 张图片` : ""), promptText: userText, hasAttachments: userAttachments.length > 0, attachments: userAttachments.map(({ id, name, url }) => ({ id, name, url })) }]);
-        // Regenerating must not erase an unrelated draft currently in the composer.
-        if (!replaceHistory) { setPrompt(""); setAttachments([]); }
+        setMessages(current => [...current, { id: turnId, turnId, role: "user", text: userText || (userAttachments.length ? `发送了 ${userAttachments.length} 张图片` : "引用了画布素材"), promptText: requestText, hasAttachments: userAttachments.length > 0, attachments: userAttachments.map(({ id, name, url }) => ({ id, name, url })), canvasReferences: submission?.canvasReferences }]);
+        // submit() consumed only its captured draft after preparation succeeded.
+        // Queued turns and regeneration must never erase a newer draft.
         let liveId: string | null = null;
         let allReasoning = "";
         const ensureLive = () => {
@@ -499,7 +534,7 @@ export function AgentCloudChat() {
                             input = JSON.parse(call.function?.arguments || "{}") as Record<string, unknown>;
                         } catch { input = {}; }
                         if (controller.signal.aborted) throw new DOMException("Canceled", "AbortError");
-                        const result = await executeTool(name, input);
+                        const result = await executeTool(name, input, controller.signal);
                         apiMessagesRef.current.push({ role: "tool", tool_call_id: call.id || "", content: JSON.stringify(result) });
                     }
                     continue;
@@ -531,13 +566,14 @@ export function AgentCloudChat() {
             // Keep the existing visible history but drop incomplete assistant/tool pairs.
             apiMessagesRef.current = apiMessagesRef.current.filter(item => item.role !== "tool" && !item.tool_calls);
         } finally {
+            persistenceRef.current?.flush();
             abortRef.current = null;
             sendingRef.current = false;
             if (!mountedRef.current) return;
             const next = controller.signal.aborted ? undefined : queueRef.current.shift();
             setQueueCount(queueRef.current.length);
             if (next) {
-                void runChat(next.text, next.attachments);
+                void runChat(next.text, next.attachments, { source: "queued", submission: next });
             } else {
                 setSending(false);
             }
@@ -552,21 +588,46 @@ export function AgentCloudChat() {
     const contextTokens = Math.ceil(contextChars / 4);
     const snapshot = useAgentStore((state) => state.canvasContext?.snapshot);
 
-    const submit = () => {
-        if (!canUse) return;
+    const submit = async () => {
+        if (!canUse || preparationRef.current) return;
         const text = prompt.trim();
-        if (!text && !attachments.length) return;
-        if (sendingRef.current) {
-            queueRef.current.push({ text, attachments });
-            setQueueCount(queueRef.current.length);
-            setPrompt("");
-            setAttachments([]);
-            message.success(t("agent.dev.queued", { count: queueRef.current.length }));
-            return;
+        const references = useAgentStore.getState().canvasReferences;
+        if (!text && !attachments.length && !references.length) return;
+        const conversationId = activeIdRef.current;
+        const controller = new AbortController();
+        preparationRef.current = controller;
+        try {
+            const prepared = await prepareCloudReferences({ text, attachments, references, readCanvas: () => useAgentStore.getState().canvasContext?.snapshot, signal: controller.signal });
+            if (!mountedRef.current || controller.signal.aborted || activeIdRef.current !== conversationId) return;
+            // Configuration may have changed while storage was being read; fail
+            // before consuming the draft rather than losing unsent attachments.
+            resolveAgentRuntime({ ...useDevAgentStore.getState(), transport: "cloud" }, activePromptCloudApi(useConfigStore.getState().config));
+            const submission: CloudSubmission = { text, ...prepared };
+            const queued = sendingRef.current;
+            if (queued) {
+                queueRef.current.push(submission);
+                setQueueCount(queueRef.current.length);
+            }
+            // A changed draft (including reselected references) belongs to the
+            // next message and must survive this asynchronous preparation.
+            const state = useAgentStore.getState();
+            if (draftRef.current.prompt === prompt && draftRef.current.attachments === attachments && state.canvasReferences === references) {
+                setPrompt("");
+                setAttachments([]);
+                state.setAgentState({ canvasReferences: [] });
+            }
+            if (queued) message.success(t("agent.dev.queued", { count: queueRef.current.length }));
+            else void runChat(text, prepared.attachments, { source: "submit", submission });
+        } catch (err) {
+            if (mountedRef.current && !controller.signal.aborted && activeIdRef.current === conversationId) {
+                message.error(err instanceof Error ? err.message : t("agent.runtime.canvasImageReadFailed"));
+            }
+        } finally {
+            if (preparationRef.current === controller) preparationRef.current = null;
         }
-        void runChat(text, attachments);
     };
     const stop = () => {
+        preparationRef.current?.abort();
         queueRef.current = [];
         setQueueCount(0);
         pendingRef.current?.resolve(false);
@@ -625,7 +686,7 @@ export function AgentCloudChat() {
                 if (requiresUnavailableAttachments(plan.user, images)) { message.warning(t("agent.message.attachmentsExpired")); return; }
                 queueRef.current = [];
                 setQueueCount(0);
-                void runChat(plan.user.promptText ?? (images.length && /^发送了 \d+ 张图片$/.test(plan.user.text) ? "" : plan.user.text), images, plan.prefix);
+                void runChat(plan.user.text, images, { source: "regenerate", replaceHistory: plan.prefix, submission: { text: plan.user.text, requestText: plan.user.promptText ?? (images.length && /^发送了 \d+ 张图片$/.test(plan.user.text) ? "" : plan.user.text), attachments: images, canvasReferences: plan.user.canvasReferences || [] } });
             },
         });
     };

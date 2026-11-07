@@ -266,7 +266,7 @@ function buildRuntime(repoRoot = path.resolve(__dirname, '../..')) {
     for (const tree of ['nodes', 'vae_approx']) copySourceTree(layout, `${GATEWAY}/resources/${tree}`, sourceFiles);
     for (const relative of [
       `${GATEWAY}/package.json`, `${GATEWAY}/package-lock.json`, `${GATEWAY}/workflow-baseline.json`, `${GATEWAY}/resources/index.json`,
-      'launcher/start.mjs', 'launcher/bootstrap-nodes.mjs', 'launcher/desktop-protocol.mjs', 'VERSION',
+      'launcher/start.mjs', 'launcher/bootstrap-nodes.mjs', 'launcher/desktop-protocol.mjs', 'launcher/desktop-comfy-bootstrap.py', 'VERSION',
       ...legalFiles(layout.root), ...legalFiles(path.join(layout.root, 'infinite-canvas')).map((file) => `infinite-canvas/${file}`),
     ]) copySourceFile(layout, relative, sourceFiles);
     if (fs.existsSync(path.join(layout.root, 'infinite-canvas/VERSION'))) copySourceFile(layout, 'infinite-canvas/VERSION', sourceFiles);

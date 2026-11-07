@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
-import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
+import { App, Dropdown, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, ListChecks, Music2, Pencil, Plus, RefreshCw, Rows3, Search, Settings2, Sparkles, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { LOCAL_ONLY } from "@/constant/app-mode";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
+import { CANVAS_ASSET_MIME, encodeCanvasAssetDrag } from "@/lib/canvas/asset-drag";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
@@ -446,7 +447,7 @@ function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme })
 }
 
 // ---------------------------------------------------------------------------
-// Assets tab: collapsible type groups, tag filtering, and click-to-insert.
+// Assets tab: collapsible type groups, tag filtering, and drag-to-insert.
 // ---------------------------------------------------------------------------
 
 const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
@@ -565,11 +566,15 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                                                     asset={asset}
                                                     theme={theme}
                                                     onInsert={() => onInsert(buildInsertPayload(asset))}
-                                                    onRemove={() =>
-                                                        void removeAsset(asset.id)
-                                                            .then(() => message.success(t("canvas.sidePanel.assetRemoved")))
-                                                            .catch((error) => message.error(error instanceof Error ? error.message : t("canvas.sidePanel.removeAssetFailed")))
-                                                    }
+                                                    onRemove={async () => {
+                                                        try {
+                                                            await removeAsset(asset.id);
+                                                            message.success(t("canvas.sidePanel.assetRemoved"));
+                                                        } catch (error) {
+                                                            message.error(error instanceof Error ? error.message : t("canvas.sidePanel.removeAssetFailed"));
+                                                            throw error;
+                                                        }
+                                                    }}
                                                 />
                                             ))}
                                         </div>
@@ -586,41 +591,104 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     );
 });
 
-function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => void }) {
+function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => Promise<void> }) {
+    const { modal } = App.useApp();
     const { t } = useTranslation();
+    const [contextMenuOpen, setContextMenuOpen] = useState(false);
+    const suppressClickUntil = useRef(0);
+    const hint = t("canvas.sidePanel.assetDragHint");
+
+    const confirmRemove = () => {
+        setContextMenuOpen(false);
+        modal.confirm({
+            title: t("canvas.sidePanel.removeAssetTitle"),
+            content: asset.title,
+            okText: t("canvas.sidePanel.remove"),
+            cancelText: t("common.cancel"),
+            okButtonProps: { danger: true },
+            autoFocusButton: "cancel",
+            onOk: onRemove,
+        });
+    };
+
     return (
-        <div className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
-            <AssetCover asset={asset} />
-            <div className="absolute inset-0 flex items-center justify-center gap-2.5 opacity-0 transition duration-200 group-hover:opacity-100">
-                <button
-                    type="button"
-                    onClick={onInsert}
-                    className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-stone-900 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80"
-                    aria-label={t("canvas.sidePanel.inserted")}
-                >
-                    <Plus className="size-4" />
-                </button>
-                <Popconfirm title={t("canvas.sidePanel.removeAssetTitle")} okText={t("canvas.sidePanel.remove")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
-                    <button
-                        type="button"
-                        className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-red-500 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80 dark:hover:text-red-400"
-                        aria-label={t("canvas.sidePanel.removeAsset")}
-                    >
-                        <Trash2 className="size-4" />
-                    </button>
-                </Popconfirm>
+        <Dropdown
+            trigger={["contextMenu"]}
+            open={contextMenuOpen}
+            onOpenChange={setContextMenuOpen}
+            autoFocus
+            menu={{
+                items: [
+                    { key: "insert", label: t("canvas.sidePanel.inserted") },
+                    { key: "remove", label: t("canvas.sidePanel.removeAsset"), danger: true },
+                ],
+                onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation();
+                    setContextMenuOpen(false);
+                    if (key === "remove") confirmRemove();
+                    else if (key === "insert") onInsert();
+                },
+            }}
+        >
+            <div
+                draggable
+                tabIndex={0}
+                role="button"
+                data-asset-id={asset.id}
+                aria-haspopup="menu"
+                aria-expanded={contextMenuOpen}
+                aria-label={`${asset.title || t(`assets.kinds.${asset.kind}`)}. ${hint}`}
+                title={hint}
+                className="group relative aspect-square cursor-grab select-none overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 active:cursor-grabbing"
+                style={{ borderColor: theme.node.stroke, background: theme.node.panel, outlineColor: theme.toolbar.activeText }}
+                onDragStart={(event) => {
+                    event.dataTransfer.setData(CANVAS_ASSET_MIME, encodeCanvasAssetDrag(asset.id));
+                    event.dataTransfer.effectAllowed = "copy";
+                    setContextMenuOpen(false);
+                    suppressClickUntil.current = Infinity;
+                }}
+                onDragEnd={() => {
+                    // Browsers may emit a click/double-click after a drag ends.
+                    suppressClickUntil.current = Date.now() + 400;
+                }}
+                onClickCapture={(event) => {
+                    if (Date.now() < suppressClickUntil.current) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                    }
+                }}
+                onDoubleClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (Date.now() >= suppressClickUntil.current) onInsert();
+                }}
+                onKeyDown={(event) => {
+                    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setContextMenuOpen(true);
+                    } else if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (!event.repeat && Date.now() >= suppressClickUntil.current) onInsert();
+                    } else if (event.key === "Escape") {
+                        setContextMenuOpen(false);
+                    }
+                }}
+            >
+                <AssetCover asset={asset} />
             </div>
-        </div>
+        </Dropdown>
     );
 }
 
 function AssetCover({ asset }: { asset: Asset }) {
     if (asset.kind === "text") return <div className="size-full overflow-hidden whitespace-pre-wrap break-words p-2.5 text-[11px] leading-snug opacity-80">{asset.data.content}</div>;
     if (asset.kind === "video") {
-        if (asset.coverUrl) return <img src={asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
-        return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        if (asset.coverUrl) return <img src={asset.coverUrl} alt="" draggable={false} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        return <video src={`${asset.data.url}#t=0.1`} draggable={false} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     }
-    return <img src={asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    return <img src={asset.coverUrl || asset.data.dataUrl} alt="" draggable={false} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }
 
 // ---------------------------------------------------------------------------

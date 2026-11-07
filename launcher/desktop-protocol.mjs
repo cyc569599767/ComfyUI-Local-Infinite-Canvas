@@ -10,6 +10,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 export function sendDesktop(message) {
@@ -80,8 +81,11 @@ export function resolveDesktopComfyPlan(install, plan) {
   throw new Error(`启动脚本不转发参数，无法安全禁用浏览器：${path.basename(plan.file)}。请改用标准便携版启动脚本，或先手动启动 ComfyUI 后连接；工作台不会修改原脚本。`);
 }
 
+export const DESKTOP_COMFY_BOOTSTRAP = fileURLToPath(new URL('./desktop-comfy-bootstrap.py', import.meta.url));
+
 export function comfyPythonArguments(plan, port, desktop = false) {
-  return [...(plan.pythonArgs || []), plan.mainPy, ...(plan.args || []),
+  const entry = desktop ? [DESKTOP_COMFY_BOOTSTRAP, plan.mainPy] : [plan.mainPy];
+  return [...(plan.pythonArgs || []), ...entry, ...(plan.args || []),
     "--port", String(port), "--listen", "127.0.0.1", ...(desktop ? ["--disable-auto-launch"] : [])];
 }
 

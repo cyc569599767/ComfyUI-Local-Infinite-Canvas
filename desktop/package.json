@@ -1,6 +1,6 @@
 {
   "name": "comfyui-local-infinite-canvas-desktop",
-  "version": "0.1.20",
+  "version": "0.1.25",
   "private": true,
   "description": "ComfyUI 本地无限画布桌面应用",
   "author": "1314521gjy",
@@ -17,7 +17,8 @@
     "pack": "npm run build && electron-builder --config electron-builder.cjs --dir --win --x64",
     "dist:win": "npm run build && electron-builder --config electron-builder.cjs --win nsis --x64",
     "test:packaged": "node scripts/test-packaged.cjs",
-    "check": "node --check src/main/application.cjs && node --check src/main/fast-draft-migration.cjs && node --check src/main/index.cjs && node --check src/main/services.cjs && node --check src/main/content-policy.cjs && node --check src/main/runtime.cjs && node --check src/preload/index.cjs && node --check src/renderer/app.js && node --check src/renderer/log-view.js && node --check src/renderer/log-utils.cjs && node --check src/main/log-smoke.cjs && node --check scripts/launch.cjs",
+    "test:layout": "node scripts/test-dashboard-layout.cjs",
+    "check": "node --check src/main/application.cjs && node --check src/main/fast-draft-migration.cjs && node --check src/main/qwen-v2-migration.cjs && node --check src/main/index.cjs && node --check src/main/services.cjs && node --check src/main/content-policy.cjs && node --check src/main/runtime.cjs && node --check src/preload/index.cjs && node --check src/renderer/app.js && node --check src/renderer/log-view.js && node --check src/renderer/log-utils.cjs && node --check src/main/log-smoke.cjs && node --check src/main/web-sync-smoke.cjs && node --check scripts/launch.cjs",
     "test": "node --test test/*.test.cjs",
     "test:smoke": "node scripts/launch.cjs --smoke-test",
     "test:integration": "node test/integration-fixture.mjs && node test/managed-integration-fixture.mjs",

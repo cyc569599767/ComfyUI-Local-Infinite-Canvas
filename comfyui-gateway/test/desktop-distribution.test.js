@@ -24,6 +24,15 @@ test('desktop distribution disables legacy update APIs and uses external user co
     const info = await fetch(`${url}/api/update/check?fetch=1`).then(r => r.json());
     assert.equal(info.updateAvailable, false); assert.equal(info.canApply, false);
     assert.equal(gateway.config.launcherConfigPath, path.join(root, 'config.json'));
+    // Reject both write and clear before resolving or touching a provider path.
+    const assistantRoot = path.join(root, 'read-only-app-root');
+    gateway.config.appRoot = assistantRoot;
+    for (const payload of [{ baseUrl: 'https://example.com/v1', apiKey: 'fixture-only-key', model: 'fixture' }, { clear: true }]) {
+      const response = await fetch(`${url}/api/agent/provider`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).error.code, 'desktop_provider_sync_disabled');
+      await assert.rejects(fs.stat(assistantRoot), { code: 'ENOENT' });
+    }
     for (const endpoint of ['/api/update/apply', '/api/update/recovery/restore']) {
       const result = await fetch(url + endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert.equal(result.status, 409);

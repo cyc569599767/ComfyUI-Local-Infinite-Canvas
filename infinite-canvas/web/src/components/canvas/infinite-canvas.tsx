@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { CANVAS_ASSET_MIME } from "@/lib/canvas/asset-drag";
 import type { ViewportTransform } from "@/types/canvas";
 
 // Ant Design renders dropdowns/popovers in portals. React still bubbles their
@@ -217,14 +218,22 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
     return (
         <div
             ref={containerRef}
+            data-canvas-drop-target
             className="relative h-full w-full select-none overflow-hidden"
             style={{ background: theme.canvas.background, cursor }}
             onPointerDown={handlePointerDown}
             onDoubleClick={handleDoubleClick}
             onWheel={handleWheel}
             onContextMenu={onContextMenu}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={onDrop}
+            onDragOver={(event) => {
+                if ((event.target as Element)?.closest(OVERLAY_SELECTOR)) return;
+                event.preventDefault();
+                if (Array.from(event.dataTransfer.types).includes(CANVAS_ASSET_MIME)) event.dataTransfer.dropEffect = "copy";
+            }}
+            onDrop={(event) => {
+                if ((event.target as Element)?.closest(OVERLAY_SELECTOR)) return;
+                onDrop?.(event);
+            }}
         >
             <CanvasGrid viewport={viewport} mode={backgroundMode} />
             <div

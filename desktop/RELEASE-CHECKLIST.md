@@ -1,8 +1,53 @@
 # Windows 发布验收说明
 
-产品：Comfy Canvas Desktop 0.1.20
+产品：Comfy Canvas Desktop 0.1.25
 技术栈：Electron 41.0.3 / 内嵌 Node.js 24.14.0
-共享画布与网关源码版本标识：v0.24.8（构建包含当前工作区内容，不等同于干净 Git release tag）
+共享画布与网关源码版本标识：v0.24.13（构建包含当前工作区内容，不等同于干净 Git release tag）
+
+## 0.1.25 左侧资产交互
+
+- 图片、视频、文本资产原生draggable卡片，仅传本地ID；画布按落点坐标创建节点，保留缩放/平移换算。移除两枚图片覆盖按钮，改为右键菜单和带确认的异步删除；双击/Enter/Space插入，Shift+F10菜单。
+- 保留原资产持久化与共享媒体清理：先持久化资产目录删除，再仅清理未被画布引用的媒体。异步拖入若已离开原项目或资产已删除，不插入。
+- Web101项、TypeScript通过；真实Electron事件链通过图片/视频/文本拖入、落点、取消/恶意失效载荷、删除取消/确认、刷新持久化、删除资产后画布共享图片可解码。
+- 限制：Windows系统拖拽循环自动鼠标注入出现无drop/UnknownVizError，改用真实渲染页面的DragEvent生命周期；不声称完成OS人工拖拽验收。测试全部合成资产、临时用户目录，无真实项目变更。
+- [交互结果](<test/artifacts/asset-interaction/ui-report.json>)。
+
+## 0.1.24 内置 Agent 验证与修复
+
+- 修复排队消息擦除后续未发送草稿、待批准工具跨画布误写、流式/排队期间刷新丢失历史、`@`素材只发送标签未发送实际图片/文本四项问题。
+- 审批后重新读取当前画布并验证projectId和abort；流式消息合并保存+轮次结束flush+页面离开小型同步恢复检查点；引用以当前nodeId解析并校验6图/30MiB上限，失败保留草稿，历史不持久化图片字节。
+- Web97项与TypeScript通过。真实Electron隔离界面通过发送/回复、批准/拒绝、排队草稿保护、停止、模拟认证错误恢复、切换画布批准拒绝、刷新历史、排队流式刷新、引用图片传输。模拟API记录nodeId及image_url，真实用户画布不改。
+- 用户授权后当前已选云端模型单次短文本复核成功（模型及服务商配置名称不公开），1778ms、2字符。首次测试只有保护性失败报告，不能判定其失败阶段/请求数；之后先做零调用诊断，再单独获准1次复核。未继续追加真实工具/视觉请求，不将模拟成功冒充真实模型能力。
+- 证据：[UI结果](<test/artifacts/agent-acceptance/ui-report.json>)、[脱敏真实文本结果](<test/artifacts/agent-acceptance/selected-model.json>)。真实测试个人配置副本已清理，密钥不进日志、源码或报告。
+
+## 0.1.23 紧凑服务面板
+
+- 大标题区改为紧凑单行标题，服务卡片/操作区减少内外边距，说明文字收进默认折叠设置；宽窗口配置输入横排，小窗口自适应。
+- 保留64px工具栏和四标签；日志填充剩余可用高度，默认收起设置时首屏显示日志与版本；设置展开时主面板可滚动。
+- 真实 Electron 1440×900、1180×760、980×660 的设置收起/展开共6种组合无横向溢出。收起时日志正文高度约485/345/241px，日志面板顶部约304/304/306px；日志暂停/恢复、保存设置成功反馈通过。
+- 测试使用临时用户目录和合成服务桥，不连接真实服务或保存真实配置。测量及截图：[布局报告](<test/artifacts/dashboard-compact/layout-report.json>)。
+
+## 0.1.22 Windows 辅助进程终端闪窗
+
+- 静态审计确认网关 ffprobe 漏 `windowsHide`，VHS 保存视频/音频合并及部分其他节点 ffmpeg 调用没有 `CREATE_NO_WINDOW`；隐藏父 Python 不等于隐藏辅助子进程。
+- 网关媒体探测分离为可测模块，所有候选 ffprobe 强制 `windowsHide:true,shell:false`，保留20秒超时、元数据解析、失败回退及临时文件清理。
+- 仅桌面托管 ComfyUI 使用随包 Python bootstrap：进程内以 Popen 子类增加无窗口标志；位置/关键字参数、已有标志、上下文管理器、管道、异常保持；显式新控制台/DETACHED 请求不覆盖。保持原 main.py argv、cwd 和导入路径，兼容便携 Python ._pth 标准库 zip。不修改用户 ComfyUI 文件，不写持久启动钩子，不影响外部接管实例。
+- 便携 Python 的11项策略测试通过；启动器51项（启用真实 Electron 与 Python 分支）全通过；网关400项通过。
+- Windows 真实子进程测试：6次子 Python GetConsoleWindow 均为空；ffmpeg 编码0.25秒合成MP4、导出PNG及 ffprobe 读取成功，3次 CreateProcess 接收134217728/CREATE_NO_WINDOW；stdout/stderr、退出7与超时保持。无真实GPU推理、无模型改动。
+- 证据：[Windows进程结果](<test/artifacts/console-flash/windows-process-report.json>)。
+
+## 0.1.21 Web 最新功能同步与升级兼容
+
+- 使用共享 v0.24.13 源码重建，runtime manifest：0.1.21 / v0.24.13，2282 个文件、73 个网关生产依赖；旧 Web dist 不改。
+- Qwen 2.1 v2 五合一（含元素移除）、两种多角度范围、风格配方精确底模和媒体 URL 更新同步；保留 fork 云端 Agent、4 步草稿及桌面四标签。
+- 新增精确指纹 Qwen 迁移：旧行/旧图/新行/新图全部核验，写前备份，旧图不删除；自定义图/隐藏状态、未知来源、同名新图冲突均保留。用户目录只读复制到隔离目录做升级模拟，只两个 Qwen 默认行改变，其余行保留，7 份备份；未直接修改真实用户画布/工作流。
+- 桌面禁用 pi provider 持久化接口（写/清除均 HTTP 409），不会把 Key 写到只读安装目录。模拟云端 Agent 工具往返、无密钥日志通过。
+- 175 项桌面、396 项网关、75 项 Web 测试通过，TypeScript 与 Vite 构建通过。
+- 打包应用从非仓库含空格目录启动且 PATH 无 Node：Electron 41.0.3、四标签/导航、日志跟随与暂停、画布切换保留、Blob 下载、工作流/LoRA API、退出只停止自有服务均通过；安装资源运行前后哈希不变。
+- 打包沙箱界面验证五模式、元素移除打开蒙版、多角度范围、保存配方模型标识/缺失模型拦截、极速草稿模型显示与 v0.24.13 页头。模型目录为测试模式专用合成响应，图片为合成色块，不提交真实生成任务。
+- Goohai 源码与许可证随包，但桌面仍禁用启动节点自动安装。真实 Qwen v2 推理、模型/LoRA安装及生成质量未在本轮验证。
+- 证据：[升级副本核对](<test/artifacts/web-sync/upgrade-report.json>)、[打包报告](<test/artifacts/packaged/report.json>)、[关键界面结果](<test/artifacts/packaged/integration-result.json>)。
+
 
 ## 0.1.20 H3 多参无 VDN 节点引用素材丢失修复
 

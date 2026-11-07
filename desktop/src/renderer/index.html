@@ -22,8 +22,7 @@
       <button id="devtools" title="仅开发模式可用">开发工具</button>
     </nav>
     <main>
-      <header><p class="eyebrow">LOCAL FIRST · CONNECTED WORKSPACE</p><span id="status" role="status">正在读取运行环境…</span></header>
-      <section class="hero"><h1>你的本地创作环境。</h1><p>复用现有画布与网关，按需启动缺失服务。桌面端只管理自己启动的后台进程。</p></section>
+      <header class="panel-heading"><div><h1>服务面板</h1><p>本地服务状态与运行日志</p></div><span id="status" role="status">正在读取运行环境…</span></header>
       <section class="services" aria-label="服务状态">
         <article><h2>无限画布 <span id="canvas-status">待检测</span></h2><p id="canvas-url">—</p><small id="canvas-owner">等待连接</small></article>
         <article><h2>本地网关 <span id="gateway-status">待检测</span></h2><p id="gateway-url">—</p><small id="gateway-owner">等待连接</small></article>
@@ -32,15 +31,16 @@
       <section class="actions"><p id="connection-message" aria-live="polite">准备连接…</p><button id="refresh">检查状态</button><button id="connect" class="primary">连接 / 启动缺失服务</button></section>
       <details id="settings-panel"><summary>桌面设置 <span>保存后重启生效</span></summary>
         <form id="settings-form">
-          <label>ComfyUI 地址<input id="setting-comfy-url" type="url" required /></label>
-          <label>ComfyUI 安装目录（可选；留空只连接，不自动启动）<div class="input-row"><input id="setting-comfy-dir" type="text" /><button id="choose-comfy" type="button">选择目录</button></div></label>
-          <div class="input-row"><label>画布端口<input id="setting-canvas-port" type="number" min="1024" max="65525" required /></label><label>网关端口<input id="setting-gateway-port" type="number" min="1024" max="65525" required /></label></div>
+          <label class="setting-url">ComfyUI 地址<input id="setting-comfy-url" type="url" required /></label>
+          <label class="setting-directory">ComfyUI 安装目录 <small>可选；留空只连接，不自动启动</small><div class="input-row"><input id="setting-comfy-dir" type="text" /><button id="choose-comfy" type="button">选择目录</button></div></label>
+          <label class="setting-canvas-port">画布端口<input id="setting-canvas-port" type="number" min="1024" max="65525" required /></label>
+          <label class="setting-gateway-port">网关端口<input id="setting-gateway-port" type="number" min="1024" max="65525" required /></label>
           <p id="data-location"></p>
-          <div class="input-row"><button type="submit" class="primary">保存设置</button><button id="restart-app" type="button">重启应用</button><button id="open-data" type="button">打开数据目录</button></div>
+          <div class="input-row settings-actions"><button type="submit" class="primary">保存设置</button><button id="restart-app" type="button">重启应用</button><button id="open-data" type="button">打开数据目录</button></div>
           <p id="settings-result" role="status"></p>
+          <aside>应用内置画布与网关，配置和项目存储在用户数据目录。ComfyUI 与大模型需单独安装。浏览器项目可通过 ZIP 导入。桌面只管理自己启动的进程，复用的外部服务仍由原启动器控制。</aside>
         </form>
       </details>
-      <aside>应用内置画布与网关，配置和项目存储在用户数据目录。ComfyUI 与大模型由你单独安装。浏览器已有项目请通过 ZIP 导出后导入。复用外部服务时，其生命周期仍由原启动器控制。</aside>
       <details id="logs-panel" open>
         <summary>服务日志 <span>最近 100 条 · 本机接收时间</span></summary>
         <div class="log-controls">

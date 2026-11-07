@@ -33,7 +33,7 @@ try {
   await fs.mkdir(path.join(temporary, 'launcher'));
   await fs.mkdir(path.join(temporary, 'comfy'));
   await fs.mkdir(path.join(temporary, 'workflows'));
-  for (const file of ['start.mjs', 'bootstrap-nodes.mjs', 'desktop-protocol.mjs']) {
+  for (const file of ['start.mjs', 'bootstrap-nodes.mjs', 'desktop-protocol.mjs', 'desktop-comfy-bootstrap.py']) {
     await fs.copyFile(path.join(root, 'launcher', file), path.join(temporary, 'launcher', file));
   }
   await fs.writeFile(path.join(temporary, 'launcher/config.json'), JSON.stringify({

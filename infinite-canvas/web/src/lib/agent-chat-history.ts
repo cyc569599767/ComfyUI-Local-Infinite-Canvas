@@ -6,6 +6,7 @@ export type HistoryMessage = {
     turnId?: string;
     promptText?: string;
     hasAttachments?: boolean;
+    canvasReferences?: Array<{ nodeId: string; label: string; title: string; kind: "image" | "video" | "audio" | "text" | "lora"; text?: string }>;
     attachments?: Array<{ id: string; name: string; url: string }>;
 };
 export type ReplayAttachment = { dataUrl: string };
@@ -55,5 +56,6 @@ export function persistChatMessage<T extends HistoryMessage & { title?: string; 
         meta: message.meta, reasoning: message.reasoning, turnId: message.turnId,
         promptText: message.promptText,
         hasAttachments: Boolean(message.hasAttachments || message.attachments?.length),
+        ...(message.canvasReferences?.length ? { canvasReferences: message.canvasReferences.map(({ nodeId, label, title, kind, text }) => ({ nodeId, label, title, kind, ...(text ? { text } : {}) })) } : {}),
     };
 }

@@ -49,7 +49,16 @@ async function inventory(dir, prefix = '') {
     await fsp.cp(source, installed, { recursive: true });
     await fsp.mkdir(userData);
     const comfyPort = offline ? await freePort() : await listen(comfy);
-    const gatewayPort = await freePort(); const canvasPort = await freePort();
+    const usedPorts = new Set([comfyPort]);
+    const nextDistinctPort = async () => {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const port = await freePort();
+        if (usedPorts.has(port)) continue;
+        usedPorts.add(port); return port;
+      }
+      throw new Error('Could not allocate distinct test service ports');
+    };
+    const gatewayPort = await nextDistinctPort(); const canvasPort = await nextDistinctPort();
     await fsp.writeFile(path.join(userData, 'config.json'), JSON.stringify({ ...DEFAULTS,
       comfyUrl: `http://127.0.0.1:${comfyPort}`, gatewayPort, canvasPort }));
     if (process.argv.includes('--3d')) {

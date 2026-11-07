@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { localUrl } = require('./services.cjs');
 const { migrateFastDraft } = require('./fast-draft-migration.cjs');
+const { migrateQwenV2 } = require('./qwen-v2-migration.cjs');
 
 const DEFAULTS = {
   schemaVersion: 1, comfyUrl: 'http://127.0.0.1:8188', comfyDir: '', comfyWorkflowsDir: '',
@@ -46,16 +47,20 @@ function validateConfig(input, { checkDirectories = false } = {}) {
 // bundled default may be replaced; user-edited files and extra files survive.
 function seedWorkflows(source, destination, baselineFile) {
   migrateFastDraft(source, destination, baselineFile);
+  const qwen = migrateQwenV2(source, destination, baselineFile);
+  const protectedFiles = new Set(qwen.conflicts.flatMap(item => item.files).map(file => file.replace(/\\/g, '/')));
+  if (qwen.conflicts.length) protectedFiles.add('registry.json');
   let previous = {};
   if (fs.existsSync(baselineFile)) previous = JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
   const next = { ...previous };
-  const conflicts = [];
+  const conflicts = qwen.conflicts.map(item => `Qwen v2 ${item.id || 'registry'}：${item.reason}（已保留现有文件）`);
   function visit(dir, relative = '') {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) throw new Error('Bundled workflow symlinks are not allowed');
       const rel = path.join(relative, entry.name);
       if (entry.isDirectory()) { visit(path.join(dir, entry.name), rel); continue; }
       if (!entry.isFile()) continue;
+      if (protectedFiles.has(rel.replace(/\\/g, '/'))) continue;
       const bytes = fs.readFileSync(path.join(dir, entry.name));
       const digest = hash(bytes);
       const target = path.join(destination, rel);

@@ -1,0 +1,176 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "H3 Ref2VA base model"
+    }
+  },
+  "2": {
+    "inputs": {
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderBypassModelOnly",
+    "_meta": {
+      "title": "Official Ref2V Turbo4 LoRA"
+    }
+  },
+  "3": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "H3 Qwen3-VL text encoder"
+    }
+  },
+  "4": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "H3 video VAE"
+    }
+  },
+  "5": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "H3 audio VAE"
+    }
+  },
+  "6": {
+    "inputs": {
+      "image": "replace_with_reference_image.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Replace with reference image"
+    }
+  },
+  "7": {
+    "inputs": {
+      "audio": "replace_with_song_video.mp4"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Replace with song video; audio stream becomes the master track"
+    }
+  },
+  "8": {
+    "inputs": {
+      "full_song": [
+        "7",
+        0
+      ],
+      "min_scene_seconds": 5,
+      "target_scene_seconds": 7,
+      "max_scene_seconds": 10,
+      "analysis_hop_ms": 100,
+      "vocal_policy": "assume_vocal",
+      "manual_boundaries_json": ""
+    },
+    "class_type": "MiniMaxH3MVVocalScenePlannerT8Advanced",
+    "_meta": {
+      "title": "Automatic full-song duration and scene planner"
+    }
+  },
+  "9": {
+    "inputs": {
+      "scene_plan": [
+        "8",
+        0
+      ],
+      "global_creative_prompt": "Create a coherent cinematic music video that follows this scene outline in song-time order. For every scene, match the instruction whose time range contains the TIMING interval printed below. [0-10s | OPENING] Begin in a quiet, atmospheric location; the performer looks toward camera and slowly raises their gaze. [10-30s | VERSE] Move to a related location; the performer walks slowly past practical lights, then turns toward camera. [30-50s | CHORUS] Build energy with a wider setting, wind moving the wardrobe, and a restrained expressive hand gesture. [50-70s | BRIDGE] Shift to an intimate close-up with a reflective pause and softer movement. [70s onward | FINAL CHORUS / ENDING] Return to the opening visual motif, build to a confident final pose, then hold still. Adapt these example time ranges and actions to the actual song: edit them to describe your intended scenes, settings, events, and transitions. Preserve the same performer identity, face, hair, wardrobe, and visual continuity unless a scene explicitly changes them.",
+      "performer_description": "The same lead performer shown in the reference picture. Define the character here: age range, facial features, hair, wardrobe, accessories, posture, expression, and any identity details that must remain consistent.",
+      "visual_style": "Cinematic music video; specify the color palette, lighting, atmosphere, environment detail, lens character, depth of field, and realism level you want.",
+      "camera_pattern": "wide establishing shot, slow dolly-in, stable horizon\nmedium tracking shot from the front, smooth movement\nintimate face close-up, gentle restrained push-in\nwide profile shot, slow lateral tracking movement",
+      "non_vocal_action": "Describe what the performer does during instrumental passages, such as looking away, breathing, walking, turning, or holding a pose. Keep mouth naturally closed when not singing.",
+      "exact_lyrics_json": ""
+    },
+    "class_type": "MiniMaxH3MVRef2VAPromptCompilerT8Advanced",
+    "_meta": {
+      "title": "Editable story, character, scene, action and camera prompts"
+    }
+  },
+  "10": {
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "clip": [
+        "3",
+        0
+      ],
+      "video_vae": [
+        "4",
+        0
+      ],
+      "audio_vae": [
+        "5",
+        0
+      ],
+      "reference_image": [
+        "6",
+        0
+      ],
+      "full_song": [
+        "7",
+        0
+      ],
+      "mv_prompt_plan": [
+        "9",
+        0
+      ],
+      "chain_id": "h3_reference_song_full_length_v1",
+      "width": [
+        "11",
+        0
+      ],
+      "height": [
+        "11",
+        1
+      ],
+      "base_seed": 123456789,
+      "steps": 4,
+      "shift_video": 12,
+      "shift_audio": 3,
+      "sampler_name": "dual_clock_euler",
+      "scheduler": "native_flow",
+      "resume_existing": true,
+      "filename_prefix": "H3_Reference_Song_FullLength",
+      "bit_depth": 8,
+      "crf": 18,
+      "model_id": "minimax_h3_ref2va_pruned_int8_convrot+official-ref2v-turbo4"
+    },
+    "class_type": "MiniMaxH3LocalMVInNodeRendererT8Advanced",
+    "_meta": {
+      "title": "Serial local H3 render; original song muxed once"
+    }
+  },
+  "11": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.8,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Output resolution: aspect ratio + megapixels"
+    }
+  }
+}

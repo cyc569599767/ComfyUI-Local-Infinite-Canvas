@@ -1,8 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
+import { probeVideoInfo } from "./video-probe.js";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import express from "express";
@@ -114,40 +113,6 @@ function gatewayTokenMatches(candidate, expected) {
   const left = Buffer.from(String(candidate || ""));
   const right = Buffer.from(String(expected || ""));
   return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
-}
-
-function probeVideoInfo(file, extraProbes = []) {
-  if (!file?.buffer?.length) return { fps: 0, duration: 0, frames: 0 };
-  const rawExt = extFromMime(file.mimetype) || ".mp4";
-  const ext = String(rawExt).startsWith(".") ? rawExt : `.${rawExt}`;
-  const temp = path.join(os.tmpdir(), `comfy-probe-${randomId()}${ext}`);
-  const candidates = ["ffprobe", ...extraProbes.filter(Boolean)];
-  try {
-    fs.writeFileSync(temp, file.buffer);
-    for (const bin of candidates) {
-      try {
-        const raw = execFileSync(bin, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-show_entries", "format=duration", "-of", "json", temp], { encoding: "utf8", timeout: 20000 });
-        const data = JSON.parse(raw);
-        const rate = String(data.streams?.[0]?.avg_frame_rate || "0/1").split("/").map(Number);
-        const fps = rate[1] ? rate[0] / rate[1] : rate[0];
-        const duration = Number(data.format?.duration || 0);
-        if (!Number.isFinite(fps) || fps <= 0 || !Number.isFinite(duration) || duration <= 0) continue;
-        return { fps, duration, frames: Math.max(1, Math.round(fps * duration)) };
-      } catch {
-        // 换下一个 ffprobe 路径。
-      }
-    }
-    return { fps: 0, duration: 0, frames: 0 };
-  } finally {
-    try {
-      fs.unlinkSync(temp);
-    } catch {
-    }
-  }
-}
-
-function probeVideoFrames(file, extraProbes = []) {
-  return probeVideoInfo(file, extraProbes).frames;
 }
 
 function gpuVramTotalGb(stats) {
@@ -1082,6 +1047,11 @@ export async function createGatewayApp(overrides = {}) {
   });
 
   app.post("/api/agent/provider", (req, res) => {
+    // Installed desktop uses the native-protocol cloud gateway, not the optional
+    // source-editing pi runtime. Never persist keys into its read-only appRoot.
+    if (config.desktopDistribution) {
+      throw new HttpError("桌面版云端 Agent 无需写入 pi 运行时配置，请使用配置与用户偏好中的云端 API。", { status: 409, code: "desktop_provider_sync_disabled" });
+    }
     if (!isLoopbackPeer(req.socket.remoteAddress)) {
       throw new HttpError("仅允许本机同步 Agent API", { status: 403, code: "provider_forbidden" });
     }
