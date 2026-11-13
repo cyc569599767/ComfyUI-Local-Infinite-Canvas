@@ -74,6 +74,7 @@ import { recallNodeSettings } from "@/lib/canvas/node-settings-memory";
 import { MODEL3D_DEFAULT_SIZE, MODEL3D_NODE_TYPE, STAGE3D_DEFAULT_SIZE, STAGE3D_NODE_TYPE } from "@/lib/canvas/model3d";
 import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import { rememberLastCanvas } from "@/lib/canvas/last-canvas";
+import { planWorkflowAppLayout, type WorkflowApp } from "@/lib/canvas/workflow-apps";
 import {
     audioExtension,
     buildAngleLabel,
@@ -4724,6 +4725,84 @@ function InfiniteCanvasPage() {
         [getCanvasCenter],
     );
 
+    /**
+     * 把一个「应用」铺到画布：按步骤摆放工作流卡片，再按列顺序串好连线。
+     *
+     * 连线规则：同一列里相邻的步骤纵向串联，列与列之间把上一列最后一个接到本列第一个。
+     * 这样「一行到底」的应用得到一条直线，多列的应用得到一条 Z 字形链——都是用户
+     * 在画布上手动搭同一组卡片时会画出来的形状。
+     */
+    const applyWorkflowApp = useCallback(
+        async (app: WorkflowApp) => {
+            // 应用的步骤要落到真实工作流上，列表必须是最新的：画布上可能一张自由卡片都没有，
+            // 那样就没有任何别的地方会去拉这份数据。
+            let library: Map<string, FreeWorkflowSummary>;
+            try {
+                const items = await fetchFreeWorkflows(effectiveConfig, true);
+                library = new Map(items.map((item) => [item.id, item]));
+            } catch (reason) {
+                message.error(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardsLoadFailed"));
+                return;
+            }
+            const center = getCanvasCenter();
+            const { placements, missing } = planWorkflowAppLayout(app, [...library.keys()], { columnGap: 420, rowGap: 300 });
+            if (!placements.length) {
+                message.warning(t("canvas.sidePanel.workflowAppMissingAll"));
+                return;
+            }
+
+            const created: CanvasNodeData[] = [];
+            const createdConnections: CanvasConnection[] = [];
+            const byColumn = new Map<number, CanvasNodeData[]>();
+
+            placements.forEach(({ step, x, y }) => {
+                const workflow = library.get(step.workflowId);
+                if (!workflow) return;
+                const card = freeCardInfoFromSummary(workflow);
+                const preset = workflow.preset || {};
+                const baseNode = createCanvasNode(CanvasNodeType.FreeCard, { x: center.x + x, y: center.y + y }, {
+                    freeCard: card,
+                    size: preset.size || (workflow.size ? `${workflow.size.width}x${workflow.size.height}` : undefined),
+                    aspectRatio: preset.aspectRatio || workflow.aspectRatio || undefined,
+                    count: preset.count ?? workflow.count ?? 1,
+                    seed: preset.seed || workflow.seed || "",
+                    seedFixed: preset.seedFixed || "false",
+                    prompt: "",
+                });
+                // 步骤名显示在卡片标题上，便于在同一应用里区分同款工作流的多次出现。
+                const node = step.label ? { ...baseNode, title: step.label } : baseNode;
+                created.push(node);
+                const list = byColumn.get(step.column) || [];
+                list.push(node);
+                byColumn.set(step.column, list);
+            });
+
+            // 列内串联：同列上一步的输出接到下一步。
+            for (const columnNodes of byColumn.values()) {
+                for (let index = 1; index < columnNodes.length; index += 1) {
+                    createdConnections.push({ id: nanoid(), fromNodeId: columnNodes[index - 1].id, toNodeId: columnNodes[index].id });
+                }
+            }
+            // 跨列串联：上一列的末节点接到下一列的首节点。
+            const columns = [...byColumn.keys()].sort((a, b) => a - b);
+            for (let index = 1; index < columns.length; index += 1) {
+                const previous = byColumn.get(columns[index - 1]);
+                const current = byColumn.get(columns[index]);
+                if (!previous?.length || !current?.length) continue;
+                createdConnections.push({ id: nanoid(), fromNodeId: previous[previous.length - 1].id, toNodeId: current[0].id });
+            }
+
+            setNodes((prev) => [...prev, ...created]);
+            if (createdConnections.length) setConnections((prev) => [...prev, ...createdConnections]);
+            setSelectedNodeIds(new Set(created.map((node) => node.id)));
+            setSelectedConnectionId(null);
+            message.success(t("canvas.sidePanel.workflowAppApplied", { name: app.name, count: created.length }));
+            // 指向已删除工作流的步骤要如实告知，否则用户拿到一条少了一环的链却不知道原因。
+            if (missing.length) message.warning(t("canvas.sidePanel.workflowAppMissingParts", { count: missing.length }));
+        },
+        [effectiveConfig, getCanvasCenter, message, t],
+    );
+
     const handleNodeHoverStart = useCallback((nodeId: string) => {
         if (nodeDraggingRef.current) return;
         setHoveredNodeId(nodeId);
@@ -4917,7 +4996,7 @@ function InfiniteCanvasPage() {
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onPreviewImage={handleSidebarPreviewImage} onHoverNode={handleSidebarHoverNode} onHoverImage={handleSidebarHoverImage} onInsertAsset={handleAssetInsert} onAddFreeCard={addFreeCardFromLibrary} onApplyStyleRecipe={applyStyleRecipe} />
+            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onPreviewImage={handleSidebarPreviewImage} onHoverNode={handleSidebarHoverNode} onHoverImage={handleSidebarHoverImage} onInsertAsset={handleAssetInsert} onAddFreeCard={addFreeCardFromLibrary} onApplyStyleRecipe={applyStyleRecipe} onApplyWorkflowApp={applyWorkflowApp} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}

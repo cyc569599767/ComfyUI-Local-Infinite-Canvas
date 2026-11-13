@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Dropdown, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, ListChecks, Mic, Music2, Pencil, Plus, RefreshCw, Rows3, Search, Settings2, Sparkles, Square, Trash2, Type, Video } from "lucide-react";
@@ -17,6 +17,7 @@ import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
+import { readWorkflowApps, writeWorkflowApps, type WorkflowApp } from "@/lib/canvas/workflow-apps";
 import { useEffectiveConfig } from "@/stores/use-config-store";
 import { fetchFreeWorkflows, deleteFreeWorkflow, renameFreeWorkflow, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -32,7 +33,9 @@ import { CanvasStyleRecipesTab } from "./canvas-style-recipes-tab";
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 
-type PanelTab = "canvas" | "assets" | "free" | "prompts" | "styles";
+type PanelTab = "canvas" | "assets" | "workflow" | "prompts" | "styles";
+/** 「工作流」tab 下的子标签：单个工作流（自由卡片）与多工作流组合成的固定功能（应用）。 */
+type WorkflowSubTab = "free" | "app";
 
 type Props = {
     nodes: CanvasNodeData[];
@@ -45,6 +48,8 @@ type Props = {
     onInsertAsset: (payload: InsertAssetPayload) => void;
     onAddFreeCard?: (workflow: FreeWorkflowSummary) => void;
     onApplyStyleRecipe: (recipe: StyleRecipe) => void;
+    /** 把一个「应用」铺到画布上：按步骤摆放工作流卡片并串好连线。 */
+    onApplyWorkflowApp?: (app: WorkflowApp) => void;
 };
 
 const NODE_TYPE_ICON: Record<string, typeof Square> = {
@@ -65,16 +70,43 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onPreviewImage, onHoverNode, onHoverImage, onInsertAsset, onAddFreeCard, onApplyStyleRecipe }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onPreviewImage, onHoverNode, onHoverImage, onInsertAsset, onAddFreeCard, onApplyStyleRecipe, onApplyWorkflowApp }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
+    const [workflowSubTab, setWorkflowSubTab] = useState<WorkflowSubTab>("free");
     const width = useCanvasSidePanelStore((state) => state.width);
     const panelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const panelMounted = useCanvasSidePanelStore((state) => state.panelMounted);
     const panelClosing = useCanvasSidePanelStore((state) => state.panelClosing);
     const setWidth = useCanvasSidePanelStore((state) => state.setWidth);
     const [resizing, setResizing] = useState(false);
+    // 自由卡片与「应用」共用同一份工作流列表：「应用」要靠它判断步骤指向的工作流是否还在，
+    // 两个 tab 各拉一遍既浪费请求，也会出现一边有一边没有的错位。
+    const effectiveConfig = useEffectiveConfig();
+    const [workflowList, setWorkflowList] = useState<FreeWorkflowSummary[]>([]);
+    const [workflowListLoading, setWorkflowListLoading] = useState(false);
+    const [workflowListError, setWorkflowListError] = useState("");
+    const workflowListLoadedRef = useRef(false);
+
+    const reloadWorkflows = useCallback(async () => {
+        setWorkflowListLoading(true);
+        setWorkflowListError("");
+        try {
+            setWorkflowList(await fetchFreeWorkflows(effectiveConfig, true));
+            workflowListLoadedRef.current = true;
+        } catch (reason) {
+            setWorkflowListError(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardsLoadFailed"));
+        } finally {
+            setWorkflowListLoading(false);
+        }
+    }, [effectiveConfig, t]);
+
+    // 只有切到「工作流」tab 时才拉：画布其它 tab 不需要这份数据。
+    useEffect(() => {
+        if (tab !== "workflow" || workflowListLoadedRef.current || workflowListLoading) return;
+        void reloadWorkflows();
+    }, [reloadWorkflows, tab, workflowListLoading]);
 
     const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
         event.preventDefault();
@@ -117,7 +149,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                 <div className="flex items-center gap-5 px-4 pt-3.5">
                     <TabButton label={t("canvas.sidePanel.canvas")} active={tab === "canvas"} theme={theme} onClick={() => setTab("canvas")} />
                     <TabButton label={t("canvas.sidePanel.assets")} active={tab === "assets"} theme={theme} onClick={() => setTab("assets")} />
-                    {LOCAL_ONLY ? <TabButton label={t("canvas.sidePanel.freeCards")} active={tab === "free"} theme={theme} onClick={() => setTab("free")} /> : null}
+                    {LOCAL_ONLY ? <TabButton label={t("canvas.sidePanel.workflow")} active={tab === "workflow"} theme={theme} onClick={() => setTab("workflow")} /> : null}
                     {!LOCAL_ONLY ? <TabButton label={t("canvas.sidePanel.prompts")} active={tab === "prompts"} theme={theme} onClick={() => setTab("prompts")} /> : null}
                     <TabButton label={t("canvas.styleRecipes.tab")} active={tab === "styles"} theme={theme} onClick={() => setTab("styles")} />
                 </div>
@@ -126,8 +158,29 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                         <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} onPreviewImage={onPreviewImage} onHoverNode={onHoverNode} onHoverImage={onHoverImage} theme={theme} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
-                    ) : tab === "free" ? (
-                        <CanvasFreeCardsTab theme={theme} onAdd={onAddFreeCard} />
+                    ) : tab === "workflow" ? (
+                        <div className="flex h-full min-h-0 flex-col">
+                            {/* 「工作流」下分两类：单个工作流（自由卡片）与多工作流组合成的固定功能（应用）。 */}
+                            <div className="flex items-center gap-1.5 px-4 pb-2">
+                                <SubTabButton label={t("canvas.sidePanel.workflowFree")} active={workflowSubTab === "free"} theme={theme} onClick={() => setWorkflowSubTab("free")} />
+                                <SubTabButton label={t("canvas.sidePanel.workflowApp")} active={workflowSubTab === "app"} theme={theme} onClick={() => setWorkflowSubTab("app")} />
+                            </div>
+                            <div className="min-h-0 flex-1 overflow-hidden">
+                                {workflowSubTab === "free" ? (
+                                    <CanvasFreeCardsTab
+                                        theme={theme}
+                                        onAdd={onAddFreeCard}
+                                        workflows={workflowList}
+                                        loading={workflowListLoading}
+                                        error={workflowListError}
+                                        onReload={() => void reloadWorkflows()}
+                                        onChange={setWorkflowList}
+                                    />
+                                ) : (
+                                    <CanvasWorkflowAppsTab theme={theme} workflows={workflowList} onApply={onApplyWorkflowApp} />
+                                )}
+                            </div>
+                        </div>
                     ) : tab === "styles" ? (
                         <CanvasStyleRecipesTab theme={theme} onApply={onApplyStyleRecipe} />
                     ) : !LOCAL_ONLY ? (
@@ -145,6 +198,23 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
         <button type="button" onClick={onClick} className="relative pb-1.5 text-sm font-semibold transition-opacity" style={{ color: theme.node.text, opacity: active ? 1 : 0.45 }}>
             {label}
             {active ? <motion.span layoutId="sidePanelTabIndicator" className="absolute inset-x-0 -bottom-px h-0.5 rounded-full" style={{ background: theme.toolbar.activeText }} transition={{ type: "spring", stiffness: 500, damping: 34 }} /> : null}
+        </button>
+    );
+}
+
+/** 子标签：视觉上比顶层 tab 轻，不用 layoutId（会和外层指示条抢同一动画）。 */
+function SubTabButton({ label, active, theme, onClick }: { label: string; active: boolean; theme: CanvasTheme; onClick: () => void }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="rounded-md px-2 py-1 text-xs font-medium transition-colors"
+            style={{
+                color: active ? theme.toolbar.activeText : theme.node.muted,
+                background: active ? theme.toolbar.activeBg : "transparent",
+            }}
+        >
+            {label}
         </button>
     );
 }
@@ -857,30 +927,39 @@ function PromptRow({ item, theme, onInsert, onView }: { item: Prompt; theme: Can
     );
 }
 
-function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (workflow: FreeWorkflowSummary) => void }) {
+/**
+ * 自由卡片列表：单个工作流的入口。
+ *
+ * 列表数据由父层持有并传入，因为「应用」也要靠同一份列表判断步骤指向的工作流是否还在。
+ * 本组件只负责展示与增删改，重命名/删除直接改父层状态（onChange），
+ * 不再自己维护一份副本——两份状态会在重命名后不同步。
+ */
+function CanvasFreeCardsTab({
+    theme,
+    onAdd,
+    workflows,
+    loading,
+    error,
+    onReload,
+    onChange,
+}: {
+    theme: CanvasTheme;
+    onAdd?: (workflow: FreeWorkflowSummary) => void;
+    workflows: FreeWorkflowSummary[];
+    loading: boolean;
+    error: string;
+    onReload: () => void;
+    onChange: (next: FreeWorkflowSummary[]) => void;
+}) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const config = useEffectiveConfig();
-    const [items, setItems] = useState<FreeWorkflowSummary[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState("");
+    const items = workflows;
     const [deletingId, setDeletingId] = useState("");
     const [editingId, setEditingId] = useState("");
     const [nameDraft, setNameDraft] = useState("");
     const [renamingId, setRenamingId] = useState("");
     const renameInFlight = useRef(new Set<string>());
-
-    const load = async () => {
-        setLoading(true);
-        setError("");
-        try {
-            setItems(await fetchFreeWorkflows(config, true));
-        } catch (reason) {
-            setError(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardsLoadFailed"));
-        } finally {
-            setLoading(false);
-        }
-    };
 
     const startRename = (item: FreeWorkflowSummary) => {
         setEditingId(item.id);
@@ -907,7 +986,7 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
         setRenamingId(item.id);
         try {
             const updated = await renameFreeWorkflow(config, item.id, name);
-            setItems((current) => current.map((entry) => (entry.id === item.id ? { ...entry, name: updated.name } : entry)));
+            onChange(items.map((entry) => (entry.id === item.id ? { ...entry, name: updated.name } : entry)));
             message.success(t("canvas.sidePanel.freeCardRenamed", { name: updated.name }));
             cancelRename();
         } catch (reason) {
@@ -922,7 +1001,7 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
         setDeletingId(item.id);
         try {
             await deleteFreeWorkflow(config, item.id);
-            setItems((current) => current.filter((entry) => entry.id !== item.id));
+            onChange(items.filter((entry) => entry.id !== item.id));
             message.success(t("canvas.sidePanel.freeCardDeleted", { name: item.name }));
         } catch (reason) {
             message.error(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardDeleteFailed"));
@@ -931,23 +1010,17 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
         }
     };
 
-    useEffect(() => {
-        void load();
-        // Refresh when the local gateway/channel changes.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [config.baseUrl]);
-
     return (
         <div className="flex h-full flex-col">
             <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-                <span className="min-w-0 truncate text-xs font-medium opacity-60">{t("canvas.sidePanel.freeCards")}</span>
-                {items.length ? <span className="shrink-0 text-xs opacity-35">{items.length}</span> : null}
+                {/* 子标签已经写了「自由卡片」，这里只留数量，不再重复标题。 */}
+                {items.length ? <span className="min-w-0 truncate text-xs opacity-40">{items.length}</span> : <span className="min-w-0 flex-1" />}
                 <button
                     type="button"
                     className="ml-auto grid size-6 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
                     title={t("canvas.sidePanel.freeCardsRefresh")}
                     aria-label={t("canvas.sidePanel.freeCardsRefresh")}
-                    onClick={() => void load()}
+                    onClick={onReload}
                 >
                     <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
                 </button>
@@ -1056,6 +1129,94 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
                 ) : (
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs opacity-55">{t("canvas.sidePanel.freeCardsEmpty")}</span>}>
                         <div className="text-xs opacity-45">{t("canvas.sidePanel.freeCardsHint")}</div>
+                    </Empty>
+                )}
+            </div>
+        </div>
+    );
+}
+
+/**
+ * 「应用」列表：每个应用是一串预先排好的工作流，点一下就在画布上铺开整条链。
+ *
+ * 可用工作流列表由父层传入（自由卡片 tab 已经在拉，避免重复请求）。
+ * 指向已删除工作流的步骤不会静默消失——列表上会标出缺失，点击时也会提示，
+ * 否则用户会得到一个少了一环的残缺链却不知道原因。
+ */
+function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasTheme; workflows: FreeWorkflowSummary[]; onApply?: (app: WorkflowApp) => void }) {
+    const { t } = useTranslation();
+    const [apps, setApps] = useState<WorkflowApp[]>([]);
+    const [error, setError] = useState("");
+
+    useEffect(() => {
+        setApps(readWorkflowApps());
+    }, []);
+
+    const availableIds = useMemo(() => new Set(workflows.map((item) => item.id)), [workflows]);
+    const nameOf = useMemo(() => new Map(workflows.map((item) => [item.id, item.name])), [workflows]);
+
+    const remove = (app: WorkflowApp) => {
+        const next = apps.filter((item) => item.id !== app.id);
+        if (!writeWorkflowApps(next)) {
+            setError(t("canvas.sidePanel.workflowAppSaveFailed"));
+            return;
+        }
+        setError("");
+        setApps(next);
+    };
+
+    return (
+        <div className="flex h-full min-h-0 flex-col">
+            {/* 子标签已经写了「应用」，这里不再重复标题，只留数量。 */}
+            <div className="flex items-center gap-2 px-4 pb-2">
+                {apps.length ? <span className="min-w-0 flex-1 truncate text-xs opacity-40">{apps.length}</span> : <span className="min-w-0 flex-1" />}
+            </div>
+            <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+                {error ? (
+                    <div className="mx-2 mb-2 rounded-md bg-red-500/10 px-2 py-1.5 text-[11px] text-red-500">{error}</div>
+                ) : null}
+                {apps.length ? (
+                    <div className="space-y-1">
+                        {apps.map((app) => {
+                            const missing = app.steps.filter((step) => !availableIds.has(step.workflowId));
+                            return (
+                                <div key={app.id} className="group flex items-start gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
+                                    <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg" style={{ background: theme.node.panel }}>
+                                        <LayoutGrid className="size-4 opacity-60" />
+                                    </span>
+                                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onApply?.(app)} disabled={!onApply}>
+                                        <div className="flex min-w-0 items-center gap-1.5">
+                                            <span className="truncate text-sm font-medium">{app.name}</span>
+                                            {missing.length ? <span className="size-1.5 shrink-0 rounded-full bg-amber-500" title={t("canvas.sidePanel.workflowAppMissing")} /> : null}
+                                        </div>
+                                        <div className="mt-0.5 truncate text-[11px] opacity-50">
+                                            {app.steps.length ? app.steps.map((step) => step.label || nameOf.get(step.workflowId) || t("canvas.sidePanel.workflowAppUnknownStep")).join(" → ") : t("canvas.sidePanel.workflowAppNoSteps")}
+                                        </div>
+                                    </button>
+                                    <Popconfirm
+                                        title={t("canvas.sidePanel.workflowAppDeleteTitle", { name: app.name })}
+                                        description={t("canvas.sidePanel.workflowAppDeleteDescription")}
+                                        okText={t("common.delete")}
+                                        cancelText={t("common.cancel")}
+                                        okButtonProps={{ danger: true }}
+                                        onConfirm={() => remove(app)}
+                                    >
+                                        <button
+                                            type="button"
+                                            className="mt-1 grid size-7 shrink-0 place-items-center rounded-md opacity-35 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                                            title={t("canvas.sidePanel.workflowAppDelete")}
+                                            aria-label={t("canvas.sidePanel.workflowAppDelete")}
+                                        >
+                                            <Trash2 className="size-3.5" />
+                                        </button>
+                                    </Popconfirm>
+                                </div>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs opacity-55">{t("canvas.sidePanel.workflowAppEmpty")}</span>}>
+                        <div className="text-xs opacity-45">{t("canvas.sidePanel.workflowAppHint")}</div>
                     </Empty>
                 )}
             </div>
