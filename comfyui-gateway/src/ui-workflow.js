@@ -33,6 +33,14 @@ function isImageOutputClass(classType) {
 function isVideoOutputClass(classType) {
   return /SaveVideo|VHS_VideoCombine|SaveWebM/i.test(classType);
 }
+
+// 音频输出节点：SaveAudio / SaveAudioAdvanced / SaveAudioMP3 / SaveAudioOpus / PreviewAudio …
+// 注意必须排除视频类的 "SaveAudio" 误匹配（VHS_VideoCombine 不在其中）。
+function isAudioOutputClass(classType) {
+  const type = String(classType || "");
+  if (isVideoOutputClass(type)) return false;
+  return /^SaveAudio|^PreviewAudio|audio.*(?:save|output)|(?:save|output).*audio/i.test(type);
+}
 const BASIC_WIDGET_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"]);
 
 // ResolutionSelector and similar combo nodes use labels like "16:9 (Widescreen)".
@@ -411,12 +419,18 @@ function numericInput(node, name) {
 
 export function detectFreeBindings(workflow, objectInfo = {}) {
   const entries = listNodes(workflow);
-  const outputs = entries.filter(([, node]) => isImageOutputClass(node.class_type) || isVideoOutputClass(node.class_type));
-  const outputType = outputs.some(([, node]) => isVideoOutputClass(node.class_type)) ? "video" : outputs.some(([, node]) => isImageOutputClass(node.class_type)) ? "image" : null;
+  const outputs = entries.filter(([, node]) => isImageOutputClass(node.class_type) || isVideoOutputClass(node.class_type) || isAudioOutputClass(node.class_type));
+  const outputType = outputs.some(([, node]) => isVideoOutputClass(node.class_type))
+    ? "video"
+    : outputs.some(([, node]) => isImageOutputClass(node.class_type))
+      ? "image"
+      : outputs.some(([, node]) => isAudioOutputClass(node.class_type))
+        ? "audio"
+        : null;
   const roots = outputs.length ? outputs.map(([id]) => id) : entries.map(([id]) => id);
   const reachable = reachableNodes(workflow, roots);
   const warnings = [];
-  if (!outputType) warnings.push("没有找到 SaveImage / SaveVideo 输出节点");
+  if (!outputType) warnings.push("没有找到 SaveImage / SaveVideo / SaveAudio 输出节点");
 
   const samplers = entries.filter(([id, node]) => reachable.has(id) && (node.inputs?.positive !== undefined || /KSampler|SamplerCustom|SelfLift/i.test(node.class_type)));
   const positiveReach = reachableNodes(

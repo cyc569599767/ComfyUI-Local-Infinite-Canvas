@@ -3260,7 +3260,9 @@
           "input": "first_frame",
           "from": "image",
           "frameMode": true,
-          "modes": ["frames"],
+          "modes": [
+            "frames"
+          ],
           "max": 2
         }
       },
@@ -3425,6 +3427,7 @@
       "id": "video-h3_referenceimage_songvideo_fulllength_api",
       "name": "video-h3_referenceimage_songvideo_fulllength_api",
       "type": "video",
+      "label": "video-h3_referenceimage_songvideo_fulllength_api",
       "description": "",
       "file": "video-h3_referenceimage_songvideo_fulllength_api.json",
       "bindings": {
@@ -3458,6 +3461,7 @@
       "id": "video-h3_referenceimage_songvideo_fulllength_api-2",
       "name": "video-H3_ReferenceImage_SongVideo_FullLength_API",
       "type": "video",
+      "label": "video-h3_referenceimage_songvideo_fulllength_api-2",
       "description": "",
       "file": "video-h3_referenceimage_songvideo_fulllength_api-2.json",
       "bindings": {
@@ -3484,6 +3488,156 @@
       "presets": {},
       "parameters": [],
       "lora": null
+    },
+    {
+      "id": "audio-voice-design",
+      "name": "audio-voice-design",
+      "type": "audio",
+      "label": "音色设计",
+      "description": "声音设计：给定朗读文案与音色描述，生成对应音色的语音（Qwen3-TTS VoiceDesign）。",
+      "file": "audio-qwen3-tts-voice-design.json",
+      "audioMode": "voice-design",
+      "bindings": {
+        "prompt": {
+          "node": "74",
+          "input": "value"
+        },
+        "voiceDescription": {
+          "node": "75",
+          "input": "value",
+          "from": "voiceDescription",
+          "required": true
+        },
+        "seed": {
+          "node": "77",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "47",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "audio/voice_design"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        }
+      ]
+    },
+    {
+      "id": "audio-voice-clone",
+      "name": "audio-voice-clone",
+      "type": "audio",
+      "label": "音色克隆",
+      "description": "声音克隆：给定参考语音与朗读文案，用参考音色朗读文案（Qwen3-TTS Voice Clone）。",
+      "file": "audio-qwen3-tts-voice-clone.json",
+      "audioMode": "voice-clone",
+      "bindings": {
+        "prompt": {
+          "node": "42",
+          "input": "text"
+        },
+        "audio": {
+          "node": "6",
+          "input": "audio",
+          "from": "audio",
+          "required": true
+        },
+        "seed": {
+          "node": "42",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "8",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "audio/voice_clone"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        }
+      ]
+    },
+    {
+      "id": "audio-music",
+      "name": "audio-music",
+      "type": "audio",
+      "label": "音乐生成",
+      "description": "音乐生成：给定描述与歌词，生成对应风格的音乐（MiniMax Music 3）。",
+      "file": "audio-minimax-music3.json",
+      "audioMode": "music",
+      "bindings": {
+        "prompt": {
+          "node": "37:13",
+          "input": "caption"
+        },
+        "lyrics": {
+          "node": "37:13",
+          "input": "lyrics",
+          "from": "lyrics",
+          "default": ""
+        },
+        "maxDuration": {
+          "node": "37:13",
+          "input": "max_duration",
+          "from": "params.maxDuration",
+          "default": 60
+        },
+        "seed": {
+          "node": "37:38",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "35",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "audio/minimax_music3"
+        }
+      },
+      "parameters": [
+        {
+          "key": "maxDuration",
+          "label": "时长（秒）",
+          "type": "number",
+          "min": 1,
+          "max": 360,
+          "step": 1,
+          "description": "留空按 60 秒"
+        },
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        }
+      ]
     }
   ]
 }

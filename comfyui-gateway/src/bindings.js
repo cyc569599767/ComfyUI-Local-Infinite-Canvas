@@ -12,7 +12,7 @@ export class BindingError extends Error {
   }
 }
 
-export function buildContext({ prompt, negative, size, count, quality, seconds, mode, images = [], uploadedImages = [], uploadedVideos = [], uploadedAudios = [], params = {}, presets = {}, background } = {}) {
+export function buildContext({ prompt, negative, size, count, quality, seconds, mode, images = [], uploadedImages = [], uploadedVideos = [], uploadedAudios = [], params = {}, presets = {}, background, lyrics, voiceDescription } = {}) {
   const parsedSize = parseSize(size);
   const qualityValue = String(quality || "auto").trim().toLowerCase() || "auto";
   const preset = presets?.quality?.[qualityValue] || {};
@@ -26,6 +26,9 @@ export function buildContext({ prompt, negative, size, count, quality, seconds, 
     seconds: Number(seconds) > 0 ? Number(seconds) : undefined,
     mode: mode ? String(mode) : undefined,
     background: background ? String(background) : undefined,
+    // 音频专用：音乐歌词（空串=纯器乐）与音色设计的音色描述。
+    lyrics: lyrics === undefined || lyrics === null ? undefined : String(lyrics),
+    voiceDescription: voiceDescription === undefined || voiceDescription === null ? undefined : String(voiceDescription),
     images,
     uploadedImages,
     uploadedVideos,
@@ -162,6 +165,19 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
         node.inputs[binding.input] = value;
       } else if (binding.required) {
         throw new BindingError(`工作流 ${entry.name} 缺少输入视频。`, { code: "missing_reference_media" });
+      }
+      continue;
+    }
+
+    // 单条参考音频（音色克隆的 LoadAudio）：audio 是文件名 combo，必须写字符串而不是上传对象。
+    if (binding.from === "audio" && !binding.array) {
+      const index = Number.isInteger(binding.audioIndex) ? binding.audioIndex : 0;
+      const uploaded = context.uploadedAudios?.[index];
+      const value = imageValue(uploaded);
+      if (value !== undefined) {
+        node.inputs[binding.input] = value;
+      } else if (binding.required) {
+        throw new BindingError(`工作流 ${entry.name} 缺少参考音频。`, { code: "missing_reference_audio" });
       }
       continue;
     }

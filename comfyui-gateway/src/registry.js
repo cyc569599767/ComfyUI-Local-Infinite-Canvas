@@ -7,6 +7,24 @@ import { baseModelDefault, decorateEntry, findUnetLoader, listBaseModels, listMo
 
 const REGISTRY_FILE = "registry.json";
 const TYPE_PREFIX = { image: "image", video: "video", audio: "audio", text: "text" };
+const MAX_LABEL_LENGTH = 64;
+
+/**
+ * 显示名兜底值 = JSON 文件名（去掉 .json）。
+ * 内置工作流的 label 不允许为空：registry 没配、导入没传、用户覆盖被清空时都用它顶上。
+ */
+export function defaultLabel(file) {
+  const base = path.basename(String(file || "").trim());
+  return base.replace(/\.json$/i, "") || base;
+}
+
+export function normalizeLabel(label, file) {
+  const value = String(label ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .slice(0, MAX_LABEL_LENGTH);
+  return value || defaultLabel(file);
+}
 
 export class RegistryError extends Error {
   constructor(message, { status = 400, code = "registry_error", details } = {}) {
@@ -158,8 +176,8 @@ export function inferBindings(workflow) {
 function outputWarnings(workflow) {
   const classes = Object.values(workflow || {}).map((node) => String(node?.class_type || ""));
   const warnings = [];
-  if (!classes.some((value) => /SaveImage|SaveVideo|VHS_VideoCombine|SaveWebM/i.test(value))) {
-    warnings.push("工作流里没有找到 SaveImage / SaveVideo / VHS_VideoCombine 输出节点，生成结果可能无法取回。");
+  if (!classes.some((value) => /SaveImage|SaveVideo|VHS_VideoCombine|SaveWebM|SaveAudio|PreviewAudio/i.test(value))) {
+    warnings.push("工作流里没有找到 SaveImage / SaveVideo / SaveAudio 输出节点，生成结果可能无法取回。");
   }
   return warnings;
 }
@@ -181,7 +199,7 @@ function bindingWarnings(workflow, bindings) {
   return warnings;
 }
 
-export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger, mainModelFile = () => "" } = {}) {
+export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger, mainModelFile = () => "", labelOverride = () => "" } = {}) {
   const registryPath = path.join(dir, REGISTRY_FILE);
   let cache = new Map();
   let byName = new Map();
@@ -252,6 +270,8 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
           file: raw.file,
           filePath,
           workflow,
+          // 用户自定义显示名 > registry.json 里的 label > JSON 文件名；三者都拿不到才用 name。
+          label: normalizeLabel(labelOverride(id) || raw.label, raw.file || id) || name,
           bindings: raw.bindings && Object.keys(raw.bindings).length ? raw.bindings : inferBindings(workflow),
         };
         if (raw.variants) {
@@ -312,7 +332,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       id: entry.id,
       name: entry.name,
       type: entry.type,
-      label: entry.label || entry.name,
+      label: entry.label || defaultLabel(entry.file) || entry.name,
       description: entry.description || "",
       category: entry.category || null,
       hidden: entry.hidden === true,
@@ -435,7 +455,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       id: entry.id,
       name: entry.name,
       type: entry.type,
-      label: entry.label || entry.name,
+      label: entry.label || defaultLabel(entry.file) || entry.name,
       baseModel: entry.baseModel || null,
       baseModelLabel: entry.baseModelLabel || null,
       baseModels: entry.baseModels || null,
@@ -457,7 +477,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     return name;
   }
 
-  async function importWorkflow({ url, path: sourcePath, json, name, type, bindings: overrideBindings, defaults, presets, parameters, lora, description, overwrite = false } = {}) {
+  async function importWorkflow({ url, path: sourcePath, json, name, label, type, bindings: overrideBindings, defaults, presets, parameters, lora, description, overwrite = false } = {}) {
     let workflow;
     let derivedName = "";
     let source = {};
@@ -553,6 +573,8 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       id,
       name: finalName,
       type: resolvedType,
+      // label 不可为空：没传就沿用旧值，旧值也没有就用 JSON 文件名顶上。
+      label: normalizeLabel(label ?? existing?.label, fileName),
       description: description || "",
       file: fileName,
       bindings: mergedBindings,
@@ -570,6 +592,67 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     await load();
     const saved = resolve(id);
     return { workflow: publicEntry(saved), warnings };
+  }
+
+  /**
+   * 按 id 更新已注册工作流。
+   * 与 importWorkflow 的区别：id 与文件名保持不变，只改内容/元数据，避免生成重复条目。
+   */
+  async function updateWorkflow(id, patch = {}) {
+    const current = resolve(id);
+    if (!current) throw new RegistryError("工作流不存在", { status: 404, code: "workflow_not_found" });
+
+    const data = await readRegistryData();
+    const index = data.findIndex((item) => (item.id || item.name) === current.id);
+    if (index < 0) throw new RegistryError("工作流不在注册表中", { status: 404, code: "workflow_not_found" });
+    const raw = { ...data[index] };
+
+    // 1) 工作流内容：给了 json 就校验并覆盖原文件。
+    if (patch.json !== undefined) {
+      let workflow = patch.json;
+      if (typeof workflow === "string") {
+        try {
+          workflow = JSON.parse(workflow);
+        } catch (error) {
+          throw new RegistryError(`JSON 解析失败：${error.message}`, { code: "invalid_json" });
+        }
+      }
+      if (isUiWorkflow(workflow)) {
+        throw new RegistryError("这是 ComfyUI UI 格式工作流，不能直接提交。请导出 API 格式后再保存。", { status: 422, code: "ui_workflow_not_supported" });
+      }
+      if (!isApiWorkflow(workflow)) {
+        throw new RegistryError("不是有效的 ComfyUI API 格式工作流（顶层节点需要 class_type + inputs）。", { status: 422, code: "invalid_api_workflow" });
+      }
+      await writeJsonAtomic(path.join(dir, current.file), workflow);
+    }
+
+    // 2) 名称：改了就要保证类型前缀与唯一性。
+    const nextType = patch.type ? inferType({}, patch.type) : current.type;
+    if (patch.name && String(patch.name).trim() && String(patch.name).trim() !== current.name) {
+      const desired = ensureTypePrefix(String(patch.name).trim(), nextType);
+      const clash = resolve(desired);
+      if (clash && clash.id !== current.id) throw new RegistryError(`名称「${desired}」已被占用`, { status: 409, code: "name_conflict" });
+      raw.name = desired;
+    }
+    if (patch.type) raw.type = nextType;
+    // 空值不允许落盘：清空 label 等价于回落到 JSON 文件名。
+    if (patch.label !== undefined) raw.label = normalizeLabel(patch.label, raw.file || current.file);
+    if (patch.description !== undefined) raw.description = String(patch.description || "");
+    if (patch.bindings !== undefined) {
+      if (!isPlainObject(patch.bindings)) throw new RegistryError("bindings 必须是对象", { code: "invalid_bindings" });
+      raw.bindings = patch.bindings;
+    }
+    if (patch.defaults !== undefined) raw.defaults = isPlainObject(patch.defaults) ? patch.defaults : {};
+    if (patch.presets !== undefined) raw.presets = isPlainObject(patch.presets) ? patch.presets : {};
+    if (patch.parameters !== undefined) raw.parameters = Array.isArray(patch.parameters) ? patch.parameters : [];
+    if (patch.lora !== undefined) raw.lora = isPlainObject(patch.lora) ? patch.lora : null;
+
+    const next = [...data];
+    next[index] = raw;
+    await writeJsonAtomic(registryPath, { version: 1, workflows: next });
+    await load();
+    const saved = resolve(current.id);
+    return { workflow: publicEntry(saved) };
   }
 
   async function scan() {
@@ -598,11 +681,29 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     return summary;
   }
 
-  async function remove(id) {
+  /**
+   * 移除注册。默认同时删除 registry 目录下的工作流文件：
+   * 只删记录的话，setup 扫描会把仍在磁盘上的 JSON 重新导入，表现为「删了还在」。
+   * 传 keepFile 可只取消注册、保留文件。
+   */
+  async function remove(id, { keepFile = false } = {}) {
     const data = await readRegistryData();
-    const next = data.filter((entry) => entry.id !== id);
-    if (next.length === data.length) return false;
+    const target = data.find((entry) => (entry.id || entry.name) === id);
+    if (!target) return false;
+    const next = data.filter((entry) => (entry.id || entry.name) !== id);
     await writeJsonAtomic(registryPath, { version: 1, workflows: next });
+    if (!keepFile && target.file) {
+      const filePath = path.isAbsolute(target.file) ? target.file : path.join(dir, target.file);
+      // 只删 registry 目录内的文件，避免误删用户指向外部的原始工作流。
+      const insideDir = path.resolve(filePath).startsWith(path.resolve(dir) + path.sep);
+      if (insideDir) {
+        try {
+          await fsp.unlink(filePath);
+        } catch (error) {
+          if (error?.code !== "ENOENT") logger?.warn?.(`删除工作流文件失败 ${filePath}: ${error.message}`);
+        }
+      }
+    }
     await load();
     return true;
   }
@@ -619,6 +720,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     resolveForMode,
     schema,
     importWorkflow,
+    updateWorkflow,
     scan,
     remove,
     publicEntry,

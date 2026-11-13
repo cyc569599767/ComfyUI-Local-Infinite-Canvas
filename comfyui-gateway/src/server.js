@@ -30,13 +30,14 @@ import { createPreviewHub } from "./preview-hub.js";
 import { absoluteTaskUrl } from "./public-url.js";
 import { createFreeWorkflowStore, applyFreeInputs } from "./free-workflows.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
-import { runImage, runVideo, runWorkflow } from "./runner.js";
+import { runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
 import { createSkinUnlockStore } from "./skin-unlocks.js";
 import { readSystemStats } from "./system-stats.js";
 import { createTaskStore } from "./tasks.js";
 import { applyUpdate, checkForUpdate, detectInterruptedUpdate, getUpdateProgress, recoverWorkflowBackups, restoreInterruptedUpdate } from "./update.js";
 import { uploadImages } from "./uploads.js";
 import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
+import { createWorkflowLabelStore } from "./workflow-labels.js";
 import { workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep } from "./util.js";
 
@@ -183,8 +184,20 @@ function freeEffectivePrompt(entry, texts, prompt) {
   return String(match?.value ?? prompt ?? "");
 }
 
-function parseParams(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+const AUDIO_MODES = ["voice-design", "voice-clone", "music"];
+// voice_description 缺失时的兜底：明确中性嗓音，避免 Qwen3-TTS 自由发挥导致性别/年龄错乱。
+const AUDIO_NEUTRAL_VOICE = "自然清晰的中性嗓音，无明显性别与年龄特征，语速平稳。";
+// MiniMax Music3 的 max_duration 是 0.04 步进的秒数；非有限数会写进工作流变成 null，先挡掉。
+function normalizeMaxDuration(value) {
+  if (value === undefined || value === null || value === "") return 60;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new HttpError("max_duration 必须是大于 0 的秒数", { status: 400, code: "invalid_max_duration" });
+  }
+  return Math.max(1, Math.min(360, seconds));
+}
+
+function parseParams(value) {  if (value && typeof value === "object" && !Array.isArray(value)) return value;
   if (value === undefined || value === null || value === "") return {};
   if (typeof value === "string") {
     try {
@@ -477,11 +490,15 @@ export async function createGatewayApp(overrides = {}) {
   });
   const mainModels = createMainModelStore({ dataDir: config.dataDir, logger });
   await mainModels.load();
+  // label 覆盖必须早于 registry 加载，registry 构建 entry 时会同步读取。
+  const workflowLabels = createWorkflowLabelStore({ dataDir: config.dataDir, logger });
+  await workflowLabels.load();
   const registry = createRegistry({
     dir: config.workflowDir,
     maxWorkflowBytes: config.maxWorkflowBytes,
     logger,
     mainModelFile: (id) => mainModels.fileForWorkflow(id),
+    labelOverride: (id) => workflowLabels.get(id),
   });
   await registry.load();
   const tasks = createTaskStore({
@@ -1322,6 +1339,38 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ ok: true, id: entry.id, enabled });
   });
 
+  app.post("/api/workflows/:id/label", async (req, res) => {
+    const entry = registry.resolve(req.params.id);
+    if (!entry) throw new HttpError("工作流不存在", { status: 404, code: "workflow_not_found" });
+    // 传空字符串表示恢复 registry.json 里的默认显示名。
+    const label = workflowLabels.normalize(req.body?.label);
+    if (label && label.length > workflowLabels.MAX_LABEL_LENGTH) {
+      throw new HttpError(`显示名不能超过 ${workflowLabels.MAX_LABEL_LENGTH} 个字符`, { status: 400, code: "invalid_label" });
+    }
+    await workflowLabels.set(entry.id, label);
+    // label 存在独立文件里，registry 的文件签名不会变，必须显式重载才能生效。
+    await registry.load();
+    const updated = registry.resolve(entry.id);
+    logger.info(`workflow label ${entry.id} -> ${label || "(默认)"}`);
+    emitModelChange("label");
+    res.json({ ok: true, id: entry.id, label: updated?.label || entry.name, custom: Boolean(label) });
+  });
+
+  // 更新已注册工作流：改名称/类型/描述/绑定/参数，或替换工作流 JSON 内容。
+  app.patch("/api/workflows/:id", async (req, res) => {
+    const body = req.body || {};
+    const patch = {};
+    for (const key of ["name", "label", "type", "description", "bindings", "defaults", "presets", "parameters", "lora", "json"]) {
+      if (body[key] !== undefined) patch[key] = body[key];
+    }
+    if (!Object.keys(patch).length) throw new HttpError("没有需要更新的字段", { status: 400, code: "empty_patch" });
+    const result = await registry.updateWorkflow(req.params.id, patch);
+    await setup.scan("registry-update");
+    logger.info(`updated workflow ${result.workflow.id}`);
+    emitModelChange("registry-update");
+    res.json({ ok: true, ...result });
+  });
+
   app.get("/api/workflows/:id", (req, res) => {
     const entry = registry.resolve(req.params.id);
     if (!entry) throw new HttpError("工作流不存在", { status: 404, code: "workflow_not_found" });
@@ -1371,11 +1420,13 @@ export async function createGatewayApp(overrides = {}) {
   });
 
   app.delete("/api/workflows/:id", async (req, res) => {
-    const removed = await registry.remove(req.params.id);
+    // keepFile=1 只取消注册、保留工作流文件；默认连文件一起删，否则扫描会把它重新导入。
+    const keepFile = req.query.keepFile === "1" || req.body?.keepFile === true;
+    const removed = await registry.remove(req.params.id, { keepFile });
     if (!removed) throw new HttpError("工作流不存在", { status: 404, code: "workflow_not_found" });
-    // 只移除注册记录，不删除用户工作流文件；本次事件后列表立即更新。
+    await setup.scan("registry-remove");
     emitModelChange("registry-remove");
-    res.json({ ok: true });
+    res.json({ ok: true, keepFile });
   });
 
   const requireFreeWorkflow = (id) => {
@@ -1592,6 +1643,102 @@ export async function createGatewayApp(overrides = {}) {
     });
     logger.info(`free video ${entry.name} queued ${task.id} ${req.id}`);
     res.json({ id: task.id, object: "video", status: "queued", progress: 0, created_at: Math.floor(Date.now() / 1000) });
+  });
+
+  // 音频三种子功能共用 /v1/audio/speech，由 body.mode 区分：
+  //   voice-design 朗读文案 + 音色描述
+  //   voice-clone  朗读文案 + 参考音频（ASR 自动转写参考文本）
+  //   music        音乐描述(caption) + 歌词 + 时长
+  // 返回 OpenAI 兼容的 { data: [{ b64_json | url }] }，二进制作由前端自行落地。
+  app.post("/v1/audio/speech", upload.any(), async (req, res) => {
+    await reloadRegistryAndSnapshot();
+    const body = req.body || {};
+    const mode = String(body.mode || "voice-design").trim();
+    if (!AUDIO_MODES.includes(mode)) {
+      throw new HttpError(`音频模式只能是 ${AUDIO_MODES.join(" / ")}`, { status: 400, code: "invalid_audio_mode" });
+    }
+    const entry = requireModel(registry, setup, body.model, "audio");
+    if (entry.audioMode && entry.audioMode !== mode) {
+      throw new HttpError(`模型 ${entry.name} 只支持「${entry.audioMode}」，不能用于「${mode}」`, { status: 400, code: "audio_mode_mismatch" });
+    }
+    // OpenAI 风格请求把文本放在 input，音乐模式也可以用 caption/lyrics 显式指定。
+    const input = String(body.input ?? body.prompt ?? "").trim();
+    const params = parseParams(body.params);
+    let prompt = input;
+    if (mode === "music") {
+      if (!prompt) throw new HttpError("音乐生成需要音乐描述 caption", { status: 400, code: "missing_prompt" });
+      params.maxDuration = normalizeMaxDuration(params.maxDuration ?? body.max_duration);
+      // 歌词允许为空（纯器乐），空串就是器乐。
+      params.lyrics = String(body.lyrics ?? params.lyrics ?? "");
+    } else if (!prompt) {
+      throw new HttpError(mode === "voice-clone" ? "音色克隆需要朗读文案 text" : "音色设计需要朗读文案 text", { status: 400, code: "missing_prompt" });
+    }
+    if (mode === "voice-design") {
+      const rawVoiceDescription = String(body.voice_description ?? body.voiceDescription ?? "").trim();
+      // 音色描述是音质的关键：缺失时 Qwen3-TTS 会自由发挥，性别/年龄容易跑偏。
+      // 但不该让整次生成失败 —— 用一个明确的中性兜底并告警，与参考实现一致。
+      if (!rawVoiceDescription) {
+        logger.warn(`音色设计缺少 voice_description，已使用中性兜底描述 ${req.id}`);
+        params.voiceDescription = AUDIO_NEUTRAL_VOICE;
+        params.voiceDescriptionFallback = true;
+      } else {
+        params.voiceDescription = rawVoiceDescription;
+      }
+    }
+    let uploadedAudios = [];
+    if (mode === "voice-clone") {
+      const audioFiles = orderedAudioRefFiles(req.files || []);
+      if (!audioFiles.length) {
+        throw new HttpError("音色克隆需要参考音频 audios（单个文件）", { status: 400, code: "missing_reference_audio" });
+      }
+      uploadedAudios = await uploadImages(comfy, audioFiles);
+    }
+    params.filenamePrefix = `audio/${mode.replace(/-/g, "_")}_${randomId("").slice(0, 8)}`;
+    const context = buildContext({
+      prompt,
+      count: 1,
+      uploadedAudios,
+      params,
+      lyrics: params.lyrics,
+      voiceDescription: params.voiceDescription,
+    });
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    let result;
+    try {
+      result = await runAudio({
+        entry,
+        context,
+        comfy,
+        timeoutMs: config.requestTimeoutMs,
+        pollIntervalMs: config.pollIntervalMs,
+        signal: abort.signal,
+        requestId: req.id,
+        modelAliasFor: setup.modelAliasFor,
+        loaderSpecs: setup.modelLoaderSpecs?.(),
+        logger,
+      });
+    } catch (error) {
+      if (abort.signal.aborted) {
+        logger.info(`audio ${mode} ${entry.name} 请求被客户端中断 ${req.id}`);
+        return;
+      }
+      throw error;
+    } finally {
+      abort.cleanup();
+    }
+    const file = result.files[0];
+    if (!file) throw new HttpError("音频工作流没有返回音频", { status: 502, code: "no_audio_output" });
+    logger.info(`audio ${mode} ${entry.name} seed=${result.usedSeed ?? "-"} -> ${result.promptId} ${req.id}`);
+    const responseFormat = String(body.response_format || "b64_json").toLowerCase();
+    const ext = extFromMime(file.mimeType, file.filename, "flac");
+    // 兜底产生的产物要能让前端提示用户「补音色描述」，否则用户不知道音色为何偏中性。
+    const warnings = params.voiceDescriptionFallback ? ["voice_description_fallback"] : [];
+    if (responseFormat === "url") {
+      const saved = await tasks.saveOutput(randomId("aud_"), file.buffer, ext);
+      res.json({ created: Math.floor(Date.now() / 1000), data: [{ url: absoluteTaskUrl(config, req, saved.url) }], mime_type: file.mimeType, prompt_id: result.promptId, warnings });
+      return;
+    }
+    res.json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: file.buffer.toString("base64") }], mime_type: file.mimeType, prompt_id: result.promptId, warnings });
   });
 
   app.post("/v1/images/generations", async (req, res) => {

@@ -144,6 +144,23 @@
   .row-meta { margin-top: 2px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
   .copy { border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 7px; padding: 5px 9px; font-size: 12px; flex: none; }
   .copy:hover { color: var(--fg); border-color: var(--border-strong); }
+  .copy.danger:hover { color: var(--bad); border-color: var(--bad); }
+  .row-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+
+  /* 编辑面板 */
+  .editor { margin-top: 12px; padding: 14px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); }
+  .editor h3 { margin: 0 0 10px; font-size: 12px; font-weight: 500; color: var(--muted); }
+  .field { margin-bottom: 10px; }
+  .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field input[type="text"], .field select, .field textarea {
+    width: 100%; border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    border-radius: 7px; padding: 7px 8px; outline: none;
+  }
+  .field textarea { min-height: 96px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--border-strong); }
+  .field-hint { margin-top: 4px; color: var(--muted); font-size: 11px; }
+  .editor-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .editor-actions .spacer { flex: 1; }
   .empty { padding: 18px 2px; color: var(--muted); font-size: 12px; }
   .task { display: flex; align-items: center; gap: 9px; padding: 9px 2px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .task:last-child { border-bottom: 0; }
@@ -202,6 +219,8 @@
         <div class="advanced-body">
           <label for="name">模型名（可选）</label>
           <input id="name" type="text" placeholder="留空自动命名" autocomplete="off">
+          <label for="label">显示名（可选）</label>
+          <input id="label" type="text" placeholder="留空默认用 JSON 文件名" autocomplete="off">
           <label for="type">类型</label>
           <select id="type">
             <option value="">自动识别</option>
@@ -215,6 +234,45 @@
       </details>
     </div>
     <div id="message" class="message" hidden></div>
+  </section>
+
+  <section class="editor" id="editor" hidden>
+    <h3>编辑工作流 <span id="editor-id" class="row-type"></span></h3>
+    <div class="field">
+      <label for="edit-name">模型名</label>
+      <input id="edit-name" type="text" autocomplete="off">
+      <div class="field-hint">会自动保留类型前缀（如 image- / video-），重名会被拒绝。</div>
+    </div>
+    <div class="field">
+      <label for="edit-label">显示名</label>
+      <input id="edit-label" type="text" autocomplete="off">
+      <div class="field-hint">界面展示用；留空则回落到 JSON 文件名，不会存空值。</div>
+    </div>
+    <div class="field">
+      <label for="edit-type">类型</label>
+      <select id="edit-type">
+        <option value="image">生图</option>
+        <option value="video">视频</option>
+        <option value="audio">音频</option>
+        <option value="text">文本</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="edit-description">描述</label>
+      <input id="edit-description" type="text" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="edit-json">工作流 JSON（API 格式，留空表示不修改内容）</label>
+      <textarea id="edit-json" spellcheck="false" placeholder="留空则只更新上面的元数据；填写则整体替换工作流内容"></textarea>
+      <div class="field-hint">替换内容会覆盖原文件，绑定参数会自动重新推断。</div>
+    </div>
+    <div class="editor-actions">
+      <button class="primary" id="editor-save">保存</button>
+      <button class="copy" id="editor-cancel">取消</button>
+      <span class="spacer"></span>
+      <button class="copy danger" id="editor-delete">删除注册</button>
+    </div>
+    <div id="editor-message" class="message" hidden></div>
   </section>
 
   <section class="section">
@@ -297,6 +355,7 @@
     try {
       var data = await getJson("/api/workflows");
       var list = data.workflows || [];
+      workflowCache = list;
       $("count").textContent = String(list.length);
       if (!list.length) {
         $("workflows").className = "empty";
@@ -311,11 +370,17 @@
         var problem = unavailable && item.availability.problems && item.availability.problems.length
           ? '<div class="row-meta" style="color:var(--bad)">' + esc(item.availability.problems[0].message) + '</div>'
           : "";
+        var disabled = item.enabled === false;
         return '<div class="row">' +
-          '<div class="row-main"><div class="row-name"><strong>' + esc(item.name) + '</strong><span class="row-type">' + esc(TYPE_LABEL[item.type] || item.type) + '</span>' +
+          '<div class="row-main"><div class="row-name"><strong>' + esc(item.label || item.name) + '</strong><span class="row-type">' + esc(TYPE_LABEL[item.type] || item.type) + '</span>' +
+          (disabled ? '<span class="row-type">已停用</span>' : '') +
           (unavailable ? '<span class="row-type" style="color:var(--bad)">不可用</span>' : '') +
-          '</div><div class="row-meta">' + bindings + ' 个参数 · ' + esc(item.file) + modes + '</div>' + problem + '</div>' +
-          '<button class="copy" data-copy="' + encodeURIComponent(item.name) + '">复制</button></div>';
+          '</div><div class="row-meta">' + esc(item.name) + ' · ' + bindings + ' 个参数 · ' + esc(item.file) + modes + '</div>' + problem + '</div>' +
+          '<div class="row-actions">' +
+          '<button class="copy" data-edit="' + encodeURIComponent(item.id) + '">编辑</button>' +
+          '<button class="copy" data-copy="' + encodeURIComponent(item.name) + '">复制</button>' +
+          '<button class="copy danger" data-delete="' + encodeURIComponent(item.id) + '">删除</button>' +
+          '</div></div>';
       }).join("");
       Array.prototype.forEach.call($("workflows").querySelectorAll("[data-copy]"), function (button) {
         button.addEventListener("click", async function () {
@@ -328,6 +393,12 @@
             message("复制失败，请手动选择：" + name, "bad");
           }
         });
+      });
+      Array.prototype.forEach.call($("workflows").querySelectorAll("[data-edit]"), function (button) {
+        button.addEventListener("click", function () { openEditor(decodeURIComponent(button.getAttribute("data-edit"))); });
+      });
+      Array.prototype.forEach.call($("workflows").querySelectorAll("[data-delete]"), function (button) {
+        button.addEventListener("click", function () { removeWorkflow(decodeURIComponent(button.getAttribute("data-delete"))); });
       });
     } catch (error) {
       $("workflows").className = "empty";
@@ -354,6 +425,85 @@
     }
   }
 
+  // ---- 编辑 / 删除 ----
+  var editingId = null;
+  var workflowCache = [];
+
+  function editorMessage(text, kind) {
+    var el = $("editor-message");
+    el.hidden = !text;
+    el.className = "message" + (kind ? " " + kind : "");
+    el.textContent = text || "";
+  }
+
+  function closeEditor() {
+    editingId = null;
+    $("editor").hidden = true;
+    editorMessage("");
+  }
+
+  function openEditor(id) {
+    var item = workflowCache.filter(function (row) { return row.id === id; })[0];
+    if (!item) return message("找不到该工作流，请刷新后重试。", "bad");
+    editingId = id;
+    $("editor").hidden = false;
+    $("editor-id").textContent = id;
+    $("edit-name").value = item.name || "";
+    $("edit-label").value = item.label || "";
+    $("edit-type").value = item.type || "image";
+    $("edit-description").value = item.description || "";
+    // 内容留空表示只改元数据，避免把整个 JSON 塞进 textarea。
+    $("edit-json").value = "";
+    editorMessage("");
+    $("editor").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  async function saveEditor() {
+    if (!editingId) return;
+    editorMessage("");
+    var body = {
+      name: $("edit-name").value.trim(),
+      label: $("edit-label").value.trim(),
+      type: $("edit-type").value,
+      description: $("edit-description").value.trim(),
+    };
+    var rawJson = $("edit-json").value.trim();
+    if (rawJson) {
+      try { body.json = JSON.parse(rawJson); }
+      catch (error) { return editorMessage("JSON 解析失败：" + error.message, "bad"); }
+    }
+    var button = $("editor-save");
+    button.disabled = true;
+    try {
+      await getJson("/api/workflows/" + encodeURIComponent(editingId), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      message("已保存 " + body.name, "ok");
+      closeEditor();
+      await loadWorkflows();
+    } catch (error) {
+      editorMessage("保存失败：" + error.message, "bad");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function removeWorkflow(id) {
+    var item = workflowCache.filter(function (row) { return row.id === id; })[0];
+    var name = item ? (item.label || item.name) : id;
+    if (!confirm("确定删除注册「" + name + "」？\n只会移除注册记录，不会删除工作流文件。")) return;
+    try {
+      await getJson("/api/workflows/" + encodeURIComponent(id), { method: "DELETE" });
+      message("已删除 " + name, "ok");
+      if (editingId === id) closeEditor();
+      await loadWorkflows();
+    } catch (error) {
+      message("删除失败：" + error.message, "bad");
+    }
+  }
+
   async function doImport() {
     clearMessage();
     var source = $("source").value;
@@ -361,6 +511,7 @@
     if (!value) return message("先填一个地址、路径或 JSON。", "bad");
     var body = { overwrite: $("overwrite").checked };
     if ($("name").value.trim()) body.name = $("name").value.trim();
+    if ($("label").value.trim()) body.label = $("label").value.trim();
     if ($("type").value) body.type = $("type").value;
     if (source === "url") body.url = value;
     else if (source === "path") body.path = value;
@@ -390,6 +541,11 @@
 
   $("source").addEventListener("change", function () {
     $("composer-box").classList.toggle("json", $("source").value === "json");
+  });
+  $("editor-save").addEventListener("click", saveEditor);
+  $("editor-cancel").addEventListener("click", closeEditor);
+  $("editor-delete").addEventListener("click", function () {
+    if (editingId) void removeWorkflow(editingId);
   });
   $("import").addEventListener("click", doImport);
   $("scan").addEventListener("click", async function () {

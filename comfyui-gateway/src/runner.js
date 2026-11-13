@@ -101,8 +101,10 @@ function isOutOfMemoryError(error) {
 function collectOutputFiles(history, { includePreview = false } = {}) {
   const files = [];
   const seen = new Set();
+  // ComfyUI 的 SaveAudio / SaveAudioAdvanced 把结果放在 outputs[node].audio 里
+  // （SavedAudios.as_dict() => {"audio": [...]}），文件名带 flac/mp3/opus 扩展名。
   for (const [nodeId, output] of Object.entries(history?.outputs || {})) {
-    for (const key of ["images", "gifs", "videos", "3d"]) {
+    for (const key of ["images", "gifs", "videos", "3d", "audio"]) {
       for (const item of output?.[key] || []) {
         if (!item?.filename) continue;
         if (item.type && item.type !== "output" && !(includePreview && item.type === "temp")) continue;
@@ -298,4 +300,17 @@ export async function runVideo({ entry, context, comfy, timeoutMs, pollIntervalM
     throw new GenerationError("视频工作流没有返回视频文件（只拿到了图片/动图）", { status: 502, code: "no_video_output", details: result.files.map((file) => file.filename) });
   }
   return { promptId: result.promptId, files: [video] };
+}
+
+// 音频（音色设计 / 音色克隆 / 音乐生成）产物：按 mime 或扩展名挑一条，优先非 temp。
+export async function runAudio({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
+  const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress });
+  const audio = result.files.find((file) => {
+    if (file.type === "temp") return false;
+    return /^audio\//i.test(file.mimeType) || /\.(flac|mp3|opus|wav|ogg|m4a)$/i.test(file.filename);
+  });
+  if (!audio) {
+    throw new GenerationError("音频工作流没有返回音频文件", { status: 502, code: "no_audio_output", details: result.files.map((file) => file.filename) });
+  }
+  return { promptId: result.promptId, files: [audio], usedSeed: result.usedSeed ?? null };
 }
