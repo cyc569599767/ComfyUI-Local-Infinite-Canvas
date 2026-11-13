@@ -8,6 +8,7 @@ import express from "express";
 import multer from "multer";
 
 import { buildContext } from "./bindings.js";
+import { shouldLogRequest } from "./access-log.js";
 import { imageInputCapacity } from "./base-models.js";
 import { createAssistantManager } from "./assistant.js";
 import { registerAgentCloudRoutes } from "./agent-cloud.js";
@@ -682,10 +683,8 @@ export async function createGatewayApp(overrides = {}) {
     req.id = incomingId || randomId("req_");
     res.setHeader("X-Request-Id", req.id);
     const started = Date.now();
-    // 前端进度轮询与启动器会话轮询频率高、无诊断价值，不写访问日志，避免把真实错误淹没。
-    const quiet = /^\/api\/progress\//.test(req.path) || /^\/api\/session\/status\b/.test(req.path);
     res.on("finish", () => {
-      if (!quiet) logger.info(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - started}ms ${req.id}`);
+      if (shouldLogRequest(req.path, res.statusCode)) logger.info(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - started}ms ${req.id}`);
     });
     next();
   });
