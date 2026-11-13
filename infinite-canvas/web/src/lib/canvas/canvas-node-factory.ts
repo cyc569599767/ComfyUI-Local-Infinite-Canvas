@@ -93,6 +93,12 @@ export function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetada
         audioFormat: config.audioFormat,
         audioSpeed: config.audioSpeed,
         audioInstructions: config.audioInstructions,
+        audioMode: (config.audioMode as CanvasNodeMetadata["audioMode"]) || "voice-design",
+        audioVoiceDescription: config.audioVoiceDescription || "",
+        audioLyrics: config.audioLyrics || "",
+        audioLanguage: config.audioLanguage || "Auto",
+        audioMaxDuration: config.audioMaxDuration || "60",
+        audioSeed: config.audioSeed || "",
     };
 }
 

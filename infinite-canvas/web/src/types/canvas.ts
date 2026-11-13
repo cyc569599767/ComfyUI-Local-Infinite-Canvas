@@ -15,12 +15,22 @@ export enum CanvasNodeType {
     Config = "config",
     Video = "video",
     Audio = "audio",
+    /** 音色设计：与空音频节点完全同构，仅默认 audioMode 为 voice-design。 */
+    VoiceDesign = "voice-design",
     FreeCard = "free-card",
     Group = "group",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
 export type CanvasNodeTypeId = CanvasNodeType | (string & {});
+
+/** 所有「音频类」节点：共用渲染、参考音频、生成与面板逻辑。 */
+export const AUDIO_NODE_TYPES: readonly string[] = [CanvasNodeType.Audio, CanvasNodeType.VoiceDesign];
+
+/** 判断是否音频类节点（音频 / 音色设计）。各处判断都应走这里，避免漏掉新增的音色设计节点。 */
+export function isAudioNodeType(type: CanvasNodeTypeId | string | undefined | null): boolean {
+    return Boolean(type) && AUDIO_NODE_TYPES.includes(type as string);
+}
 
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
@@ -127,6 +137,14 @@ export type CanvasNodeMetadata = {
     audioFormat?: string;
     audioSpeed?: string;
     audioInstructions?: string;
+    // 本地网关音频三种子功能：音色设计 / 音色克隆 / 音乐生成。
+    audioMode?: "voice-design" | "voice-clone" | "music";
+    audioVoiceDescription?: string;
+    audioLyrics?: string;
+    audioLanguage?: string;
+    audioMaxDuration?: string;
+    audioSeed?: string;
+    audioSeedFixed?: string;
     references?: string[];
     naturalWidth?: number;
     naturalHeight?: number;

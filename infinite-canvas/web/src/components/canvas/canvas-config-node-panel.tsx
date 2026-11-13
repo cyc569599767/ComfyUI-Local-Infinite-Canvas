@@ -1,15 +1,17 @@
-import type { CSSProperties } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
 import { Button, Segmented } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { BaseModelPicker, WorkflowModelPicker } from "@/components/model-picker";
+import { AudioModeSelect } from "@/components/audio-settings-panel";
 import { CONFIG_COMPOSER_ENABLED } from "@/constant/canvas";
 import { LOCAL_ONLY } from "@/constant/app-mode";
-import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionLabel, resolveModelForCapability, selectableModelsByCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
 import { videoModelForWorkflow, videoModelModePatch, videoWorkflowId, isNoVdnWorkflowId } from "@/lib/canvas/video-model-mode";
+import { audioModeForModel, audioModelForMode } from "@/lib/audio-generation";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
@@ -36,6 +38,11 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const theme = useCanvasTheme();
     const mode = node.metadata?.generationMode || "image";
     const config = buildNodeConfig(globalConfig, node, mode);
+    // 音频卡片里的「工作流」下拉：本地网关的音频工作流模型，带渠道前缀。
+    const audioWorkflowOptions = useMemo(
+        () => selectableModelsByCapability(globalConfig, "audio").map((value) => ({ value, label: modelOptionLabel(globalConfig, value) })),
+        [globalConfig],
+    );
     const chipStyle = { background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text };
     const frameMode: "first" | "last" | "both" =
         node.metadata?.frameMode === "last" || node.metadata?.frameMode === "both" || node.metadata?.frameMode === "first"
@@ -121,29 +128,55 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                 ) : null}
             </div>
 
-            <div className="mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_148px] items-center gap-2" onMouseDown={(event) => event.stopPropagation()}>
-                <div className="flex min-w-0 flex-col gap-1">
-                    <WorkflowModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, mode === "video" ? videoModelModePatch(config, model) : { model })} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
-                    <BaseModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} fullWidth />
-                </div>
-                {mode === "video" ? (
-                    <CanvasVideoSettingsPopover
+            {mode === "audio" ? (
+                // 卡片底部放操作类型，工作流与参数收进齿轮弹层。
+                <div className="mb-2 flex min-w-0 cursor-default items-center gap-2" onMouseDown={(event) => event.stopPropagation()}>
+                    <AudioModeSelect
+                        config={config}
+                        theme={theme}
+                        className="min-w-0 flex-1"
+                        onChange={(nextMode) => {
+                            const nextModel = audioModelForMode(nextMode, audioWorkflowOptions.map((option) => option.value));
+                            onConfigChange(node.id, { audioMode: nextMode, ...(nextModel ? { model: nextModel } : {}) });
+                        }}
+                    />
+                    <CanvasAudioSettingsPopover
                         config={config}
                         placement="topRight"
-                        buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2"
-                        onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))}
-                        frameMode={frameMode}
-                        onFrameModeChange={(value) => onConfigChange(node.id, { frameMode: value })}
-                        onModeChange={changeVideoMode}
+                        compact
+                        buttonClassName="canvas-compact-control !h-10 !w-10 !min-w-10 !rounded-lg !p-0"
+                        onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))}
+                        workflowOptions={audioWorkflowOptions}
+                        onWorkflowChange={(model) => {
+                            const nextMode = audioModeForModel(model);
+                            onConfigChange(node.id, nextMode ? { model, audioMode: nextMode } : { model });
+                        }}
+                        onMissingConfig={() => openConfigDialog(true)}
                     />
-                ) : mode === "image" ? (
-                    <CanvasImageSettingsPopover config={config} placement="topRight" autoAdjustOverflow={false} buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })} onParamsChange={(params) => onConfigChange(node.id, { params: { ...node.metadata?.params, ...params } })} onOpenMaskEditor={() => onOpenMaskEditor?.(node.id)} onOpenOutpaintEditor={() => onOpenOutpaintEditor?.(node.id)} onOpenMossLayoutEditor={() => onOpenMossLayoutEditor?.(node.id)} />
-                ) : mode === "audio" ? (
-                    <CanvasAudioSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
-                ) : (
-                    <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
-                )}
-            </div>
+                </div>
+            ) : (
+                <div className="mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_148px] items-center gap-2" onMouseDown={(event) => event.stopPropagation()}>
+                    <div className="flex min-w-0 flex-col gap-1">
+                        <WorkflowModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, mode === "video" ? videoModelModePatch(config, model) : { model })} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
+                        <BaseModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} fullWidth />
+                    </div>
+                    {mode === "video" ? (
+                        <CanvasVideoSettingsPopover
+                            config={config}
+                            placement="topRight"
+                            buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2"
+                            onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))}
+                            frameMode={frameMode}
+                            onFrameModeChange={(value) => onConfigChange(node.id, { frameMode: value })}
+                            onModeChange={changeVideoMode}
+                        />
+                    ) : mode === "image" ? (
+                        <CanvasImageSettingsPopover config={config} placement="topRight" autoAdjustOverflow={false} buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })} onParamsChange={(params) => onConfigChange(node.id, { params: { ...node.metadata?.params, ...params } })} onOpenMaskEditor={() => onOpenMaskEditor?.(node.id)} onOpenOutpaintEditor={() => onOpenOutpaintEditor?.(node.id)} onOpenMossLayoutEditor={() => onOpenMossLayoutEditor?.(node.id)} />
+                    ) : (
+                        <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
+                    )}
+                </div>
+            )}
 
             <Button
                 type="primary"
@@ -202,6 +235,12 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
+        audioMode: node.metadata?.audioMode || globalConfig.audioMode || defaultConfig.audioMode,
+        audioVoiceDescription: node.metadata?.audioVoiceDescription ?? globalConfig.audioVoiceDescription ?? defaultConfig.audioVoiceDescription,
+        audioLyrics: node.metadata?.audioLyrics ?? globalConfig.audioLyrics ?? defaultConfig.audioLyrics,
+        audioLanguage: node.metadata?.audioLanguage || globalConfig.audioLanguage || defaultConfig.audioLanguage,
+        audioMaxDuration: node.metadata?.audioMaxDuration || globalConfig.audioMaxDuration || defaultConfig.audioMaxDuration,
+        audioSeed: node.metadata?.audioSeed || globalConfig.audioSeed || defaultConfig.audioSeed,
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
         seed: node.metadata?.seed || globalConfig.seed || "",
         seedFixed: node.metadata?.seedFixed ?? globalConfig.seedFixed ?? "false",
@@ -218,8 +257,7 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
 }
 
 function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
-    if (key === "audioVoice") return { audioVoice: value };
-    if (key === "audioFormat") return { audioFormat: value };
-    if (key === "audioSpeed") return { audioSpeed: value };
-    return { audioInstructions: value };
+    // 节点元数据字段名与配置键一致，直接落盘即可（audioMode 需要窄化类型）。
+    if (key === "audioMode") return { audioMode: value as CanvasNodeMetadata["audioMode"] };
+    return { [key]: value };
 }

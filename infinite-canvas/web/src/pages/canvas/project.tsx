@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
 import { createFreeWorkflowVideoTask, fetchFreeWorkflows, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
-import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
+import { generateCanvasAudio, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
 import { createVideoGenerationTask, createVideoInterpolateTask, createVideoUpscaleTask, isVideoTaskFailed, readVideoTaskResumeInfo, storeGeneratedVideo, waitForVideoGenerationTask, type VideoPreview } from "@/services/api/video";
 import { channelModelOf, defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, imageToDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -38,7 +38,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeSuperResolveDialog, type CanvasSuperResolveParams } from "@/components/canvas/canvas-node-super-resolve-dialog";
 import { CanvasNodeVideoUpscaleDialog, type CanvasVideoUpscaleParams } from "@/components/canvas/canvas-node-video-upscale-dialog";
 import { CanvasImageCompareModal } from "@/components/canvas/canvas-image-compare-modal";
-import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
+import { audioReferenceFromNode, buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasGenerationTimer } from "@/components/canvas/canvas-generation-timer";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasSelectionToolbar } from "@/components/canvas/canvas-selection-toolbar";
@@ -63,11 +63,13 @@ import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNod
 import { dedupeReferenceImages } from "@/lib/canvas/reference-dedupe";
 import { buildConnectionRoute, connectionIntersectsView, connectionLayerGeometry } from "@/lib/canvas/connection-route";
 import { buildGeneratedNodeConnections } from "@/lib/canvas/generation-connections";
+import { planAudioCloneReference } from "@/lib/canvas/audio-clone-reference";
 import { resolveDraftSourcePlan } from "@/lib/canvas/draft-source-plan";
 import { DRAFT_REFERENCE_MAX, prepareDraftReferenceImages } from "@/lib/canvas/draft-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { fetchAvailableLoras } from "@/services/api/loras";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, removeBatchImage, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { normalizeAudioModeValue } from "@/lib/audio-generation";
 import { recallNodeSettings } from "@/lib/canvas/node-settings-memory";
 import { MODEL3D_DEFAULT_SIZE, MODEL3D_NODE_TYPE, STAGE3D_DEFAULT_SIZE, STAGE3D_NODE_TYPE } from "@/lib/canvas/model3d";
 import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -114,6 +116,7 @@ import {
     type Position,
     type SelectionBox,
     type ViewportTransform,
+    isAudioNodeType,
 } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -982,7 +985,7 @@ function InfiniteCanvasPage() {
             setConnections((prev) => [...prev, { id: nanoid(), ...connection }]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (insertBefore || (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && (type !== CanvasNodeType.Config || CONFIG_COMPOSER_ENABLED))) setDialogNodeId(newNode.id);
+            if (insertBefore || (type !== CanvasNodeType.Text && (type !== CanvasNodeType.Config || CONFIG_COMPOSER_ENABLED))) setDialogNodeId(newNode.id);
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
@@ -1253,7 +1256,7 @@ function InfiniteCanvasPage() {
                   ? Boolean(definition.autoOpenPanel)
                   : definition?.useBuiltinPanel
                     ? true
-                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group;
+                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Group;
             if (wantsPanel && (type !== CanvasNodeType.Config || CONFIG_COMPOSER_ENABLED)) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
@@ -2217,8 +2220,8 @@ function InfiniteCanvasPage() {
     }, []);
 
     const downloadNodeImage = useCallback((node: CanvasNodeData) => {
-        if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
-        saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
+        if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && !isAudioNodeType(node.type)) || !node.metadata?.content) return;
+        saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : isAudioNodeType(node.type) ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
     }, []);
 
     const downloadBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
@@ -2337,6 +2340,20 @@ function InfiniteCanvasPage() {
                     tags: [],
                     source: "Canvas",
                     data: { url: node.metadata.content, storageKey: node.metadata.storageKey, width: node.width, height: node.height, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "video/mp4" },
+                    metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
+                });
+                message.success(t("common.addedToAssets"));
+                return;
+            }
+            if (isAudioNodeType(node.type)) {
+                if (!node.metadata?.content) return message.error(t("canvas.projectPage.noAudioToSave"));
+                addAsset({
+                    kind: "audio",
+                    title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasAudio"),
+                    coverUrl: "",
+                    tags: [],
+                    source: "Canvas",
+                    data: { url: node.metadata.content, storageKey: node.metadata.storageKey, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "audio/mpeg", durationMs: node.metadata.durationMs },
                     metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
                 });
                 message.success(t("common.addedToAssets"));
@@ -3537,6 +3554,14 @@ function InfiniteCanvasPage() {
             const dimensions = fitNodeSize(asset.data.width || spec.width, asset.data.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
             node = { ...createCanvasNode(CanvasNodeType.Video, center, { content: url, storageKey: asset.data.storageKey, status: NODE_STATUS_SUCCESS, naturalWidth: asset.data.width, naturalHeight: asset.data.height, bytes: asset.data.bytes, mimeType: asset.data.mimeType }, { remember: false, inherit: false }), title: asset.title,
                 ...dimensions, position: { x: center.x - dimensions.width / 2, y: center.y - dimensions.height / 2 } };
+        } else if (asset.kind === "audio") {
+            const url = await resolveMediaUrl(asset.data.storageKey, asset.data.url);
+            if (!isCurrent()) return;
+            if (!url) throw new Error(t("assets.downloadFailed"));
+            node = {
+                ...createCanvasNode(CanvasNodeType.Audio, center, { content: url, storageKey: asset.data.storageKey, status: NODE_STATUS_SUCCESS, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs }, { remember: false, inherit: false }),
+                title: asset.title,
+            };
         } else {
             const stored = asset.data.storageKey
                 ? { ...asset.data, url: await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl), storageKey: asset.data.storageKey }
@@ -3663,7 +3688,7 @@ function InfiniteCanvasPage() {
                 const generationInputs = buildNodeGenerationInputs(nodeId, nodesRef.current, connectionsRef.current);
                 const generationInputPrompt = editingTextNode ? t("canvas.projectPage.editTextPrompt", { source: sourceTextContent, prompt }) : prompt;
                 const generationContext = await hydrateNodeGenerationContext(
-                    buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, generationInputPrompt),
+                    buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, generationInputPrompt, { audio: mode === "audio" }),
                 );
                 if (generationContext.loras.length) generationConfig.params = { ...(generationConfig.params || {}), loras: generationContext.loras };
                 const effectivePrompt = generationContext.prompt.trim();
@@ -3899,19 +3924,33 @@ function InfiniteCanvasPage() {
                 }
 
                 if (mode === "audio") {
+                    // 生成结果统一落成普通音频节点：音色设计节点只是入口，不需要把类型带到产物上。
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                    const isEmptyAudioNode = sourceNode?.type === CanvasNodeType.Audio && !sourceNode.metadata?.content;
-                    const reuseAudioNode = sourceNode?.type === CanvasNodeType.Audio && (overwriteExisting || isEmptyAudioNode);
+                    const audioSource = sourceNode && isAudioNodeType(sourceNode.type) ? sourceNode : undefined;
+                    const audioModeValue = normalizeAudioModeValue(generationConfig.audioMode || "");
+                    // 音色克隆的参考音色：优先用连入的音频节点，没连就把当前节点自己的产物当参考，
+                    // 这时必须另开一个节点承载结果，否则会把参考音色本身覆盖掉。
+                    const clonePlan = planAudioCloneReference(audioModeValue, generationContext.referenceAudios[0], audioReferenceFromNode(audioSource));
+                    const cloneReference = clonePlan.reference;
+                    const usesSelfReference = clonePlan.usesSelfReference;
+                    const isEmptyAudioNode = Boolean(audioSource) && !audioSource?.metadata?.content;
+                    const reuseAudioNode = Boolean(audioSource) && !usesSelfReference && (overwriteExisting || isEmptyAudioNode);
                     const audioId = reuseAudioNode ? nodeId : nanoid();
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const audioNode: CanvasNodeData = {
                         id: audioId,
                         type: CanvasNodeType.Audio,
                         title: effectivePrompt.slice(0, 32) || "Generated Audio",
-                        position: reuseAudioNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
-                        width: reuseAudioNode ? sourceNode.width : spec.width,
-                        height: reuseAudioNode ? sourceNode.height : spec.height,
-                        metadata: { prompt: effectivePrompt, ...(sourceNode?.type === CanvasNodeType.Audio ? { composerContent: prompt, generationInputPrompt } : {}), status: NODE_STATUS_LOADING, ...buildAudioGenerationMetadata(generationConfig) },
+                        position: reuseAudioNode && audioSource ? audioSource.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
+                        width: reuseAudioNode && audioSource ? audioSource.width : spec.width,
+                        height: reuseAudioNode && audioSource ? audioSource.height : spec.height,
+                        metadata: {
+                            prompt: effectivePrompt,
+                            ...(audioSource ? { composerContent: prompt, generationInputPrompt } : {}),
+                            status: NODE_STATUS_LOADING,
+                            ...(usesSelfReference && cloneReference ? { references: [cloneReference.storageKey || cloneReference.url].filter(Boolean) } : {}),
+                            ...buildAudioGenerationMetadata(generationConfig),
+                        },
                     };
                     pendingChildIds = [audioId];
                     setNodes((prev) =>
@@ -3919,12 +3958,36 @@ function InfiniteCanvasPage() {
                             ? prev.map((node) => (node.id === nodeId ? { ...node, ...audioNode } : node))
                             : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), audioNode],
                     );
-                    if (!reuseAudioNode) setConnections((prev) => [...prev, ...(sourceNode?.type === CanvasNodeType.Audio
-                        ? buildGeneratedNodeConnections(nodeId, audioId, generationInputs, nodesRef.current, prev, nanoid)
-                        : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }])]);
+                    if (!reuseAudioNode) {
+                        setConnections((prev) => {
+                            const inherited = isAudioNodeType(sourceNode?.type)
+                                ? buildGeneratedNodeConnections(nodeId, audioId, generationInputs, nodesRef.current, prev, nanoid, usesSelfReference ? { kinds: ["text", "image", "video", "lora"] } : undefined)
+                                : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }];
+                            // buildGeneratedNodeConnections 会跳过源节点，自参考这条线要单独补。
+                            const selfReferenceEdge = usesSelfReference ? [{ id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }] : [];
+                            return [...prev, ...inherited, ...selfReferenceEdge];
+                        });
+                    }
                     const controller = startGenerationRequest(audioId, nodeId, nodeId, runController);
                     try {
-                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal }), generationConfig.audioFormat);
+                        const audioBlob = await generateCanvasAudio(
+                            generationConfig,
+                            audioModeValue,
+                            {
+                                prompt: effectivePrompt,
+                                voiceDescription: generationConfig.audioVoiceDescription,
+                                lyrics: generationConfig.audioLyrics,
+                                language: generationConfig.audioLanguage,
+                                maxDuration: generationConfig.audioMaxDuration,
+                                seed: generationConfig.audioSeed,
+                                referenceAudio: cloneReference?.storageKey || cloneReference?.url,
+                            },
+                            { signal: controller.signal },
+                        );
+                        const audio = await storeGeneratedAudio(audioBlob, generationConfig.audioFormat);
+                        // 兜底告警（如缺音色描述）只在本次生成提示一次。
+                        const audioWarnings = takeAudioWarnings();
+                        if (audioWarnings.length) message.warning(audioWarnings.join("；"));
                         setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig) } } : node)));
                     } finally {
                         finishGenerationRequest(audioId, controller);
@@ -4115,7 +4178,7 @@ function InfiniteCanvasPage() {
                           ...(savedImageMetadata.outpaint ? { outpaint: savedImageMetadata.outpaint } : {}),
                           count: "1",
                       }
-                    : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
+                    : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : isAudioNodeType(node.type) ? "audio" : "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
@@ -4180,8 +4243,28 @@ function InfiniteCanvasPage() {
                     }, context?.referenceVideos || [], context?.referenceAudios || []);
                     return;
                 }
-                if (node.type === CanvasNodeType.Audio) {
-                    const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal }), generationConfig.audioFormat);
+                if (isAudioNodeType(node.type)) {
+                    const audioMode = normalizeAudioModeValue(generationConfig.audioMode || "");
+                    // 音色克隆重试沿用连入的参考音频；取不到时给出明确错误而不是静默换音色。
+                    const referenceAudio = audioMode === "voice-clone" ? (context?.referenceAudios?.[0]?.storageKey || context?.referenceAudios?.[0]?.url || node.metadata?.references?.[0]) : undefined;
+                    if (audioMode === "voice-clone" && !referenceAudio) throw new Error(t("apiErrors.audioReferenceRequired"));
+                    const audioBlob = await generateCanvasAudio(
+                        generationConfig,
+                        audioMode,
+                        {
+                            prompt,
+                            voiceDescription: generationConfig.audioVoiceDescription,
+                            lyrics: generationConfig.audioLyrics,
+                            language: generationConfig.audioLanguage,
+                            maxDuration: generationConfig.audioMaxDuration,
+                            seed: generationConfig.audioSeed,
+                            referenceAudio,
+                        },
+                        { signal: controller.signal },
+                    );
+                    const audio = await storeGeneratedAudio(audioBlob, generationConfig.audioFormat);
+                    const audioWarnings = takeAudioWarnings();
+                    if (audioWarnings.length) message.warning(audioWarnings.join("；"));
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt, ...buildAudioGenerationMetadata(generationConfig) } } : item)));
                     return;
                 }
@@ -4374,6 +4457,15 @@ function InfiniteCanvasPage() {
                     },
                 ]);
                 setSelectedNodeIds(new Set([id]));
+            } else if (payload.kind === "audio") {
+                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const node = {
+                    ...createCanvasNode(CanvasNodeType.Audio, center, { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS }),
+                    title: payload.title,
+                };
+                setNodes((prev) => [...prev, node]);
+                setSelectedNodeIds(new Set([node.id]));
+                setSelectedConnectionId(null);
             } else {
                 insertAssistantImage({ id: `asset-${Date.now()}`, prompt: payload.title, dataUrl: payload.dataUrl, storageKey: payload.storageKey });
             }

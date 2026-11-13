@@ -8,7 +8,7 @@ import type { NodeGenerationInput } from "@/components/canvas/canvas-node-genera
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, isAudioNodeType } from "@/types/canvas";
 
 export function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
@@ -48,7 +48,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
         nodes.map(async (node) => {
             const metadata = node.metadata;
             const content = metadata?.content;
-            if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && metadata?.storageKey) return { ...node, metadata: { ...metadata, content: await resolveMediaUrl(metadata.storageKey, content) } };
+            if ((node.type === CanvasNodeType.Video || isAudioNodeType(node.type)) && metadata?.storageKey) return { ...node, metadata: { ...metadata, content: await resolveMediaUrl(metadata.storageKey, content) } };
             if (node.type !== CanvasNodeType.Image || !metadata || !content) return node;
             const images = await Promise.all(
                 (metadata.images || []).map(async (image) => {
@@ -135,6 +135,14 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
+        // 本地音频三种功能：这些字段必须显式带过来，否则生成时会被白名单丢掉，
+        // 表现就是「面板里填了音色描述，但 ComfyUI 收到的是空值」。
+        audioMode: node?.metadata?.audioMode || config.audioMode || defaultConfig.audioMode,
+        audioVoiceDescription: node?.metadata?.audioVoiceDescription ?? config.audioVoiceDescription ?? "",
+        audioLyrics: node?.metadata?.audioLyrics ?? config.audioLyrics ?? "",
+        audioLanguage: node?.metadata?.audioLanguage || config.audioLanguage || defaultConfig.audioLanguage,
+        audioMaxDuration: node?.metadata?.audioMaxDuration || config.audioMaxDuration || defaultConfig.audioMaxDuration,
+        audioSeed: node?.metadata?.audioSeed ?? config.audioSeed ?? "",
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
         params: Object.keys(params).length ? params : undefined,
     };

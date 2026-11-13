@@ -187,6 +187,24 @@ export type PromptCapabilities = {
     engines: Record<string, PromptEngineCapability>;
 };
 
+/** 全部已注册工作流（含不依赖资源包的那些，例如音频工作流）。 */
+export type RegisteredWorkflow = {
+    id: string;
+    name: string;
+    label: string;
+    type: string;
+    description?: string;
+    enabled?: boolean;
+    availability?: { available?: boolean; problems?: Array<{ type?: string; message?: string }> };
+};
+
+export async function fetchRegisteredWorkflows(): Promise<RegisteredWorkflow[]> {
+    const response = await gatewayFetch(`${gatewayRoot}/api/workflows`, { headers: { Accept: "application/json" } });
+    const data = await readJson(response);
+    if (!response.ok || data.ok === false) throw new Error(errorMessage(data, `读取工作流列表失败（HTTP ${response.status}）`));
+    return Array.isArray(data.workflows) ? (data.workflows as RegisteredWorkflow[]) : [];
+}
+
 export type ResourceStatus = {
     ok: boolean;
     loadedAt?: string;
@@ -359,6 +377,18 @@ export async function setWorkflowVisibility(id: string, enabled: boolean): Promi
     });
     const data = await readJson(response);
     if (!response.ok || data.ok === false) throw new Error(errorMessage(data, `切换工作流状态失败（HTTP ${response.status}）`));
+}
+
+/** 设置工作流显示名；传空字符串恢复 registry 默认名。 */
+export async function setWorkflowLabel(id: string, label: string): Promise<{ label: string; custom: boolean }> {
+    const response = await gatewayFetch(`${gatewayRoot}/api/workflows/${encodeURIComponent(id)}/label`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+    });
+    const data = await readJson(response);
+    if (!response.ok || data.ok === false) throw new Error(errorMessage(data, `修改工作流显示名失败（HTTP ${response.status}）`));
+    return { label: String(data.label || ""), custom: data.custom === true };
 }
 
 export async function cancelResourceJob(id: string): Promise<ResourceJob> {

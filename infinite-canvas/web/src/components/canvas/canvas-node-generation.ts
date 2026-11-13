@@ -3,7 +3,7 @@ import i18n from "@/i18n";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
-import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, isAudioNodeType } from "@/types/canvas";
 import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { appendGenerationText } from "@/lib/canvas/generation-prompt";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -42,11 +42,14 @@ type NodeGenerationGroupInput = {
 
 export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGroupInput;
 
-export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string): NodeGenerationContext {
+export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, options?: { audio?: boolean }): NodeGenerationContext {
     const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
     const sourceNode = nodes.find((node) => node.id === nodeId);
+    // 音频只用用户自己填写的内容：拼接上游文本会带上【文本N】这类固定标签，
+    // 朗读时会被念出来、音乐会把它当歌词。音频节点自身，或以音频模式生成，都算音频。
+    const isAudio = Boolean(options?.audio) || sourceNode?.type === CanvasNodeType.Audio;
     if (sourceNode?.type === CanvasNodeType.Config && Boolean(sourceNode.metadata?.composerContent?.trim())) {
-        return buildComposerGenerationContext(inputs, prompt);
+        return buildComposerGenerationContext(inputs, prompt, { stripTextBlocks: isAudio });
     }
 
     const resourceInputs = flattenGenerationInputs(inputs);
@@ -58,7 +61,7 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     const loras = resourceInputs.flatMap((input) => (input.type === "lora" ? input.loras || [] : []));
 
     return {
-        prompt: appendGenerationText(prompt, upstreamText),
+        prompt: isAudio ? prompt : appendGenerationText(prompt, upstreamText),
         referenceImages,
         referenceVideos,
         referenceAudios,
@@ -101,7 +104,7 @@ export function collectNodeLoras(nodeId: string, nodes: CanvasNodeData[], connec
     return [];
 }
 
-function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: string): NodeGenerationContext {
+function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: string, { stripTextBlocks = false }: { stripTextBlocks?: boolean } = {}): NodeGenerationContext {
     const inputByNodeId = new Map(inputs.map((input) => [input.nodeId, input]));
     const selectedInputs: NodeGenerationResourceInput[] = [];
     const labelByNodeId = new Map<string, string>();
@@ -125,6 +128,8 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
                     if (resource.type === "text") textBlocks.push(textBlock(label, resource.text || ""));
                     else selectedInputs.push(resource);
                 }
+                // 音频只保留用户自己写的文本：不插入【文本N】标记，也不展开上游文本内容。
+                if (stripTextBlocks) return "";
                 return resource.type === "text" ? `【${label}】` : label;
             });
             nextPrompt += labels.join("、");
@@ -133,7 +138,12 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
     }
 
     nextPrompt += prompt.slice(lastIndex);
-    if (textBlocks.length) nextPrompt = `${nextPrompt.trim()}\n\n${textBlocks.join("\n\n")}`;
+    if (stripTextBlocks) {
+        // 去掉为 @令牌 留下的多余分隔符，避免朗读/歌词里出现「、、」或空行。
+        nextPrompt = nextPrompt.replace(/[、,，]\s*(?=[、,，]|$)/g, "").replace(/^\s*[、,，]\s*/gm, "").trim();
+    } else if (textBlocks.length) {
+        nextPrompt = `${nextPrompt.trim()}\n\n${textBlocks.join("\n\n")}`;
+    }
     const referenceImages = selectedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
     const referenceVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
@@ -266,8 +276,13 @@ function readReferenceVideo(node: CanvasNodeData): ReferenceVideo | null {
     };
 }
 
+/** 把音频节点自身的产物读成参考音频：音色克隆可以直接拿当前节点当参考音色。 */
+export function audioReferenceFromNode(node: CanvasNodeData | undefined): ReferenceAudio | null {
+    return node ? readReferenceAudio(node) : null;
+}
+
 function readReferenceAudio(node: CanvasNodeData): ReferenceAudio | null {
-    if (node.type !== CanvasNodeType.Audio || !node.metadata?.content) return null;
+    if (!isAudioNodeType(node.type) || !node.metadata?.content) return null;
     return {
         id: node.id,
         name: mediaFileName(node.title, node.id, "mp3"),

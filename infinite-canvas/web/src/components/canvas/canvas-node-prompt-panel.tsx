@@ -4,23 +4,25 @@ import { Button, message, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { BaseModelPicker, ModelPicker, WorkflowModelPicker } from "@/components/model-picker";
-import { channelModelOf, defaultConfig, modelImageInputs, modelOptionName, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { channelModelOf, defaultConfig, modelImageInputs, modelOptionLabel, modelOptionName, resolveModelForCapability, selectableModelsByCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
+import { AudioInlineFields, AudioModeSelect } from "@/components/audio-settings-panel";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
-import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData, isAudioNodeType } from "@/types/canvas";
+import { normalizeAudioModeValue, normalizeAudioSeedValue, normalizeMusicDurationValue, audioModeForModel, audioModelForMode } from "@/lib/audio-generation";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveCanvasReferenceImages } from "@/lib/canvas/canvas-resource-references";
 import { requestImageCaption, requestImagePromptOptimize, requestPromptOptimize, type ImageCaptionEngine, type PromptOptimizeMode } from "@/services/api/image";
+import { localGatewayRoot } from "@/services/api/image";
 import { videoModelForWorkflow, videoModelModePatch, baseVideoWorkflowId, resolveVideoWorkflowMode } from "@/lib/canvas/video-model-mode";
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { PromptOptimizeOptions } from "./prompt-optimize-options";
-import { abortCaptionJob, hasCaptionJob, registerCaptionJob, releaseCaptionJob } from "@/lib/canvas/caption-jobs";
-import { abortPromptOptimizeJob, hasPromptOptimizeJob, registerPromptOptimizeJob, releasePromptOptimizeJob } from "@/lib/canvas/prompt-optimize-jobs";
+import { abortCaptionJob, hasCaptionJob, registerCaptionJob, releaseCaptionJob } from "@/lib/canvas/caption-jobs";import { abortPromptOptimizeJob, hasPromptOptimizeJob, registerPromptOptimizeJob, releasePromptOptimizeJob } from "@/lib/canvas/prompt-optimize-jobs";
 import { usePromptCapabilities } from "@/hooks/use-prompt-capabilities";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
@@ -90,6 +92,20 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const isH3Reference = workflowId === "video-h3-ref2va" || workflowId === "video-h3-character-swap";
     const isCharacterSwap = workflowId === "video-h3-character-swap";
     const sourceVideoReference = mentionReferences.find((reference) => reference.kind === "video");
+    // 音色克隆需要一段参考音频：连入的音频节点优先，没连就用本节点已有的音频，执行时另开新节点。
+    // 注意要排除节点自身——mentionReferences 在没有任何上游时会回落到节点自己。
+    const hasAudioReference = mentionReferences.some((reference) => reference.kind === "audio" && reference.nodeId !== node.id);
+    const hasOwnAudio = Boolean(node.metadata?.content);
+    const canCloneFromNode = hasAudioReference || hasOwnAudio;
+    // 本地网关的音频工作流有必填项（音色描述 / 参考音频），需要在提交前给出引导。
+    const isLocalAudioMode = mode === "audio" && Boolean(localGatewayRoot(config.baseUrl));
+    const audioModeValue = normalizeAudioModeValue(config.audioMode || "");
+    const audioVoiceDescriptionMissing = isLocalAudioMode && audioModeValue === "voice-design" && !(config.audioVoiceDescription || "").trim();
+    // 音频卡片里的「工作流」下拉：本地网关的音频工作流模型，带渠道前缀。
+    const audioWorkflowOptions = useMemo(
+        () => selectableModelsByCapability(globalConfig, "audio").map((value) => ({ value, label: modelOptionLabel(globalConfig, value) })),
+        [globalConfig],
+    );
     const sourceVideoNode = sourceVideoReference ? nodes.find((item) => item.id === sourceVideoReference.nodeId) : undefined;
     const sourceVideoDurationSeconds = sourceVideoNode?.metadata?.durationMs && sourceVideoNode.metadata.durationMs > 0 ? sourceVideoNode.metadata.durationMs / 1000 : undefined;
     const isH3 = mode === "video" && (workflowId === "video-h3-t2v" || workflowId === "video-h3-frames" || workflowId === "video-h3-fast" || isH3Reference);
@@ -216,12 +232,32 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         if (!textVideoHasReferences && node.metadata?.refsWarningDismissed) onConfigChange(node.id, { refsWarningDismissed: undefined });
     }, [node.id, node.metadata?.refsWarningDismissed, onConfigChange, textVideoHasReferences]);
 
+    // 操作类型与模型必须是同一条音频工作流：卡片上切了类型但模型没跟上时，网关会直接拒绝。
+    useEffect(() => {
+        if (!isLocalAudioMode || audioModeForModel(config.model) === audioModeValue) return;
+        const nextModel = audioModelForMode(audioModeValue, audioWorkflowOptions.map((option) => option.value));
+        if (nextModel && nextModel !== config.model) onConfigChange(node.id, { model: nextModel });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isLocalAudioMode, audioModeValue, config.model, audioWorkflowOptions]);
+
     const submit = () => {
         const text = draft.trim();
         if (!text || isRunning) return;
         if (textVideoHasReferences) {
             message.warning(t("canvas.promptPanel.videoTextRefsWarning"));
             return;
+        }
+        // 本地音频工作流的必填项：在提交前拦住并引导，而不是让网关返回 400。
+        if (mode === "audio" && isLocalAudioMode) {
+            const audioMode = normalizeAudioModeValue(config.audioMode || "");
+            if (audioMode === "voice-design" && !(config.audioVoiceDescription || "").trim()) {
+                message.warning(t("canvas.promptPanel.audioVoiceDescriptionRequired"));
+                return;
+            }
+            if (audioMode === "voice-clone" && !canCloneFromNode) {
+                message.warning(t("apiErrors.audioReferenceRequired"));
+                return;
+            }
         }
         commitPrompt(draft);
         if (mode === "image" && workflowId === "image-qwen21") {
@@ -451,6 +487,11 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                 placeholder={promptPlaceholder}
             />
 
+            {/* 音频的内容字段（音色描述 / 声音指令 / 歌词）直接摆在卡片上，随操作类型切换。 */}
+            {mode === "audio" ? (
+                <AudioInlineFields config={config} theme={theme} localMode={isLocalAudioMode} hasReferenceAudio={hasAudioReference} hasOwnAudio={hasOwnAudio} workflowValue={config.model} onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+            ) : null}
+
             <div className="mt-2 flex min-w-0 items-center gap-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
@@ -522,8 +563,33 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                         </>
                     ) : mode === "audio" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                            {/* 本地音频：操作类型放卡片上（内容字段随类型切换），这里只留工作流与参数入口。 */}
+                            {isLocalAudioMode ? null : (
+                                <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                            )}
+                            {isLocalAudioMode ? (
+                                <AudioModeSelect
+                                    config={config}
+                                    theme={theme}
+                                    className="w-[112px] shrink-0"
+                                    onChange={(nextMode) => {
+                                        const nextModel = audioModelForMode(nextMode, audioWorkflowOptions.map((option) => option.value));
+                                        onConfigChange(node.id, { audioMode: nextMode, ...(nextModel ? { model: nextModel } : {}) });
+                                    }}
+                                />
+                            ) : null}
+                            <CanvasAudioSettingsPopover
+                                config={config}
+                                compact={isLocalAudioMode}
+                                buttonClassName={isLocalAudioMode ? "!h-9 !w-9 !min-w-9 !rounded-full !p-0" : "!h-10 !max-w-[200px] !justify-start !rounded-full !px-3"}
+                                onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))}
+                                workflowOptions={audioWorkflowOptions}
+                                onWorkflowChange={(model) => {
+                                    const nextMode = audioModeForModel(model);
+                                    onConfigChange(node.id, nextMode ? { model, audioMode: nextMode } : { model });
+                                }}
+                                onMissingConfig={() => openConfigDialog(true)}
+                            />
                         </>
                     ) : (
                         <>
@@ -553,7 +619,19 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     className={`!h-10 shrink-0 !rounded-full ${isRunning || captionRunning ? "!min-w-10 !px-2" : "!min-w-16 !px-3"}`}
                     danger={isRunning || captionRunning}
                     disabled={!isRunning && !captionRunning && !(captionReady ? imageReferences.length : draft.trim())}
-                    title={captionRunning ? t("canvas.promptPanel.captionStop") : captionReady ? (imageReferences.length ? t("canvas.promptPanel.captionHint") : t("canvas.promptPanel.captionNoImage")) : isRunning ? t("canvas.promptPanel.stop") : undefined}
+                    title={
+                        captionRunning
+                            ? t("canvas.promptPanel.captionStop")
+                            : captionReady
+                              ? imageReferences.length
+                                  ? t("canvas.promptPanel.captionHint")
+                                  : t("canvas.promptPanel.captionNoImage")
+                              : isRunning
+                                ? t("canvas.promptPanel.stop")
+                                : audioVoiceDescriptionMissing
+                                  ? t("canvas.promptPanel.audioVoiceDescriptionRequired")
+                                  : undefined
+                    }
                     onClick={() => {
                         if (isRunning) {
                             onStop(node.id);
@@ -753,7 +831,7 @@ function OriginalPromptDisclosure({ text, label, hint, theme }: { text: string; 
 }
 
 function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
-    return type === CanvasNodeType.Text ? "text" : type === CanvasNodeType.Video ? "video" : type === CanvasNodeType.Audio ? "audio" : "image";
+    return type === CanvasNodeType.Text ? "text" : type === CanvasNodeType.Video ? "video" : isAudioNodeType(type) ? "audio" : "image";
 }
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
@@ -781,6 +859,12 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
+        audioMode: node.metadata?.audioMode || globalConfig.audioMode || defaultConfig.audioMode,
+        audioVoiceDescription: node.metadata?.audioVoiceDescription ?? globalConfig.audioVoiceDescription ?? "",
+        audioLyrics: node.metadata?.audioLyrics ?? globalConfig.audioLyrics ?? "",
+        audioLanguage: node.metadata?.audioLanguage || globalConfig.audioLanguage || defaultConfig.audioLanguage,
+        audioMaxDuration: node.metadata?.audioMaxDuration || globalConfig.audioMaxDuration || defaultConfig.audioMaxDuration,
+        audioSeed: node.metadata?.audioSeed ?? globalConfig.audioSeed ?? "",
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
         seed: node.metadata?.seed || globalConfig.seed || "",
         seedFixed: node.metadata?.seedFixed ?? globalConfig.seedFixed ?? "false",
@@ -802,5 +886,11 @@ function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
     if (key === "audioVoice") return { audioVoice: value };
     if (key === "audioFormat") return { audioFormat: value };
     if (key === "audioSpeed") return { audioSpeed: value };
+    if (key === "audioMode") return { audioMode: normalizeAudioModeValue(value) };
+    if (key === "audioVoiceDescription") return { audioVoiceDescription: value };
+    if (key === "audioLyrics") return { audioLyrics: value };
+    if (key === "audioLanguage") return { audioLanguage: value };
+    if (key === "audioMaxDuration") return { audioMaxDuration: normalizeMusicDurationValue(value) };
+    if (key === "audioSeed") return { audioSeed: normalizeAudioSeedValue(value) };
     return { audioInstructions: value };
 }

@@ -62,6 +62,13 @@ export type AiConfig = {
     audioFormat: string;
     audioSpeed: string;
     audioInstructions: string;
+    // 本地网关音频三种子功能（音色设计 / 音色克隆 / 音乐生成）。
+    audioMode?: string;
+    audioVoiceDescription?: string;
+    audioLyrics?: string;
+    audioLanguage?: string;
+    audioMaxDuration?: string;
+    audioSeed?: string;
     videoSeconds: string;
     vquality: string;
     videoGenerateAudio: string;
@@ -168,6 +175,12 @@ const cloudDefaultConfig: AiConfig = {
     audioFormat: "mp3",
     audioSpeed: "1",
     audioInstructions: "",
+    audioMode: "voice-design",
+    audioVoiceDescription: "",
+    audioLyrics: "",
+    audioLanguage: "Auto",
+    audioMaxDuration: "60",
+    audioSeed: "",
     videoSeconds: "6",
     vquality: "720",
     videoGenerateAudio: "true",
@@ -575,9 +588,12 @@ export const useConfigStore = create<ConfigStore>()(
                 const models = modelOptionsFromChannels(channels);
                 const imageOptions = channels.flatMap((channel) => channel.models.filter((model) => model.capability === "image").map((model) => encodeChannelModel(channel.id, model.name)));
                 const videoOptions = channels.flatMap((channel) => channel.models.filter((model) => model.capability === "video").map((model) => encodeChannelModel(channel.id, model.name)));
+                const audioOptions = channels.flatMap((channel) => channel.models.filter((model) => model.capability === "audio").map((model) => encodeChannelModel(channel.id, model.name)));
                 const pickModel = (current: string, options: string[]) => (options.includes(current) ? current : options[0] || "");
                 const imageModel = LOCAL_ONLY ? pickModel(config.imageModel || config.model, imageOptions) : normalizeModelOptionValue(config.imageModel || config.model, channels);
                 const videoModel = LOCAL_ONLY ? pickModel(config.videoModel, videoOptions) : normalizeModelOptionValue(config.videoModel, channels);
+                // 本地模式也必须选中音频模型，否则音频节点的三种功能都会提示「请先配置音频模型」。
+                const audioModel = LOCAL_ONLY ? pickModel(config.audioModel, audioOptions) : normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels);
                 const normalizedCloud = normalizePromptCloudConfig(config);
                 return {
                     ...current,
@@ -592,7 +608,7 @@ export const useConfigStore = create<ConfigStore>()(
                         imageModel,
                         videoModel,
                         textModel: LOCAL_ONLY ? "" : normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: LOCAL_ONLY ? "" : normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+                        audioModel,
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
@@ -791,6 +807,7 @@ export function applyLocalGatewayModels(
     const channels = config.channels.map((item) => (item.id === channel.id ? { ...item, apiKey: nextApiKey, baseUrl, models: nextModels } : item));
     const imageOptions = channels.flatMap((item) => item.models.filter((model) => model.capability === "image").map((model) => encodeChannelModel(item.id, model.name)));
     const videoOptions = channels.flatMap((item) => item.models.filter((model) => model.capability === "video").map((model) => encodeChannelModel(item.id, model.name)));
+    const audioOptions = channels.flatMap((item) => item.models.filter((model) => model.capability === "audio").map((model) => encodeChannelModel(item.id, model.name)));
     const pick = (current: string, options: string[]) => (options.includes(current) ? current : options[0] || "");
     const pickImage = (current: string) => {
         if (imageOptions.includes(current)) return current;
@@ -808,6 +825,7 @@ export function applyLocalGatewayModels(
             models: modelOptionsFromChannels(channels),
             imageModel: input.clear ? "" : pickImage(config.imageModel),
             videoModel: input.clear ? "" : pick(config.videoModel, videoOptions),
+            audioModel: input.clear ? "" : pick(config.audioModel || "", audioOptions),
             model: input.clear ? "" : pickImage(config.model),
             baseUrl,
             apiKey: nextApiKey,

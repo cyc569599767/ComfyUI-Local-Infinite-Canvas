@@ -18,6 +18,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Config]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.config"); } },
     [CanvasNodeType.Video]: { width: 420, height: 236, get title() { return i18n.t("canvas.nodeTypes.video"); } },
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
+    [CanvasNodeType.VoiceDesign]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.voiceDesign"); } },
     [CanvasNodeType.FreeCard]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.freeCard"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
@@ -42,6 +43,11 @@ export const NODE_SPECS = {
     [CanvasNodeType.Audio]: {
         width: 340, height: 120, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Audio].title; },
         metadata: { content: "", status: "idle" },
+    },
+    // 音色设计与空音频节点同构，差别只在默认模式锁定为 voice-design。
+    [CanvasNodeType.VoiceDesign]: {
+        width: 340, height: 120, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.VoiceDesign].title; },
+        metadata: { content: "", status: "idle", audioMode: "voice-design" },
     },
     [CanvasNodeType.FreeCard]: {
         width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.FreeCard].title; },

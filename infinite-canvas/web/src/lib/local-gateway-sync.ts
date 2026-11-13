@@ -49,7 +49,7 @@ function asVariantLabels(value: unknown): Record<string, string> | undefined {
 
 function syncableCapability(name: string): ModelCapability | undefined {
     const capability = guessCapability(name);
-    return capability === "image" || capability === "video" ? capability : undefined;
+    return capability === "image" || capability === "video" || capability === "audio" ? capability : undefined;
 }
 
 /** 旧后端没有 revision/setup 时也必须能解析；缺失字段一律视为未知，不猜测。 */
@@ -67,7 +67,7 @@ export function parseGatewayModelsPayload(payload: unknown): GatewayModelsSnapsh
         if (!entry) continue;
         const name = String(entry.id ?? "").trim();
         const meta = asRecord(entry.metadata) || {};
-        const capability = meta.type === "image" || meta.type === "video" ? meta.type : syncableCapability(name);
+        const capability = meta.type === "image" || meta.type === "video" || meta.type === "audio" ? meta.type : syncableCapability(name);
         if (!name || !capability) continue;
         models.push({
             name,

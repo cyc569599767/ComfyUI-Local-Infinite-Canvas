@@ -270,7 +270,7 @@ async function searchPrompts(input: SiteToolInput) {
 function listAssets(input: SiteToolInput) {
     const { assets, hydrated } = useAssetStore.getState();
     if (!hydrated) throw new Error(siteText("assetsLoading"));
-    const kind = input.kind === "text" || input.kind === "image" || input.kind === "video" ? input.kind : "all";
+    const kind = input.kind === "text" || input.kind === "image" || input.kind === "video" || input.kind === "audio" ? input.kind : "all";
     const keyword = String(input.keyword || "").trim().toLowerCase();
     const filtered = assets.filter((asset) => {
         if (kind !== "all" && asset.kind !== kind) return false;
@@ -289,6 +289,8 @@ function listAssets(input: SiteToolInput) {
         updatedAt: asset.updatedAt,
         coverUrl: asset.coverUrl || undefined,
         content: asset.kind === "text" ? asset.data.content : undefined,
+        url: asset.kind === "audio" || asset.kind === "video" ? asset.data.url : undefined,
+        durationMs: asset.kind === "audio" ? asset.data.durationMs : undefined,
     }));
     return { total: filtered.length, page, pageSize, items };
 }

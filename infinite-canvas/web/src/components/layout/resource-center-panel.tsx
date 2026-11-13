@@ -1,5 +1,5 @@
-import { App, Button, Checkbox, Progress, Select, Tag, Tooltip } from "antd";
-import { AlertTriangle, Bot, ChevronDown, Download, HardDriveDownload, RefreshCw, Server, X, XCircle } from "lucide-react";
+import { App, Button, Checkbox, Input, Modal, Progress, Select, Tag, Tooltip } from "antd";
+import { AlertTriangle, Bot, ChevronDown, Download, HardDriveDownload, Pencil, RefreshCw, Server, X, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -13,6 +13,8 @@ import {
     refreshResourceStatus,
     setResourceReplacement,
     setPackMainModel,
+    fetchRegisteredWorkflows,
+    setWorkflowLabel,
     setWorkflowVisibility,
     fetchAssistantRuntimeStatus,
     ensureAssistantRuntime,
@@ -21,6 +23,7 @@ import {
     type ResourceItem,
     type ResourceJob,
     type ResourcePack,
+    type RegisteredWorkflow,
     type ResourceStatus,
 } from "@/services/api/resources";
 import { isGatewayDown } from "@/services/api/gateway-status";
@@ -100,6 +103,7 @@ const copyByLocale = {
         workflowDisabled: "已屏蔽",
         canvasEntry: "画布入口",
         visibilityHint: "勾选后才会出现在模型选择；不删除已下载资源",
+        editLabel: "修改显示名", editLabelTitle: "修改工作流显示名", editLabelPlaceholder: "输入新的显示名", editLabelHint: "只改显示名，不影响工作流本身；留空保存可恢复默认名。", labelOk: "保存", labelCancel: "取消", allWorkflowsSection: "全部工作流", allWorkflowsHint: "含不依赖资源包的工作流（如音频）",
         plugin: "插件",
         bakeRequires: "本地烘焙，依赖",
         optionalHint: "LoRA、低显存底模等，按需安装",
@@ -248,6 +252,7 @@ const copyByLocale = {
         workflowDisabled: "Hidden",
         canvasEntry: "Canvas entry",
         visibilityHint: "Only checked workflows appear in the model picker; downloaded resources are kept",
+        editLabel: "Rename", editLabelTitle: "Rename workflow", editLabelPlaceholder: "Enter a new display name", editLabelHint: "Only the display name changes; save an empty value to restore the default.", labelOk: "Save", labelCancel: "Cancel", allWorkflowsSection: "All workflows", allWorkflowsHint: "Includes workflows without pack dependencies (e.g. audio)",
         plugin: "Plugin",
         bakeRequires: "Local bake requires",
         optionalHint: "LoRAs, low-VRAM checkpoints, and other extras",
@@ -659,6 +664,8 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
         try {
             const next = refresh ? await refreshResourceStatus() : await fetchResourceStatus();
             applyStatus(next);
+            // 工作流全量列表独立加载：资源中心主体只关心资源包，改名需要覆盖不依赖资源包的工作流。
+            void fetchRegisteredWorkflows().then(setAllWorkflows).catch(() => undefined);
         } catch (loadError) {
             setError(loadError instanceof Error ? loadError.message : String(loadError));
         } finally {
@@ -960,6 +967,29 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
             window.dispatchEvent(new Event("local-gateway-refresh-models"));
         } catch (toggleError) {
             showError(toggleError);
+        }
+    };
+
+    // 工作流显示名：写的是用户覆盖层，不改 registry.json，升级时不会丢。
+    const [allWorkflows, setAllWorkflows] = useState<RegisteredWorkflow[]>([]);
+    const [labelEditing, setLabelEditing] = useState<{ id: string; draft: string } | null>(null);
+    const openLabelEditor = (id: string, current: string) => setLabelEditing({ id, draft: current });
+    const saveWorkflowLabel = async () => {
+        if (!labelEditing) return;
+        const { id, draft } = labelEditing;
+        try {
+            const result = await setWorkflowLabel(id, draft.trim());
+            setStatus((current) => current ? {
+                ...current,
+                packs: current.packs.map((pack) => ({
+                    ...pack,
+                    workflowDependencies: pack.workflowDependencies?.map((workflow) => (workflow.id === id ? { ...workflow, label: result.label } : workflow)),
+                })),
+            } : current);
+            window.dispatchEvent(new Event("local-gateway-refresh-models"));
+            setLabelEditing(null);
+        } catch (labelError) {
+            showError(labelError);
         }
     };
 
@@ -1315,6 +1345,19 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
                                                                 <button type="button" className="min-w-0 flex-1 text-left" onClick={() => toggleWorkflow(workflow.id)} aria-expanded={workflowExpanded}>
                                                                     <div className="flex flex-wrap items-center gap-2">
                                                                         <span className={`text-xs font-medium ${workflow.enabled === false ? "text-stone-400 dark:text-stone-500" : "text-stone-800 dark:text-stone-100"}`}>{workflow.label}</span>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="rounded p-0.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:text-stone-500 dark:hover:bg-white/10 dark:hover:text-stone-300"
+                                                                            aria-label={copy.editLabel}
+                                                                            title={copy.editLabelHint}
+                                                                            onClick={(event) => {
+                                                                                // 阻止冒泡：编辑名字不应触发整行的展开/收起。
+                                                                                event.stopPropagation();
+                                                                                openLabelEditor(workflow.id, workflow.label || "");
+                                                                            }}
+                                                                        >
+                                                                            <Pencil className="size-3" />
+                                                                        </button>
                                                                         {workflow.recommended ? <Tag color="blue" className="m-0">{copy.recommended}</Tag> : null}
                                                                         {workflow.missingSize ? <span className="text-[10px] text-stone-400 dark:text-stone-500">{formatBytes(workflow.missingSize)}</span> : null}
                                                                         {workflowTag}
@@ -1476,6 +1519,34 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
                 })}
             </div>
 
+            {allWorkflows.length ? (
+                <div className="rounded-2xl bg-stone-100/60 p-2.5 dark:bg-white/[0.03]">
+                    <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="font-medium text-stone-600 dark:text-stone-300">{copy.allWorkflowsSection}</span>
+                        <span className="text-stone-400 dark:text-stone-500">{copy.allWorkflowsHint}</span>
+                    </div>
+                    <div className="thin-scrollbar max-h-64 space-y-1 overflow-y-auto">
+                        {allWorkflows.map((workflow) => (
+                            <div key={workflow.id} className="flex items-center gap-2 rounded-lg border border-stone-200 bg-white/60 px-2 py-1.5 dark:border-stone-800 dark:bg-white/[0.02]">
+                                <div className="min-w-0 flex-1">
+                                    <div className={`truncate text-xs font-medium ${workflow.enabled === false ? "text-stone-400 dark:text-stone-500" : "text-stone-800 dark:text-stone-100"}`}>{workflow.label}</div>
+                                    <div className="truncate text-[10px] text-stone-400 dark:text-stone-500">{workflow.id}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    className="shrink-0 rounded p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:text-stone-500 dark:hover:bg-white/10 dark:hover:text-stone-300"
+                                    aria-label={copy.editLabel}
+                                    title={copy.editLabelHint}
+                                    onClick={() => openLabelEditor(workflow.id, workflow.label || "")}
+                                >
+                                    <Pencil className="size-3" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+
             <div data-onboarding="resource-problem" className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900/60 dark:bg-amber-950/20">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-amber-800 dark:text-amber-200">
@@ -1490,6 +1561,26 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
             </div>
 
             {footer}
+            <Modal
+                open={Boolean(labelEditing)}
+                title={copy.editLabelTitle}
+                okText={copy.labelOk}
+                cancelText={copy.labelCancel}
+                onOk={() => void saveWorkflowLabel()}
+                onCancel={() => setLabelEditing(null)}
+                destroyOnHidden
+            >
+                <Input
+                    value={labelEditing?.draft ?? ""}
+                    placeholder={copy.editLabelPlaceholder}
+                    maxLength={64}
+                    showCount
+                    autoFocus
+                    onChange={(event) => setLabelEditing((current) => (current ? { ...current, draft: event.target.value } : current))}
+                    onPressEnter={() => void saveWorkflowLabel()}
+                />
+                <div className="mt-2 text-xs text-stone-500 dark:text-stone-400">{copy.editLabelHint}</div>
+            </Modal>
         </div>
     );
 }

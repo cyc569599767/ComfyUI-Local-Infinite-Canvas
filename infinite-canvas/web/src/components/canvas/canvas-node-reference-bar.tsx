@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { getImagePreviewRevision, previewUrlFor, subscribeImagePreviews } from "@/services/image-storage";
-import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, isAudioNodeType } from "@/types/canvas";
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
 
 export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, leadingNode, inheritedNodes = [], onDisconnect, onStartSelection, addDisabled = false, addDisabledHint }: { nodeId: string; nodes: CanvasNodeData[]; connectedNodes: CanvasNodeData[]; leadingNode?: CanvasNodeData; inheritedNodes?: CanvasNodeData[]; onDisconnect?: (fromNodeId: string, toNodeId: string) => void; onStartSelection?: (nodeId: string) => void; addDisabled?: boolean; addDisabledHint?: string }) {
@@ -63,7 +63,7 @@ function ReferencePreview({ node, content }: { node: CanvasNodeData; content?: s
     const resource = getNodeDefinition(node.type)?.resource?.(node);
     if ((resource?.kind === "image" || node.type === CanvasNodeType.Image) && content) return <img src={content} alt={node.title} className="max-h-52 w-72 rounded-lg object-contain" />;
     if ((resource?.kind === "video" || node.type === CanvasNodeType.Video) && content) return <video src={content} className="max-h-52 w-72 rounded-lg" muted controls />;
-    if ((resource?.kind === "audio" || node.type === CanvasNodeType.Audio) && content) return <audio src={content} className="w-72" controls />;
+    if ((resource?.kind === "audio" || isAudioNodeType(node.type)) && content) return <audio src={content} className="w-72" controls />;
     if (resource?.kind === "lora") return <div className="max-h-52 w-72 overflow-auto text-sm">{resource.loras?.map((lora) => `${lora.name} · ${lora.strength.toFixed(2)}`).join("\n") || node.title}</div>;
     return <div className="max-h-52 w-72 overflow-auto whitespace-pre-wrap text-sm">{resource?.text || node.metadata?.content || node.metadata?.prompt || node.title || t("canvas.references.empty")}</div>;
 }

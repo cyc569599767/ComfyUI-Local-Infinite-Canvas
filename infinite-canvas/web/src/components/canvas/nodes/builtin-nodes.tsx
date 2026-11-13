@@ -1,4 +1,4 @@
-import { Box, Download, FileText, Group, Image as ImageIcon, Layers3, Music2, Settings2, Sparkles, Video } from "lucide-react";
+import { Box, Download, FileText, Group, Image as ImageIcon, Layers3, Mic, Music2, Settings2, Sparkles, Video } from "lucide-react";
 import { message } from "antd";
 import { saveAs } from "file-saver";
 
@@ -9,7 +9,7 @@ import { registerNodeDefinitions } from "@/lib/canvas/node-registry";
 import { MODEL3D_DEFAULT_SIZE, MODEL3D_NODE_TYPE, STAGE3D_DEFAULT_SIZE, STAGE3D_NODE_TYPE } from "@/lib/canvas/model3d";
 import { Model3DNodeContent } from "@/components/canvas/model3d-node-content";
 import { Stage3DNodeContent } from "@/components/canvas/stage-3d-node-content";
-import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, isAudioNodeType, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-plugin";
 
 // Extensible metadata for built-in nodes, reusing NODE_SPECS for size and initial metadata.
@@ -17,7 +17,7 @@ import type { CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-pl
 function builtinResource(node: CanvasNodeData): CanvasNodeResource | null {
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return { kind: "image", url: node.metadata.content };
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return { kind: "video", url: node.metadata.content };
-    if (node.type === CanvasNodeType.Audio && node.metadata?.content) return { kind: "audio", url: node.metadata.content };
+    if (isAudioNodeType(node.type) && node.metadata?.content) return { kind: "audio", url: node.metadata.content };
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return { kind: "text", text: node.metadata.content || node.metadata.prompt };
     return null;
 }
@@ -83,6 +83,9 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Image, title: i18n.t("assets.kinds.image"), icon: <ImageIcon className={iconClass} />, minimapColor: "#10b981", keepAspectRatio: (node: CanvasNodeData) => !node.metadata?.freeResize, resource: builtinResource },
     { type: CanvasNodeType.Video, title: i18n.t("assets.kinds.video"), icon: <Video className={iconClass} />, minimapColor: "#f97316", keepAspectRatio: () => true, resource: builtinResource },
     { type: CanvasNodeType.Audio, title: i18n.t("assets.kinds.audio"), icon: <Music2 className={iconClass} />, minimapColor: "#a855f7", resource: builtinResource },
+    // 「音频生成」只从连接点右侧菜单和工具栏进入，空白处双击的「选择节点」菜单里不再列出它，
+    // 避免与普通「音频」节点并列时让人分不清该建哪个。
+    { type: CanvasNodeType.VoiceDesign, title: i18n.t("canvas.nodeTypes.voiceDesign"), icon: <Mic className={iconClass} />, minimapColor: "#c084fc", showInCreateMenu: false, resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.FreeCard, title: i18n.t("canvas.freeCard.title"), icon: <Sparkles className={iconClass} />, minimapColor: "#eab308", hasSourceHandle: false },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },

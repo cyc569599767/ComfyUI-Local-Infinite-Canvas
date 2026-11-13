@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
-import { ImageIcon, List, Music2, Settings2, Video, X } from "lucide-react";
+import { ImageIcon, List, Mic, Music2, Settings2, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
+import { connectionCreateTypes, connectionMenuDescriptionKey, connectionMenuShowsPlugins, connectionMenuSide, connectionMenuTitleKey, connectionMenuTitleTextKey } from "@/lib/canvas/connection-create-menu";
 import { isBuiltinNodeType, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { getNodeSpec } from "@/constant/canvas";
 import { CanvasNodeType, type ConnectionHandle, type Position } from "@/types/canvas";
@@ -11,6 +12,14 @@ import { CanvasNodeType, type ConnectionHandle, type Position } from "@/types/ca
 export type PendingConnectionCreate = {
     connection: ConnectionHandle;
     position: Position;
+};
+
+const MENU_ICONS: Record<string, React.ReactNode> = {
+    [CanvasNodeType.Text]: <List className="size-4" />,
+    [CanvasNodeType.Image]: <ImageIcon className="size-4" />,
+    [CanvasNodeType.Video]: <Video className="size-4" />,
+    [CanvasNodeType.Audio]: <Music2 className="size-4" />,
+    [CanvasNodeType.VoiceDesign]: <Mic className="size-4" />,
 };
 
 export function ConnectionCreateMenu({
@@ -27,31 +36,45 @@ export function ConnectionCreateMenu({
     const theme = useCanvasTheme();
     const { t } = useTranslation();
     useNodeRegistryVersion();
-    // Plugin nodes are injected into the connection menu; insertBefore nodes are created upstream and connected into the current node.
-    const pluginDefinitions = listNodeDefinitions()
-        .filter((def) => def.showInCreateMenu !== false && !isBuiltinNodeType(def.type))
-        .sort((a, b) => Number(Boolean(b.insertBefore)) - Number(Boolean(a.insertBefore)));
+    // 左侧 = 往上游接一个节点，右侧 = 往下游生成一个产物，两套菜单项完全不同。
+    const side = connectionMenuSide(pending.connection.handleType);
+    const types = connectionCreateTypes(side);
+    const pluginDefinitions = connectionMenuShowsPlugins(side)
+        ? listNodeDefinitions()
+              .filter((def) => def.showInCreateMenu !== false && !isBuiltinNodeType(def.type))
+              .sort((a, b) => Number(Boolean(b.insertBefore)) - Number(Boolean(a.insertBefore)))
+        : [];
     return (
         <div
             className="absolute z-[120] w-[240px] rounded-2xl border p-2 shadow-2xl backdrop-blur"
             data-connection-create-menu
+            data-connection-create-menu-side={side}
             style={{ left: pending.position.x, top: pending.position.y, transform: `scale(${1 / scale})`, transformOrigin: "top left", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
         >
             <div className="mb-1.5 flex items-center justify-between px-1">
                 <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
-                    {t("canvas.createMenu.fromNode")}
+                    {t(connectionMenuTitleKey(side))}
                 </span>
                 <button type="button" className="grid size-7 place-items-center rounded-lg text-base opacity-55 transition hover:bg-white/10 hover:opacity-100" onClick={onClose} aria-label={t("canvas.createMenu.close")}>
                     ×
                 </button>
             </div>
             <div className="grid gap-0.5">
-                <ConnectionCreateOption theme={theme} icon={<List className="size-4" />} title={t("canvas.createMenu.text")} description={t("canvas.createMenu.textDescription")} onClick={() => onCreate(CanvasNodeType.Text)} />
-                <ConnectionCreateOption theme={theme} icon={<ImageIcon className="size-4" />} title={t("canvas.createMenu.image")} onClick={() => onCreate(CanvasNodeType.Image)} />
-                <ConnectionCreateOption theme={theme} icon={<Video className="size-4" />} title={t("canvas.createMenu.video")} onClick={() => onCreate(CanvasNodeType.Video)} />
-                <ConnectionCreateOption theme={theme} icon={<Music2 className="size-4" />} title={t("canvas.createMenu.audio")} onClick={() => onCreate(CanvasNodeType.Audio)} />
+                {types.map((type) => {
+                    const descriptionKey = connectionMenuDescriptionKey(side, type);
+                    return (
+                        <ConnectionCreateOption
+                            key={type}
+                            theme={theme}
+                            icon={MENU_ICONS[type]}
+                            title={t(connectionMenuTitleTextKey(side, type))}
+                            description={descriptionKey ? t(descriptionKey) : undefined}
+                            onClick={() => onCreate(type)}
+                        />
+                    );
+                })}
                 {pluginDefinitions.length ? (
                     <div className="mt-1 border-t pt-1.5" style={{ borderColor: theme.node.stroke }}>
                         <div className="px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>
