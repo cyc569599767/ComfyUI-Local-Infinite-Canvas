@@ -16,7 +16,8 @@ import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData, isAudio
 import { normalizeAudioModeValue, normalizeAudioSeedValue, normalizeMusicDurationValue, audioModeForModel, audioModelForMode } from "@/lib/audio-generation";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveCanvasReferenceImages } from "@/lib/canvas/canvas-resource-references";
-import { requestImageCaption, requestImagePromptOptimize, requestPromptOptimize, type ImageCaptionEngine, type PromptOptimizeMode } from "@/services/api/image";
+import { requestImageCaption, requestImagePromptOptimize, requestPromptOptimize, type ImageCaptionEngine } from "@/services/api/image";
+import { resolvePromptOptimizeTaskType } from "@/lib/canvas/prompt-optimize-mode";
 import { localGatewayRoot } from "@/services/api/image";
 import { videoModelForWorkflow, videoModelModePatch, baseVideoWorkflowId, resolveVideoWorkflowMode } from "@/lib/canvas/video-model-mode";
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
@@ -108,7 +109,10 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     );
     const sourceVideoNode = sourceVideoReference ? nodes.find((item) => item.id === sourceVideoReference.nodeId) : undefined;
     const sourceVideoDurationSeconds = sourceVideoNode?.metadata?.durationMs && sourceVideoNode.metadata.durationMs > 0 ? sourceVideoNode.metadata.durationMs / 1000 : undefined;
-    const isH3 = mode === "video" && (workflowId === "video-h3-t2v" || workflowId === "video-h3-frames" || workflowId === "video-h3-fast" || isH3Reference);
+    // 提示词优化端点本身只认「任务类型」（文生视频/首帧/首尾帧/尾帧/全参考），
+    // 与具体跑哪个视频工作流无关，所以所有视频节点都该给这个入口，
+    // 不再按 H3 的 workflowId 白名单限制。
+    const canOptimizeVideo = mode === "video";
     const isImage = mode === "image";
     const imageInputLimit = modelImageInputs(config, config.model || config.imageModel);
     const imageModeValue = String(config.imageMode || "").trim();
@@ -123,7 +127,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         workflowId === "video-h3-character-swap"
             ? t("canvas.promptPanel.characterSwapHint")
             : t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`);
-    const canOptimize = isH3 && Boolean(draft.trim()) && !isRunning && !optimizeRunning;
+    const canOptimize = canOptimizeVideo && Boolean(draft.trim()) && !isRunning && !optimizeRunning;
     const canOptimizeImage = isImage && Boolean(draft.trim()) && !isRunning && !optimizeRunning;
     const optimizeEngine = config.promptApiEngine === "cloud" ? "cloud" : "local";
     const optimizeLanguage = config.promptOptimizeLanguage === "en" ? "en" : "zh";
@@ -293,20 +297,18 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
         const selectedRefs = usesImageReferences ? imageReferences.slice(0, Math.max(1, refLimit)) : [];
         const videoCount = Math.min(1, mentionReferences.filter((reference) => reference.kind === "video").length);
         const audioCount = Math.min(2, mentionReferences.filter((reference) => reference.kind === "audio").length);
-        const referenceNote =
-            isH3Reference
-                ? [`参考图片 ${selectedRefs.length} 张`, videoCount ? `参考视频 ${videoCount} 段` : "", audioCount ? `参考音频 ${audioCount} 段` : ""].filter(Boolean).join("；")
-                : "";
-        const taskType: PromptOptimizeMode =
-            isH3Reference
-                ? "全参考模式(Reference to Video)"
-                : workflowId === "video-h3-t2v"
-                  ? "文生视频(T2VA)"
-                  : frameMode === "last"
-                    ? "尾帧图生视频(L2VA)"
-                    : frameMode === "both" && selectedRefs.length >= 2
-                      ? "首尾帧视频(FL2VA)"
-                      : "首帧图生视频(I2VA)";
+        const { taskType, isReferenceTask } = resolvePromptOptimizeTaskType({
+            isH3Reference,
+            videoMode: config.videoMode,
+            isH3Text: workflowId === "video-h3-t2v",
+            referenceImageCount: selectedRefs.length,
+            frameMode,
+            hasVideoReference: videoCount > 0,
+            hasAudioReference: audioCount > 0,
+        });
+        const referenceNote = isReferenceTask
+            ? [`参考图片 ${selectedRefs.length} 张`, videoCount ? `参考视频 ${videoCount} 段` : "", audioCount ? `参考音频 ${audioCount} 段` : ""].filter(Boolean).join("；")
+            : "";
         return { selectedRefs, referenceNote, taskType, duration: isCharacterSwap ? sourceVideoDurationSeconds ?? (Number(config.videoSeconds) || 5) : Number(config.videoSeconds) || 5 };
     };
 
@@ -497,7 +499,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
                         <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
-                    {isH3 ? (
+                    {canOptimizeVideo ? (
                         <Tooltip title={t("canvas.promptPanel.optimizeHint")}>
                             <Button
                                 type="text"
@@ -681,7 +683,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     </button>
                 </div>
             ) : null}
-            {(isH3 || isImage) && optimizeOptionsOpen ? (
+            {(canOptimizeVideo || isImage) && optimizeOptionsOpen ? (
                 <PromptOptimizeOptions
                     className="mt-2"
                     title={isImage ? t("canvas.promptPanel.optimizeImageTitle") : undefined}
@@ -694,7 +696,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     onLanguageChange={(language) => updateConfig("promptOptimizeLanguage", language)}
                     onOpenSettings={() => openConfigDialog(true, "cloud-api")}
                     onOpenLocalSettings={() => openConfigDialog(false, "resources")}
-                    onStart={() => (isH3 ? void optimizePrompt() : void optimizeImagePrompt())}
+                    onStart={() => (canOptimizeVideo ? void optimizePrompt() : void optimizeImagePrompt())}
                     onClose={() => setOptimizeOptionsOpen(false)}
                 />
             ) : null}
