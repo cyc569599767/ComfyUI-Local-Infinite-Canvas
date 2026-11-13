@@ -146,7 +146,54 @@ function cloudChatUrl(baseUrl) {
 }
 
 const H3_SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "prompts", "skills", "h3-prompt-writing");
+const SHORT_DRAMA_SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "prompts", "skills", "short-drama-h3-prompt");
 let h3SkillFiles = null;
+let shortDramaSkillFiles = null;
+
+/**
+ * 短剧 skill 是给人按「工作流程 → 分镜表 → 六段式 → 交付检查」四步走的操作手册。
+ * 这里只要它后半段的生成规范，所以剥掉流程性章节：
+ * - 工作流程 / 交付检查清单：面向多轮人工协作，单次改写用不上
+ * - 分镜表规范：我们只返回六段式正文，不返回分镜表
+ * - 与 h3-prompt-writing 的关系 / 模板文件：说明性内容，不是规则
+ * 保留的是真正会改变输出的部分：核心原则、六段式字段写法、人物三层加固、
+ * 位置锁定、参考图编号、说话镜头锁人、常见错误清单。
+ */
+const SHORT_DRAMA_DROP_SECTIONS = new Set([
+  "工作流程",
+  "分镜表规范",
+  "交付检查清单",
+  "与 h3-prompt-writing skill 的关系",
+  "模板文件",
+]);
+
+/** template.md 里的分镜表模板同样不参与输出。 */
+const SHORT_DRAMA_TEMPLATE_DROP_SECTIONS = new Set(["一、分镜表模板"]);
+
+function stripShortDramaSections(markdown, dropSections = SHORT_DRAMA_DROP_SECTIONS) {
+  const lines = markdown.split(/\r?\n/);
+  const kept = [];
+  let dropping = false;
+  for (const line of lines) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading) dropping = dropSections.has(heading[1]);
+    if (!dropping) kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function loadShortDramaSkillFiles() {
+  if (shortDramaSkillFiles !== null) return shortDramaSkillFiles;
+  try {
+    shortDramaSkillFiles = {
+      skill: stripShortDramaSections(fs.readFileSync(path.join(SHORT_DRAMA_SKILL_DIR, "SKILL.md"), "utf8")),
+      template: stripShortDramaSections(fs.readFileSync(path.join(SHORT_DRAMA_SKILL_DIR, "references", "template.md"), "utf8"), SHORT_DRAMA_TEMPLATE_DROP_SECTIONS),
+    };
+  } catch (error) {
+    shortDramaSkillFiles = { error };
+  }
+  return shortDramaSkillFiles;
+}
 
 function loadH3SkillFiles() {
   if (h3SkillFiles !== null) return h3SkillFiles;
@@ -173,6 +220,24 @@ function h3LanguageDirective(language) {
   return "字段正文全部使用中文（覆盖 skill 默认英文）；台词、旁白、歌词保留原文语言（中文仍为中文）；官方字段名保留英文。";
 }
 
+/** 全参考模式判定：短剧规范与 Ref2VA 的六段式字段一一对应，其它模式用不上。 */
+function isFullReferenceMode(mode) {
+  return /全参考|Ref2VA|Reference to Video/i.test(String(mode || ""));
+}
+
+/**
+ * 组装云端 H3 系统提示词。
+ *
+ * 全参考模式（Ref2VA）额外叠加短剧 skill 的生产规范：人物服装/发型/位置锁定、
+ * 语速与气口、说话镜头锁人。这些是短剧场景反复踩坑后总结的硬约束，
+ * 恰好也是 Ref2VA 六段式最容易写坏的地方。
+ *
+ * 其它模式（T2VA/I2VA/FL2VA/L2VA）只用 h3-prompt-writing：它们没有「参考图编号」
+ * 「整集统一」这类概念，塞进来只会稀释真正相关的格式要求。
+ *
+ * 两个 skill 的定位互补而非替代：h3-prompt-writing 管六段式字段格式，
+ * short-drama-h3-prompt 管生成质量。短剧 skill 自己也声明了要配合前者使用。
+ */
 function buildCloudH3System(mode, duration, language) {
   const files = loadH3SkillFiles();
   if (files.error) {
@@ -181,15 +246,34 @@ function buildCloudH3System(mode, duration, language) {
       code: "missing_h3_skill",
     });
   }
-  const reference = /全参考|Ref2VA|Reference to Video/i.test(mode);
+  const reference = isFullReferenceMode(mode);
   const guide = reference ? `${files.base}\n\n${files.reference}` : files.base;
-  return `${files.skill}\n\n${guide}\n\n## 本次任务
+
+  let dramaBlock = "";
+  if (reference) {
+    const drama = loadShortDramaSkillFiles();
+    if (drama.error) {
+      throw new PromptOptimizeError("短剧提示词 Skill 文件缺失，请检查 comfyui-gateway/prompts/skills/short-drama-h3-prompt", {
+        status: 500,
+        code: "missing_short_drama_skill",
+      });
+    }
+    dramaBlock = `\n\n${drama.skill}\n\n${drama.template}`;
+  }
+
+  // 短剧 skill 默认让你先出分镜表再写提示词。接口只返回六段式正文，
+  // 所以这里明确压掉分镜表，避免模型把表格塞进结果里被 sanitize 截断。
+  const dramaOutputRule = reference
+    ? "\n分镜表只在内部推演使用，不要输出到结果里；结果只包含 H3 六段式正文。"
+    : "";
+
+  return `${files.skill}\n\n${guide}${dramaBlock}\n\n## 本次任务
 模式：${mode}
 时长：${duration} 秒
 输出语言：${h3LanguageDirective(language)}
 参考图片（若有）已随消息附上：以图片内容为准，不要编造图中不存在的室内外、家具、陈设或光线。
 对齐句由系统在正文前补充，正文不要另写。
-只输出最终 H3 提示词正文，不要输出思考过程、分析、解释、Markdown 代码块或前后缀。`;
+只输出最终 H3 提示词正文，不要输出思考过程、分析、解释、Markdown 代码块或前后缀。${dramaOutputRule}`;
 }
 
 const CLOUD_IMAGE_SYSTEM_PROMPT = `你是 AI 生图提示词专家。请把用户输入改写为一条可直接使用的生图/图生图提示词，只输出最终提示词本身，不要输出任何思考过程、分析、解释、Markdown 代码块、标题或前后缀。

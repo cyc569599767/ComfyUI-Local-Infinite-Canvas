@@ -281,6 +281,71 @@ test("cloud H3 fixes missing speaker ids and off-screen markers", async () => {
     }
 });
 
+/**
+ * 短剧 skill 只在全参考模式叠加。这两条测试用 stub fetch 直接看 system prompt，
+ * 因为要断言的重点是「拼装了什么」，不是「请求有没有到」。
+ */
+async function captureCloudSystemPrompt({ mode }) {
+    let system = "";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+        const body = JSON.parse(String(init?.body || "{}"));
+        system = String(body.messages?.[0]?.content || "");
+        return new Response(JSON.stringify({ choices: [{ message: { content: REF_OUTPUT } }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+        });
+    };
+    try {
+        const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
+        await optimizer.optimize({
+            prompt: "岚汐坐在办公桌后，赵磊站在桌前。",
+            mode,
+            duration: 15,
+            uploadedImages: [{ name: "lanxi.png" }],
+            engine: "cloud",
+            cloud: { baseUrl: "https://api.example.com/v1", apiKey: "k", model: "m" },
+        });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+    return system;
+}
+
+test("full-reference mode layers the short-drama skill on top of h3-prompt-writing", async () => {
+    const system = await captureCloudSystemPrompt({ mode: "全参考模式(Reference to Video)" });
+    // h3-prompt-writing 的六段式格式仍然在（短剧 skill 声明要配合它使用）
+    assert.match(system, /subject_definitions/);
+    assert.match(system, /retention_analysis/);
+    assert.match(system, /Video Prompt Writing Guide/);
+    // 短剧 skill 的生产规范已叠加
+    assert.match(system, /人物三层加固法/, "应包含人物锁定规范");
+    assert.match(system, /位置锁定法/, "应包含位置锁定规范");
+    assert.match(system, /说话镜头锁人规则/, "应包含说话镜头锁人规则");
+    assert.match(system, /常见错误清单/, "应包含常见错误清单");
+});
+
+test("short-drama skill drops its workflow and storyboard sections", async () => {
+    const system = await captureCloudSystemPrompt({ mode: "全参考模式(Reference to Video)" });
+    // 接口只返回六段式正文，流程类章节会诱导模型输出分镜表或检查清单
+    assert.doesNotMatch(system, /## 工作流程/);
+    assert.doesNotMatch(system, /## 分镜表规范/);
+    assert.doesNotMatch(system, /## 交付检查清单/);
+    assert.doesNotMatch(system, /一、分镜表模板/);
+    // 并明确告诉模型不要输出分镜表
+    assert.match(system, /分镜表只在内部推演使用/);
+});
+
+test("non-reference modes do not load the short-drama skill", async () => {
+    // T2VA 没有参考图编号、整集统一这类概念，塞短剧规范只会稀释真正的格式要求
+    for (const mode of ["文生视频(T2VA)", "首帧图生视频(I2VA)"]) {
+        const system = await captureCloudSystemPrompt({ mode });
+        assert.doesNotMatch(system, /人物三层加固法/, `${mode} 不应叠加短剧 skill`);
+        assert.doesNotMatch(system, /位置锁定法/, `${mode} 不应叠加短剧 skill`);
+        assert.match(system, /subject_definitions/, `${mode} 仍应有 H3 六段式格式`);
+    }
+});
+
 test("local H3 passes the English language directive to the workflow", async () => {
     let submitted = null;
     const optimizer = createPromptOptimizer({
