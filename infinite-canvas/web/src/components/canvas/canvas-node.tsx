@@ -14,6 +14,7 @@ import { nodeInteractionState } from "@/lib/canvas/node-interaction";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeProgressRing } from "./canvas-node-progress-ring";
+import { freeCardOutputLabelKey } from "./canvas-free-card-panel";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position, isAudioNodeType } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -704,7 +705,7 @@ function FreeCardNodeContent({ node, theme }: NodeContentRendererProps) {
     const info = node.metadata?.freeCard;
     const cardSkin = useEffectiveCardSkin();
     const fishSkin = cardSkin === "fish";
-    const kind = info ? (info.outputType === "video" ? t("canvas.freeCard.videoWorkflow") : info.outputType === "image" ? t("canvas.freeCard.imageWorkflow") : t("canvas.freeCard.otherWorkflow")) : t("canvas.freeCard.emptyHint");
+    const kind = info ? t(freeCardOutputLabelKey(info.outputType)) : t("canvas.freeCard.emptyHint");
     if (fishSkin) {
         return (
             <div className="flex h-full w-full flex-col items-start justify-start gap-1 px-4 pt-4 text-left">

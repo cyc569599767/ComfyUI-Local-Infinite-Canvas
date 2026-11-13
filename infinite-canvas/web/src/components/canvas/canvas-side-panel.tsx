@@ -26,6 +26,7 @@ import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import type { StyleRecipe } from "@/stores/use-style-recipe-store";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
+import { freeCardOutputLabelKey } from "./canvas-free-card-panel";
 import { CanvasStyleRecipesTab } from "./canvas-style-recipes-tab";
 
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
@@ -993,7 +994,7 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
                                                 </button>
                                             </div>
                                             <div className="mt-0.5 truncate text-[11px] opacity-50">
-                                                {item.outputType === "video" ? t("canvas.freeCard.videoWorkflow") : item.outputType === "image" ? t("canvas.freeCard.imageWorkflow") : t("canvas.freeCard.otherWorkflow")} · {item.sourceRel}
+                                                {t(freeCardOutputLabelKey(item.outputType))} · {item.sourceRel}
                                             </div>
                                         </div>
                                     ) : (
@@ -1003,7 +1004,7 @@ function CanvasFreeCardsTab({ theme, onAdd }: { theme: CanvasTheme; onAdd?: (wor
                                                 {item.sourceChanged ? <span className="size-1.5 shrink-0 rounded-full bg-amber-500" title={t("canvas.freeCard.sourceChanged")} /> : null}
                                             </div>
                                             <div className="mt-0.5 truncate text-[11px] opacity-50">
-                                                {item.outputType === "video" ? t("canvas.freeCard.videoWorkflow") : item.outputType === "image" ? t("canvas.freeCard.imageWorkflow") : t("canvas.freeCard.otherWorkflow")} · {item.sourceRel}
+                                                {t(freeCardOutputLabelKey(item.outputType))} · {item.sourceRel}
                                             </div>
                                         </button>
                                     )}

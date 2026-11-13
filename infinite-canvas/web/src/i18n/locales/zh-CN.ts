@@ -295,7 +295,7 @@ export default {
             title: "自由卡片", emptyTitle: "未选择工作流", emptyHint: "在下方设置里选择一个 ComfyUI 工作流",
             selectWorkflow: "选择工作流", sourcesEmpty: "没有找到 ComfyUI 已保存的工作流", sourceHint: "第一次使用会转换为 API 工作流",
             sourcesFailed: "读取工作流列表失败", loadingSources: "正在读取工作流…", refreshSources: "刷新工作流列表", unavailable: "不可用",
-            imageWorkflow: "图片工作流", videoWorkflow: "视频工作流", otherWorkflow: "其他工作流", otherWorkflowHint: "该工作流不是图片/视频输出，暂不支持在自由卡片中生成", sync: "同步工作流", syncing: "同步中", synced: "已同步", noChange: "已是最新",
+            imageWorkflow: "图片工作流", videoWorkflow: "视频工作流", audioWorkflow: "音频工作流", otherWorkflow: "其他工作流", otherWorkflowHint: "该工作流不是图片/视频/音频输出，暂不支持在自由卡片中生成", sync: "同步工作流", syncing: "同步中", synced: "已同步", noChange: "已是最新",
             archive: "归档", archived: "已归档", openInComfy: "在 ComfyUI 编辑", openHint: "已打开「{{name}}」，重复点击会复用同一编辑器窗口",
             openBlocked: "浏览器拦截了新窗口，请允许弹出窗口后重试",
             openBridgeMissing: "已打开 ComfyUI，但自动载入不可用（{{reason}}）；请在工作流列表中选择「{{name}}」",

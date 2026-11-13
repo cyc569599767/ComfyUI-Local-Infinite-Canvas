@@ -23,8 +23,9 @@ import {
     type FreeWorkflowPreset,
     type FreeWorkflowSource,
     type FreeWorkflowSummary,
+    type FreeWorkflowOutputType,
 } from "@/services/api/free-workflow";
-import { CanvasNodeType, type CanvasFreeCardInfo, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 
 type CanvasFreeCardPanelProps = {
@@ -46,13 +47,25 @@ const RATIO_ORDER = ["1:1", "2:3", "3:2", "4:3", "3:4", "16:9", "9:16", "21:9", 
 let comfyEditorWindow: Window | null = null;
 let comfyEditorUrl = "";
 
+const FREE_CARD_OUTPUT_LABEL_KEY: Record<CanvasFreeCardOutputType, string> = {
+    image: "canvas.freeCard.imageWorkflow",
+    video: "canvas.freeCard.videoWorkflow",
+    audio: "canvas.freeCard.audioWorkflow",
+    other: "canvas.freeCard.otherWorkflow",
+};
+
+/** 自由卡片输出类型对应的 i18n key；各处显示类型都走这里，避免漏掉新增类型。 */
+export function freeCardOutputLabelKey(outputType: CanvasFreeCardOutputType | FreeWorkflowOutputType | null | undefined): string {
+    return (outputType && FREE_CARD_OUTPUT_LABEL_KEY[outputType as CanvasFreeCardOutputType]) || FREE_CARD_OUTPUT_LABEL_KEY.other;
+}
+
 export function freeCardInfoFromSummary(summary: FreeWorkflowSummary): CanvasFreeCardInfo {
     return {
         id: summary.id,
         name: summary.name,
         sourceRel: summary.sourceRel,
         sourceFormat: summary.sourceFormat,
-        outputType: summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : "other",
+        outputType: summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : summary.outputType === "audio" ? "audio" : "other",
         prompt: summary.prompt,
         textInputs: summary.textInputs || [],
         imageInputs: summary.imageInputs,
@@ -175,7 +188,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     // from images; reconcile them with the gateway summary after load.
     useEffect(() => {
         if (!summary || !info) return;
-        const normalized = summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : "other";
+        const normalized = summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : summary.outputType === "audio" ? "audio" : "other";
         if (info.outputType !== normalized) onChange({ freeCard: { ...info, outputType: normalized } });
     }, [summary, info, onChange]);
 
@@ -485,7 +498,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                 {info ? (
                     <>
                         <div className="flex flex-wrap items-center gap-2 text-[11px]" style={{ color: theme.node.muted }}>
-                            <span>{info.outputType === "video" ? t("canvas.freeCard.videoWorkflow") : info.outputType === "image" ? t("canvas.freeCard.imageWorkflow") : t("canvas.freeCard.otherWorkflow")}</span>
+                            <span>{t(freeCardOutputLabelKey(info.outputType))}</span>
                             <span>·</span>
                             <span>{info.sourceFormat.toUpperCase()}</span>
                             {info.archived ? <span>· {t("canvas.freeCard.archived")}</span> : null}

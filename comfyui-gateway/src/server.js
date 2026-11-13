@@ -1645,6 +1645,64 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ id: task.id, object: "video", status: "queued", progress: 0, created_at: Math.floor(Date.now() / 1000) });
   });
 
+  // 自由卡片的音频工作流：同步返回，和 /images 一样用 { data: [{ b64_json | url }] }。
+  // 与 /v1/audio/speech 的区别在于模型来自自由卡片本身，不需要前端再按 mode 反查工作流。
+  app.post("/v1/free-workflows/:id/audio", upload.any(), async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    await freeWorkflows.ensureBindings(entry);
+    if (entry.bindings?.outputType !== "audio") {
+      throw new HttpError("这个自由卡片不是音频工作流", { status: 400, code: "free_workflow_not_audio" });
+    }
+    const body = req.body || {};
+    const prompt = String(body.prompt || "");
+    const texts = parseFreeTexts(body.texts);
+    const effectivePrompt = freeEffectivePrompt(entry, texts, prompt);
+    if (entry.bindings?.prompt && !effectivePrompt.trim()) {
+      throw new HttpError("这个工作流需要正向提示词", { status: 400, code: "missing_prompt" });
+    }
+    const uploadedAudios = await uploadImages(comfy, orderedAudioRefFiles(req.files || []));
+    const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
+      prompt: effectivePrompt,
+      texts,
+      uploadedAudios,
+      seed: body.seed,
+      seedFixed: body.seedFixed,
+    });
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    let result;
+    try {
+      result = await runAudio({
+        entry: { name: entry.name, type: "audio", workflow, bindings: {}, defaults: {}, presets: {} },
+        context: buildContext({ prompt: effectivePrompt, count: 1, uploadedAudios }),
+        comfy,
+        timeoutMs: config.requestTimeoutMs,
+        pollIntervalMs: config.pollIntervalMs,
+        signal: abort.signal,
+        requestId: req.id,
+        modelAliasFor: setup.modelAliasFor,
+        loaderSpecs: setup.modelLoaderSpecs?.(),
+        includePreviewOutputs: true,
+        logger,
+      });
+    } catch (error) {
+      if (abort.signal.aborted) {
+        logger.info(`free audio ${entry.name} 请求被客户端中断 ${req.id}`);
+        return;
+      }
+      throw error;
+    } finally {
+      abort.cleanup();
+    }
+    const file = result.files[0];
+    logger.info(`free audio ${entry.name} -> ${result.promptId} ${req.id}`);
+    const responseFormat = String(body.response_format || "b64_json").toLowerCase();
+    const item =
+      responseFormat === "url"
+        ? { url: absoluteTaskUrl(config, req, (await tasks.saveOutput(randomId("aud_"), file.buffer, extFromMime(file.mimeType, file.filename, "flac"))).url) }
+        : { b64_json: file.buffer.toString("base64") };
+    res.json({ created: Math.floor(Date.now() / 1000), mime_type: file.mimeType || "audio/flac", data: [item] });
+  });
+
   // 音频三种子功能共用 /v1/audio/speech，由 body.mode 区分：
   //   voice-design 朗读文案 + 音色描述
   //   voice-clone  朗读文案 + 参考音频（ASR 自动转写参考文本）

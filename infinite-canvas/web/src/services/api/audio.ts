@@ -113,7 +113,7 @@ export async function requestLocalAudioGeneration(config: AiConfig, mode: Canvas
  * （形如 "audio:xxxx"，不是 URL）、或可 fetch 的 http/blob/data URL。
  * storageKey 必须走 media store 取回，直接 fetch 会 404。
  */
-async function resolveReferenceAudioBlob(reference: Blob | string): Promise<Blob> {
+export async function resolveReferenceAudioBlob(reference: Blob | string): Promise<Blob> {
     if (typeof reference !== "string") return reference;
     if (/^(https?:|blob:|data:)/i.test(reference)) {
         return (await fetch(withLocalProxy(reference))).blob();
@@ -123,7 +123,7 @@ async function resolveReferenceAudioBlob(reference: Blob | string): Promise<Blob
     return stored;
 }
 
-function audioExtension(mimeType: string) {
+export function audioExtension(mimeType: string) {
     // ComfyUI 的 /view 对 FLAC 回的是 audio/x-flac，必须一起认。
     if (mimeType === "audio/wav" || mimeType === "audio/x-wav") return "wav";
     if (mimeType === "audio/mpeg" || mimeType === "audio/mp3") return "mp3";

@@ -5,6 +5,7 @@ import { attachLocalCancel, attachLocalProgress, localGatewayRoot } from "@/serv
 import { dataUrlToFile } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { AiConfig } from "@/stores/use-config-store";
+import { withLocalProxy } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 
 export type FreeWorkflowSource = {
@@ -32,12 +33,14 @@ export type FreeWorkflowTextInput = {
     role: string;
 };
 
+export type FreeWorkflowOutputType = "image" | "video" | "audio";
+
 export type FreeWorkflowSummary = {
     id: string;
     name: string;
     sourceRel: string;
     sourceFormat: "ui" | "api";
-    outputType: "image" | "video" | null;
+    outputType: FreeWorkflowOutputType | null;
     archived: boolean;
     archivedAt: string | null;
     createdAt: string;
@@ -66,6 +69,8 @@ export type FreeWorkflowRequest = {
     seed?: string;
     seedFixed?: boolean;
     images?: ReferenceImage[];
+    /** 音频工作流的参考音频（音色克隆）。 */
+    audio?: File;
     signal?: AbortSignal;
 };
 
@@ -178,6 +183,8 @@ async function buildFormData(config: AiConfig, request: FreeWorkflowRequest) {
     const images = request.images || [];
     const files = await Promise.all(images.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file, index) => formData.append(index === 0 ? "image" : `image${index + 1}`, file, file.name));
+    // 音频工作流的参考音频（音色克隆）：网关按 audios 字段名收集。
+    if (request.audio) formData.append("audios", request.audio, request.audio.name || "reference.wav");
     return formData;
 }
 
@@ -202,6 +209,38 @@ export async function requestFreeWorkflowImage(config: AiConfig, id: string, req
         return images;
     } catch (error) {
         throw new Error(readError(error, "自由工作流生成失败"));
+    } finally {
+        detachCancel?.();
+        detachProgress?.();
+    }
+}
+
+export async function requestFreeWorkflowAudio(config: AiConfig, id: string, request: FreeWorkflowRequest): Promise<{ blob: Blob; mimeType: string }> {
+    const root = gatewayRoot(config);
+    const formData = await buildFormData(config, request);
+    const requestId = `free_${nanoid()}`;
+    const detachCancel = attachLocalCancel(config, requestId, request.signal);
+    const detachProgress = attachLocalProgress(config, requestId, request.signal);
+    try {
+        const response = await axios.post<{ data?: Array<{ b64_json?: string; url?: string }>; mime_type?: string }>(`${root}/v1/free-workflows/${encodeURIComponent(id)}/audio`, formData, {
+            headers: { "X-Request-Id": requestId },
+            signal: request.signal,
+            timeout: 30 * 60 * 1000,
+        });
+        const item = response.data?.data?.[0];
+        const mimeType = response.data?.mime_type || "audio/flac";
+        if (!item) throw new Error("自由工作流没有返回音频");
+        if (item.b64_json) {
+            const binary = atob(item.b64_json);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+            return { blob: new Blob([bytes], { type: mimeType }), mimeType };
+        }
+        const fetched = await fetch(withLocalProxy(item.url || ""));
+        const blob = await fetched.blob();
+        return { blob: blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: mimeType }), mimeType };
+    } catch (error) {
+        throw new Error(readError(error, "自由工作流音频生成失败"));
     } finally {
         detachCancel?.();
         detachProgress?.();

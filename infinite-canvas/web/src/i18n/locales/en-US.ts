@@ -295,7 +295,7 @@ export default {
             title: "Free card", emptyTitle: "No workflow selected", emptyHint: "Choose a saved ComfyUI workflow below",
             selectWorkflow: "Select workflow", sourcesEmpty: "No saved ComfyUI workflows found", sourceHint: "The first use converts it to an API workflow",
             sourcesFailed: "Failed to load workflows", loadingSources: "Loading workflows…", refreshSources: "Refresh workflow list", unavailable: "Unavailable",
-            imageWorkflow: "Image workflow", videoWorkflow: "Video workflow", otherWorkflow: "Other workflow", otherWorkflowHint: "This workflow does not output images or videos, so generation is not supported in free cards yet", sync: "Sync workflow", syncing: "Syncing", synced: "Synced", noChange: "Up to date",
+            imageWorkflow: "Image workflow", videoWorkflow: "Video workflow", audioWorkflow: "Audio workflow", otherWorkflow: "Other workflow", otherWorkflowHint: "This workflow does not output images, videos, or audio, so generation is not supported in free cards", sync: "Sync workflow", syncing: "Syncing", synced: "Synced", noChange: "Up to date",
             archive: "Archive", archived: "Archived", openInComfy: "Edit in ComfyUI", openHint: "Opened “{{name}}”; repeated clicks reuse the same editor window",
             openBlocked: "The browser blocked the new window. Allow pop-ups and try again",
             openBridgeMissing: "ComfyUI opened, but automatic loading is unavailable ({{reason}}); select “{{name}}” in its workflow list",

@@ -36,12 +36,14 @@ export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
+export type CanvasFreeCardOutputType = "image" | "video" | "audio" | "other";
+
 export type CanvasFreeCardInfo = {
     id: string;
     name: string;
     sourceRel: string;
     sourceFormat: "ui" | "api";
-    outputType: "image" | "video" | "other";
+    outputType: CanvasFreeCardOutputType;
     prompt: boolean;
     textInputs?: Array<{ node: string; input: string; label: string; default: string; role: string }>;
     imageInputs: number;

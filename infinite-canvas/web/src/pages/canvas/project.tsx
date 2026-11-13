@@ -6,9 +6,9 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
-import { createFreeWorkflowVideoTask, fetchFreeWorkflows, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
+import { createFreeWorkflowVideoTask, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
-import { generateCanvasAudio, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
+import { generateCanvasAudio, resolveReferenceAudioBlob, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
 import { createVideoGenerationTask, createVideoInterpolateTask, createVideoUpscaleTask, isVideoTaskFailed, readVideoTaskResumeInfo, storeGeneratedVideo, waitForVideoGenerationTask, type VideoPreview } from "@/services/api/video";
 import { channelModelOf, defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, imageToDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -4491,7 +4491,7 @@ function InfiniteCanvasPage() {
                 message.warning(t("canvas.freeCard.needPrompt"));
                 return;
             }
-            const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, info.outputType === "video" ? "video" : "image");
+            const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, info.outputType === "video" ? "video" : info.outputType === "audio" ? "audio" : "image");
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
@@ -4510,7 +4510,40 @@ function InfiniteCanvasPage() {
                 const seed = sourceNode.metadata?.seed || info.seed || "";
                 const seedFixed = (sourceNode.metadata?.seedFixed || "false") === "true";
 
-                if (info.outputType === "video") {
+                if (info.outputType === "audio") {
+                    // 音频工作流产出音频节点：与音频卡片一致，先落一个 loading 节点再回填，
+                    // 这样用户能立刻看到「在生成」而不是等接口同步返回后才出现。
+                    childId = nanoid();
+                    const audioSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+                    const audioNode: CanvasNodeData = {
+                        id: childId,
+                        type: CanvasNodeType.Audio,
+                        title: effectivePrompt.slice(0, 32) || info.name,
+                        position: { x: sourceNode.position.x + sourceNode.width + 96, y: sourceNode.position.y + sourceNode.height / 2 - audioSpec.height / 2 },
+                        width: audioSpec.width,
+                        height: audioSpec.height,
+                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, model: info.name, freeWorkflowId: info.id },
+                    };
+                    setNodes((prev) => [...prev, audioNode]);
+                    setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: childId }]);
+                    const controller = startGenerationRequest(childId, nodeId, nodeId, runController);
+                    // 连入的参考音频用于音色克隆类工作流；没有就按纯生成处理。
+                    const referenceAudio = context.referenceAudios[0];
+                    const audioFile = referenceAudio
+                        ? new File([await resolveReferenceAudioBlob(referenceAudio.storageKey || referenceAudio.url)], referenceAudio.name || "reference.wav", { type: referenceAudio.type || "audio/wav" })
+                        : undefined;
+                    const { blob } = await requestFreeWorkflowAudio(effectiveConfig, info.id, { prompt: effectivePrompt, texts, seed, seedFixed, audio: audioFile, signal: controller.signal });
+                    const audio = await storeGeneratedAudio(blob, generationConfig.audioFormat);
+                    setNodes((prev) =>
+                        prev.map((item) =>
+                            item.id === childId
+                                ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt: effectivePrompt, model: info.name, freeWorkflowId: info.id, status: NODE_STATUS_SUCCESS, errorDetails: undefined } }
+                                : item.id === nodeId
+                                  ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } }
+                                  : item,
+                        ),
+                    );
+                } else if (info.outputType === "video") {
                     childId = nanoid();
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const videoNode: CanvasNodeData = {
