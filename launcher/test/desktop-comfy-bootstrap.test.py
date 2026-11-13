@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 from pathlib import Path
@@ -194,6 +195,126 @@ class SubprocessPolicyTests(unittest.TestCase):
                 self.assertIs(subprocess.Popen, FakePopen)
                 subprocess.Popen(["tool"])
                 self.assertEqual(FakePopen.calls[-1]["creationflags"], 0)
+
+
+class StdioGuardTests(unittest.TestCase):
+    """A dead console pipe must not abort generation (MiniMax Music3 / tqdm)."""
+
+    class DeadBuffer(io.RawIOBase):
+        def writable(self):
+            return True
+
+        def write(self, data):
+            raise OSError(22, "Invalid argument")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+    class DeadStream:
+        encoding = "utf-8"
+        line_buffering = True
+
+        def __init__(self):
+            self.buffer = StdioGuardTests.DeadBuffer()
+
+        def write(self, data):
+            raise OSError(22, "Invalid argument")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+        def isatty(self):
+            return False
+
+    class RecordingBuffer(io.RawIOBase):
+        def __init__(self):
+            self.written = bytearray()
+            self.flushed = 0
+
+        def writable(self):
+            return True
+
+        def write(self, data):
+            self.written.extend(data)
+            return len(data)
+
+        def flush(self):
+            self.flushed += 1
+
+    class RecordingStream:
+        encoding = "utf-8"
+        line_buffering = True
+
+        def __init__(self):
+            self.buffer = StdioGuardTests.RecordingBuffer()
+            self.text = []
+            self.flushed = 0
+
+        def write(self, data):
+            self.text.append(data)
+            return len(data)
+
+        def flush(self):
+            self.flushed += 1
+
+        def isatty(self):
+            return False
+
+    def _install(self, stdout, stderr):
+        with mock.patch.object(bootstrap.sys, "stdout", stdout), \
+                mock.patch.object(bootstrap.sys, "stderr", stderr):
+            bootstrap.install_stdio_guard()
+            return bootstrap.sys.stdout, bootstrap.sys.stderr
+
+    def test_dead_pipe_writes_and_flushes_do_not_raise(self):
+        out, err = self._install(self.DeadStream(), self.DeadStream())
+        for stream in (out, err):
+            self.assertEqual(stream.write("progress\n"), len("progress\n"))
+            self.assertIsNone(stream.flush())
+
+    def test_comfyui_log_interceptor_pattern_is_guarded(self):
+        # app/logger.py: LogInterceptor(io.TextIOWrapper) over stream.buffer.
+        # It calls io.TextIOWrapper.flush(), never the wrapped stream's flush,
+        # so guarding the stream alone would not help -- the buffer must be safe.
+        class LogInterceptor(io.TextIOWrapper):
+            def __init__(self, stream, *args, **kwargs):
+                super().__init__(stream.buffer, *args, **kwargs,
+                                 encoding=stream.encoding,
+                                 line_buffering=stream.line_buffering)
+
+            def flush(self):
+                super().flush()
+
+        _, err = self._install(self.DeadStream(), self.DeadStream())
+        interceptor = LogInterceptor(err)
+        try:
+            interceptor.write("AR sampling\n")
+            interceptor.flush()
+        except (OSError, ValueError) as error:  # pragma: no cover - regression guard
+            self.fail(f"guarded buffer still raised: {error!r}")
+        finally:
+            interceptor.detach()
+
+    def test_live_pipe_still_receives_output_and_flushes(self):
+        live_out, live_err = self.RecordingStream(), self.RecordingStream()
+        out, err = self._install(live_out, live_err)
+        out.write("hello\n")
+        out.flush()
+        err.write("warning\n")
+        err.flush()
+        self.assertEqual(live_out.text, ["hello\n"])
+        self.assertEqual(live_err.text, ["warning\n"])
+        self.assertEqual(live_out.flushed, 1)
+        self.assertEqual(live_err.flushed, 1)
+        self.assertEqual(out.encoding, "utf-8")
+
+    def test_install_is_idempotent(self):
+        first = self._install(self.DeadStream(), self.DeadStream())
+        with mock.patch.object(bootstrap.sys, "stdout", first[0]), \
+                mock.patch.object(bootstrap.sys, "stderr", first[1]):
+            bootstrap.install_stdio_guard()
+            self.assertIs(bootstrap.sys.stdout, first[0])
+            self.assertIs(bootstrap.sys.stderr, first[1])
 
 
 class BootstrapExecutionTests(unittest.TestCase):
