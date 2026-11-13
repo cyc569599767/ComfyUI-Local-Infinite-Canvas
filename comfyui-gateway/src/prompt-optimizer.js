@@ -205,6 +205,28 @@ function cloudContent(data) {
   return "";
 }
 
+/**
+ * 云端 Base URL 的准入判定。
+ *
+ * 回环地址（127.0.0.0/8、::1、localhost）不在此列，默认放行：用户在本机跑一个
+ * OpenAI 兼容的模型服务（LM Studio / Ollama / vLLM / llama.cpp）是最常见的
+ * 本地推理用法，把它拦下来只会让人去翻环境变量。
+ *
+ * 其余内网/链路本地/保留段仍然需要 ALLOW_PRIVATE_CLOUD=1：那些地址会把请求
+ * 送到局域网里的其他设备，性质与「本机自用」不同，不该默认开门。
+ */
+function isPrivateHost(host) {
+  return (
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^(fc|fd)[0-9a-f]{2}:/.test(host) ||
+    /^fe80:/.test(host) ||
+    host.endsWith(".local")
+  );
+}
+
 function assertCloudBaseUrl(raw) {
   let url;
   try {
@@ -216,19 +238,8 @@ function assertCloudBaseUrl(raw) {
     throw new PromptOptimizeError("云端 Base URL 只支持 http/https", { status: 400, code: "cloud_invalid_url" });
   }
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const isPrivate =
-    host === "localhost" ||
-    host === "::1" ||
-    /^127\./.test(host) ||
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^169\.254\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-    /^(fc|fd)[0-9a-f]{2}:/.test(host) ||
-    /^fe80:/.test(host) ||
-    host.endsWith(".local");
-  if (isPrivate && String(process.env.ALLOW_PRIVATE_CLOUD || "") !== "1") {
-    throw new PromptOptimizeError("云端 Base URL 指向本机或内网地址，已拒绝；如确需本地模型，请设置 ALLOW_PRIVATE_CLOUD=1", { status: 400, code: "cloud_private_url" });
+  if (isPrivateHost(host) && String(process.env.ALLOW_PRIVATE_CLOUD || "") !== "1") {
+    throw new PromptOptimizeError("云端 Base URL 指向内网地址，已拒绝；本机模型请使用 127.0.0.1，确需访问内网请设置 ALLOW_PRIVATE_CLOUD=1", { status: 400, code: "cloud_private_url" });
   }
   return url.toString();
 }

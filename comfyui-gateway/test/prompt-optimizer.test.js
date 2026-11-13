@@ -342,19 +342,49 @@ test("cloud caption sends the image as image_url and returns the prompt", async 
     }
 });
 
-test("cloud chat rejects private base urls by default", async () => {
+test("loopback base urls are allowed without ALLOW_PRIVATE_CLOUD", async () => {
+    // 本机跑 OpenAI 兼容服务（LM Studio / Ollama / vLLM）是最常见的本地推理用法。
+    // 请求会真的发出去，所以这里起一个最小的本地服务来接它。
+    const previous = process.env.ALLOW_PRIVATE_CLOUD;
+    delete process.env.ALLOW_PRIVATE_CLOUD;
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "本机模型回复" } }] }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    try {
+        const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
+        const result = await optimizer.captionImage({
+            cloudImages: ["data:image/png;base64,AAAA"],
+            engine: "cloud",
+            cloud: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k", model: "m" },
+        });
+        assert.equal(result.engine, "cloud");
+        assert.equal(result.prompt, "本机模型回复");
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+        process.env.ALLOW_PRIVATE_CLOUD = previous;
+    }
+});
+
+test("LAN private base urls still require ALLOW_PRIVATE_CLOUD", async () => {
     const previous = process.env.ALLOW_PRIVATE_CLOUD;
     delete process.env.ALLOW_PRIVATE_CLOUD;
     try {
         const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
-        await assert.rejects(
-            () => optimizer.captionImage({
-                cloudImages: ["data:image/png;base64,AAAA"],
-                engine: "cloud",
-                cloud: { baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m" },
-            }),
-            /内网|本机/,
-        );
+        // 内网段会把请求送到别的设备，和「本机自用」不是一回事，默认仍然拒绝。
+        for (const baseUrl of ["http://192.168.1.10:8080/v1", "http://10.0.0.5:8080/v1", "http://172.16.0.2:8080/v1"]) {
+            await assert.rejects(
+                () => optimizer.captionImage({
+                    cloudImages: ["data:image/png;base64,AAAA"],
+                    engine: "cloud",
+                    cloud: { baseUrl, apiKey: "k", model: "m" },
+                }),
+                /内网/,
+                `${baseUrl} 应被拒绝`,
+            );
+        }
     } finally {
         process.env.ALLOW_PRIVATE_CLOUD = previous;
     }

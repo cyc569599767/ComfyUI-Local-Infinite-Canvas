@@ -810,7 +810,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     <Form.Item label={t("config.cloudApi.apiFormat")} name="apiFormat" initialValue="openai" extra={t("config.cloudApi.apiFormatHint")}>
                         <Select options={promptCloudApiFormats.map((value) => ({ value, label: t(`config.cloudApi.formats.${value}`) }))} />
                     </Form.Item>
-                    <Form.Item label={t("config.cloudApi.baseUrl")} name="baseUrl" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.baseUrlRequired") }]}>
+                    <Form.Item label={t("config.cloudApi.baseUrl")} name="baseUrl" rules={[{ required: true, whitespace: true, message: t("config.cloudApi.baseUrlRequired") }]} extra={t("config.cloudApi.baseUrlHint")}>
                         <Input placeholder="https://api.deepseek.com/v1" onBlur={() => void fetchCloudModels()} />
                     </Form.Item>
                     <Form.Item

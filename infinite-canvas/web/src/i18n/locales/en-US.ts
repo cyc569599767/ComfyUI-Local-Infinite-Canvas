@@ -561,6 +561,7 @@ export default {
             nameRequired: "Enter a name",
             baseUrl: "Base URL",
             baseUrlRequired: "Enter a base URL",
+            baseUrlHint: "For a local model server use http://127.0.0.1:port/v1; other hosts must use HTTPS.",
             apiKey: "API Key",
             keyRequired: "Enter an API key",
             model: "Model",

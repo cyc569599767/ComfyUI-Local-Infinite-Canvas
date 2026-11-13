@@ -561,6 +561,7 @@ export default {
             nameRequired: "请输入名称",
             baseUrl: "Base URL",
             baseUrlRequired: "请输入 Base URL",
+            baseUrlHint: "本机模型服务可直接填 http://127.0.0.1:端口/v1；其余地址需使用 HTTPS。",
             apiKey: "API Key",
             keyRequired: "请输入 API Key",
             model: "模型",
