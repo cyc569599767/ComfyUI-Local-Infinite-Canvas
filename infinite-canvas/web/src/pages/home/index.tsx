@@ -1,5 +1,5 @@
 import { ArrowRight, Compass } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { App, Button, Image, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -9,16 +9,33 @@ import { LOCAL_ONLY } from "@/constant/app-mode";
 import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { hasResumedThisSession, markResumedThisSession, readLastCanvas, resolveResumeCanvasId } from "@/lib/canvas/last-canvas";
 
 export default function IndexPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
     const projects = useCanvasStore((state) => state.projects);
+    const hydrated = useCanvasStore((state) => state.hydrated);
     const createProject = useCanvasStore((state) => state.createProject);
     const [promptShowcase, setPromptShowcase] = useState<Prompt[]>([]);
     const [previewIndex, setPreviewIndex] = useState(0);
     const [previewOpen, setPreviewOpen] = useState(false);
+    // 启动时恢复上次打开的画布。必须在 store 水合之后判断，
+    // 否则 projects 还是空的，会被误判成「画布已删除」而放弃恢复。
+    // 每个会话只自动跳一次：否则顶部 logo 和画布里的「主页」按钮都会被弹回来，
+    // 首页就再也进不去了。
+    const resumeId = useMemo(() => {
+        if (!hydrated || hasResumedThisSession()) return "";
+        return resolveResumeCanvasId(readLastCanvas(), projects.map((project) => project.id));
+    }, [hydrated, projects]);
+    const resuming = Boolean(resumeId);
+
+    useEffect(() => {
+        if (!resumeId) return;
+        markResumedThisSession();
+        navigate(`/canvas/${resumeId}`, { replace: true });
+    }, [navigate, resumeId]);
 
     useEffect(() => {
         if (LOCAL_ONLY) return;
@@ -26,6 +43,9 @@ export default function IndexPage() {
             .then((data) => setPromptShowcase(data.items))
             .catch((error) => message.error(error instanceof Error ? error.message : i18n.t("home.promptError")));
     }, [message]);
+
+    // 恢复期间先不渲染首页，避免首页内容闪一下再被替换。
+    if (resuming) return <main className="flex h-full items-center justify-center bg-background text-sm text-stone-500">{t("canvas.opening")}</main>;
 
     return (
         <main className="relative h-full overflow-y-auto bg-background bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] text-stone-950 dark:bg-[radial-gradient(rgba(245,245,244,.18)_1px,transparent_1px)] dark:text-stone-100">

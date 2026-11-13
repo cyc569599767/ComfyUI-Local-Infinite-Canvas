@@ -73,6 +73,7 @@ import { normalizeAudioModeValue } from "@/lib/audio-generation";
 import { recallNodeSettings } from "@/lib/canvas/node-settings-memory";
 import { MODEL3D_DEFAULT_SIZE, MODEL3D_NODE_TYPE, STAGE3D_DEFAULT_SIZE, STAGE3D_NODE_TYPE } from "@/lib/canvas/model3d";
 import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { rememberLastCanvas } from "@/lib/canvas/last-canvas";
 import {
     audioExtension,
     buildAngleLabel,
@@ -789,6 +790,8 @@ function InfiniteCanvasPage() {
                 };
                 setHistoryState({ canUndo: false, canRedo: false });
                 setLoadedProjectId(projectId);
+                // 只有真正加载成功才算「打开过」，供下次启动恢复。
+                rememberLastCanvas(projectId);
             } catch {
                 if (isCurrent()) setProjectLoadFailed(true);
             }
