@@ -265,6 +265,17 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
   }
   assertCloudBaseUrl(baseUrl);
   const endpoint = cloudChatUrl(baseUrl);
+  // 本机模型服务（LM Studio / Ollama / llama.cpp 等）对 temperature 的接受度不一：
+  // 有的只允许 1，有的直接拿它当采样锁死输出。回环地址视为「本机自用」，
+  // 不传该参数，让服务用自己的默认值。
+  const isLoopbackEndpoint = (() => {
+    try {
+      const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+      return host === "localhost" || host === "::1" || /^127\./.test(host);
+    } catch {
+      return false;
+    }
+  })();
   const userContent = images.length
     ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))]
     : userText;
@@ -277,18 +288,20 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
   }
   const started = Date.now();
   const post = async (requestTemperature) => {
+    const payload = {
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: maxTokens,
+    };
+    // 本机服务不传 temperature，交给模型自己的默认采样。
+    if (!isLoopbackEndpoint) payload.temperature = requestTemperature;
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userContent },
-        ],
-        temperature: requestTemperature,
-        max_tokens: maxTokens,
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     const text = await response.text();
@@ -302,7 +315,8 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
   };
   try {
     let { response, text, data } = await post(temperature);
-    if (!response.ok && temperature !== 1) {
+    // 回环地址的请求体里本来就没有 temperature，重试成 1 也改变不了什么，直接跳过。
+    if (!response.ok && !isLoopbackEndpoint && temperature !== 1) {
       const message = data?.error?.message || data?.message || text || "";
       // Kimi 等思考模型只接受 temperature=1；按报错重试一次，不维护模型名白名单。
       if (/invalid temperature|only\s+1\s+is\s+allowed|temperature.*not\s+supported/i.test(String(message))) {

@@ -391,23 +391,23 @@ test("LAN private base urls still require ALLOW_PRIVATE_CLOUD", async () => {
 });
 
 test("cloud H3 retries with temperature=1 when the provider rejects 0.6", async () => {
+    // 这条重试逻辑只对远程服务有意义：回环地址根本不发 temperature（见下一条测试）。
+    // 这里 stub fetch，既能断言请求体，又不用真的连一台远程服务器。
     const bodies = [];
-    const server = http.createServer((req, res) => {
-        let body = "";
-        req.on("data", (chunk) => { body += String(chunk); });
-        req.on("end", () => {
-            bodies.push(JSON.parse(body));
-            res.setHeader("content-type", "application/json");
-            if (bodies.length === 1) {
-                res.statusCode = 400;
-                res.end(JSON.stringify({ error: { message: "invalid temperature: only 1 is allowed for this model" } }));
-                return;
-            }
-            res.end(JSON.stringify({ choices: [{ message: { content: "optimized prompt" } }] }));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body || "{}")));
+        if (bodies.length === 1) {
+            return new Response(JSON.stringify({ error: { message: "invalid temperature: only 1 is allowed for this model" } }), {
+                status: 400,
+                headers: { "content-type": "application/json" },
+            });
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: "optimized prompt" } }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
         });
-    });
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = server.address().port;
+    };
     try {
         const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
         const result = await optimizer.optimize({
@@ -415,12 +415,81 @@ test("cloud H3 retries with temperature=1 when the provider rejects 0.6", async 
             mode: "文生视频(T2VA)",
             duration: 5,
             engine: "cloud",
-            cloud: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test", model: "kimi-thinking" },
+            cloud: { baseUrl: "https://api.example.com/v1", apiKey: "test", model: "kimi-thinking" },
         });
         assert.equal(bodies.length, 2);
         assert.equal(bodies[0].temperature, 0.6);
         assert.equal(bodies[1].temperature, 1);
         assert.equal(result.prompt, "optimized prompt");
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("loopback endpoints do not receive temperature at all", async () => {
+    // 本机模型服务对 temperature 的接受度不一（有的只允许 1，有的被它锁死采样），
+    // 回环地址一律不传，交给服务自己的默认值。
+    const bodies = [];
+    const server = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => { body += String(chunk); });
+        req.on("end", () => {
+            bodies.push(JSON.parse(body));
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ choices: [{ message: { content: "本机回复" } }] }));
+        });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    try {
+        const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
+        for (const host of ["127.0.0.1", "localhost"]) {
+            bodies.length = 0;
+            const result = await optimizer.optimize({
+                prompt: "一只猫",
+                mode: "文生视频(T2VA)",
+                duration: 5,
+                engine: "cloud",
+                cloud: { baseUrl: `http://${host}:${port}/v1`, apiKey: "test", model: "local-model" },
+            });
+            assert.equal(result.prompt, "本机回复", `${host} 应正常返回`);
+            assert.equal(bodies.length, 1);
+            assert.equal("temperature" in bodies[0], false, `${host} 的请求体不应包含 temperature`);
+            // 其它参数该照常带，别为了去掉一个字段把请求削没了
+            assert.equal(bodies[0].model, "local-model");
+            assert.ok(bodies[0].messages?.length);
+        }
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+test("loopback is not retried on a temperature rejection it cannot fix", async () => {
+    // 回环请求里没有 temperature，重试成 1 也改变不了结果，不该白跑第二遍。
+    let calls = 0;
+    const server = http.createServer((req, res) => {
+        req.resume();
+        req.on("end", () => {
+            calls += 1;
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "invalid temperature: only 1 is allowed for this model" } }));
+        });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    try {
+        const optimizer = createPromptOptimizer({ config: { rootDir }, comfy: null, logger: null });
+        await assert.rejects(
+            () => optimizer.optimize({
+                prompt: "一只猫",
+                mode: "文生视频(T2VA)",
+                duration: 5,
+                engine: "cloud",
+                cloud: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "test", model: "local" },
+            }),
+            /云端 API 失败/,
+        );
+        assert.equal(calls, 1, "回环地址不应因为 temperature 报错而重试");
     } finally {
         await new Promise((resolve) => server.close(resolve));
     }
