@@ -525,6 +525,14 @@ export function detectFreeBindings(workflow, objectInfo = {}) {
     .sort(([a], [b]) => Number(a) - Number(b))
     .map(([id, node]) => ({ node: id, input: "image", title: node._meta?.title || node.class_type }));
 
+  // 音频输入（音色克隆的参考音频）。和图片不同，LoadAudio 的 audio 是文件名字符串，
+  // 必须显式写回，否则 ComfyUI 会拿着工作流里写死的 reference.flac 去做节点校验并报
+  // "Custom validation failed"。
+  const audios = entries
+    .filter(([id, node]) => reachable.has(id) && /^(LoadAudio|LoadAudioUpload)/.test(node.class_type) && typeof node.inputs?.audio === "string")
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([id, node]) => ({ node: id, input: "audio", title: node._meta?.title || node.class_type }));
+
   const sizes = entries
     .filter(([id, node]) => reachable.has(id) && numericInput(node, "width") !== null && numericInput(node, "height") !== null)
     .sort(([a], [b]) => Number(a) - Number(b))
@@ -566,6 +574,7 @@ export function detectFreeBindings(workflow, objectInfo = {}) {
     prompt,
     textInputs,
     images,
+    audios,
     sizes,
     ratios,
     batches,
@@ -589,6 +598,7 @@ export function bindingSummary(bindings) {
       role: String(item.role || "unknown"),
     })),
     imageInputs: bindings.images?.length || 0,
+    audioInputs: bindings.audios?.length || 0,
     size: bindings.sizes?.[0] ? { width: bindings.sizes[0].width, height: bindings.sizes[0].height } : null,
     aspectRatio,
     aspectRatios,

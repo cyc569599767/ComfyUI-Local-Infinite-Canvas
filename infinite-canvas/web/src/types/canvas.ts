@@ -47,6 +47,8 @@ export type CanvasFreeCardInfo = {
     prompt: boolean;
     textInputs?: Array<{ node: string; input: string; label: string; default: string; role: string }>;
     imageInputs: number;
+    /** 参考音频输入数量（音色克隆类工作流需要连入音频节点）。 */
+    audioInputs?: number;
     size?: { width: number; height: number } | null;
     aspectRatio?: string | null;
     aspectRatios?: string[];

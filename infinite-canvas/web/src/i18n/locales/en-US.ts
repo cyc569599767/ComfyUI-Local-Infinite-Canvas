@@ -302,7 +302,7 @@ export default {
             prompt: "Positive prompt", promptPlaceholder: "Enter a prompt", optimize: "Optimize prompt", optimizing: "Optimizing",
             settings: "Generation settings", currentSettings: "Current settings", noSettings: "Workflow defaults", countSummary: "{{count}} images", seedSummary: "Seed {{seed}}",
             aspectRatio: "Aspect ratio", aspectRatioHint: "Written to the workflow's resolution/aspect-ratio node; final pixels still depend on the workflow",
-            generate: "Generate", stop: "Stop", needPrompt: "Enter a prompt", imageInputs: "Image inputs", warnings: "Notes",
+            generate: "Generate", stop: "Stop", needPrompt: "Enter a prompt", imageInputs: "Image inputs", audioInputs: "Reference audio", audioInputsHint: "Connect an audio node as the reference voice first; otherwise the workflow fails validation for a missing reference", warnings: "Notes",
             sourceChanged: "The source workflow changed; click Sync workflow", sourceMissing: "The source workflow file is missing", sourceMissingHint: "The source may have been deleted in ComfyUI. You can still generate from the current snapshot, but sync and Edit in ComfyUI are unavailable. Select another workflow if needed.", importFailed: "Failed to import workflow", imported: "Workflow imported", selectFirst: "Select a workflow first",
             cardArchived: "Archived to free cards", saveFailed: "Operation failed",
         },

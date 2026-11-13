@@ -4529,6 +4529,15 @@ function InfiniteCanvasPage() {
                     const controller = startGenerationRequest(childId, nodeId, nodeId, runController);
                     // 连入的参考音频用于音色克隆类工作流；没有就按纯生成处理。
                     const referenceAudio = context.referenceAudios[0];
+                    // 工作流明确需要参考音频却没连，别提交——ComfyUI 会拿工作流里写死的
+                    // 占位文件名做校验，返回一句难以理解的 "Custom validation failed"。
+                    if ((info.audioInputs || 0) > 0 && !referenceAudio) {
+                        message.warning(t("canvas.freeCard.audioInputsHint"));
+                        setNodes((prev) => prev.filter((item) => item.id !== childId).map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined } } : item)));
+                        setConnections((prev) => prev.filter((item) => item.toNodeId !== childId));
+                        childId = "";
+                        return;
+                    }
                     const audioFile = referenceAudio
                         ? new File([await resolveReferenceAudioBlob(referenceAudio.storageKey || referenceAudio.url)], referenceAudio.name || "reference.wav", { type: referenceAudio.type || "audio/wav" })
                         : undefined;

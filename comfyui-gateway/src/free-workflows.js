@@ -23,7 +23,7 @@ function imageValue(uploaded) {
   return uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
 }
 
-export function applyFreeInputs(workflow, bindings, { prompt, texts = [], uploadedImages = [], size, count, seed, seedFixed, ratio } = {}) {
+export function applyFreeInputs(workflow, bindings, { prompt, texts = [], uploadedImages = [], uploadedAudios = [], size, count, seed, seedFixed, ratio } = {}) {
   const next = deepClone(pruneUnreachableNodes(workflow) || {});
   // 只允许写回扫描时识别出的文本输入，避免通过接口改到模型名/文件名等字段。
   const allowed = new Set((bindings.textInputs || []).map((item) => `${item.node}\u0000${item.input}`));
@@ -44,6 +44,14 @@ export function applyFreeInputs(workflow, bindings, { prompt, texts = [], upload
   }
   (bindings.images || []).forEach((binding, index) => {
     const uploaded = uploadedImages[index];
+    const value = imageValue(uploaded);
+    const node = next[binding.node];
+    if (value !== undefined && node?.inputs) node.inputs[binding.input] = value;
+  });
+  // 参考音频（音色克隆）：LoadAudio 的 audio 是文件名 combo，必须写字符串。
+  // 没上传参考音频时保持工作流原值不动——ComfyUI 会自己报缺失，比网关猜测更准确。
+  (bindings.audios || []).forEach((binding, index) => {
+    const uploaded = uploadedAudios[index];
     const value = imageValue(uploaded);
     const node = next[binding.node];
     if (value !== undefined && node?.inputs) node.inputs[binding.input] = value;

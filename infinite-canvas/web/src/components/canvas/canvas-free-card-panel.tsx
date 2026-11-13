@@ -25,7 +25,7 @@ import {
     type FreeWorkflowSummary,
     type FreeWorkflowOutputType,
 } from "@/services/api/free-workflow";
-import { CanvasNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, isAudioNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 
 type CanvasFreeCardPanelProps = {
@@ -69,6 +69,7 @@ export function freeCardInfoFromSummary(summary: FreeWorkflowSummary): CanvasFre
         prompt: summary.prompt,
         textInputs: summary.textInputs || [],
         imageInputs: summary.imageInputs,
+        audioInputs: summary.audioInputs || 0,
         size: summary.size,
         aspectRatio: summary.aspectRatio,
         aspectRatios: summary.aspectRatios,
@@ -223,6 +224,14 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                 dataUrl: item.metadata?.content || "",
                 storageKey: item.metadata?.storageKey,
             }));
+    }, [connectedNodes, nodes]);
+
+    // 参考音频（音色克隆）：连入的音频节点就是参考音色。
+    // 缺了它 ComfyUI 会拿工作流里写死的占位文件名做校验并报 "Custom validation failed"，
+    // 所以在卡片上明确提示，别让用户跑一趟才发现。
+    const audioReferences = useMemo(() => {
+        const resources = connectedNodes.flatMap((item) => (item.type === CanvasNodeType.Group ? getGroupResourceNodes(item.id, nodes) : [item]));
+        return resources.filter((item) => isAudioNodeType(item.type) && item.metadata?.content);
     }, [connectedNodes, nodes]);
 
     const sizeText = node.metadata?.size || (info?.size ? `${info.size.width}x${info.size.height}` : "");
@@ -587,6 +596,16 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                     </span>
                                 </div>
                                 <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={imageConnectedNodes} onDisconnect={onDisconnectReference} onStartSelection={onStartReferenceSelection} />
+                            </div>
+                        ) : null}
+
+                        {(info.audioInputs || 0) > 0 ? (
+                            <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: audioReferences.length ? theme.node.muted : "#f59e0b" }}>
+                                <span>{t("canvas.freeCard.audioInputs")}</span>
+                                <span>
+                                    {audioReferences.length}/{info.audioInputs}
+                                </span>
+                                {audioReferences.length ? null : <span>· {t("canvas.freeCard.audioInputsHint")}</span>}
                             </div>
                         ) : null}
 

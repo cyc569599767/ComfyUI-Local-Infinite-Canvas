@@ -50,6 +50,8 @@ export type FreeWorkflowSummary = {
     prompt: boolean;
     textInputs?: FreeWorkflowTextInput[];
     imageInputs: number;
+    /** 参考音频输入数量（音色克隆类工作流为 1）。 */
+    audioInputs?: number;
     size: { width: number; height: number } | null;
     aspectRatio?: string | null;
     aspectRatios?: string[];
