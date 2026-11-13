@@ -1,3 +1,4 @@
+import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type ConnectionHandle, type ViewportTransform } from "@/types/canvas";
 
 export function nodeBounds(nodes: CanvasNodeData[]) {
@@ -138,16 +139,50 @@ export function getConnectionTargetAnchor(node: CanvasNodeData, current: Connect
     };
 }
 
+/**
+ * 节点有没有右侧输出点（source handle）。
+ * 左侧输入点只能接到别的节点的输出点上，没有输出点的节点不能作为上游。
+ * 渲染层和连接校验共用这一个判定，避免两边各写一套条件而漂移。
+ */
+export function hasOutputHandle(node: Pick<CanvasNodeData, "type">): boolean {
+    if (node.type === CanvasNodeType.Config) return false;
+    if (node.type === CanvasNodeType.Group) return false;
+    return getNodeDefinition(node.type)?.hasSourceHandle ?? true;
+}
+
+/**
+ * 建立一条连线，返回规范化的 from(上游/提供内容) → to(下游/消费内容)。
+ *
+ * 方向由「从哪个点拖出」和「配置节点」共同决定：
+ * - 从右侧输出点（source）拖出：当前节点是上游，落点是下游 → 当前 → 落点。
+ * - 从左侧输入点（target）拖出：当前节点是下游，落点是上游 → 落点 → 当前。
+ * - 配置节点自身不产出内容：任何一方是配置节点时，它总是作为下游接收方，
+ *   这与它原来的行为一致（配置节点没有输出点，只能被连入）。
+ *
+ * 连接类型规则：`from` 必须能产出内容（有输出点）。左侧输入点只能接到
+ * 别的节点的输出点上，因此落点节点必须有输出点，否则这条边没有提供方。
+ */
 export function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
     const first = nodes.find((node) => node.id === firstNodeId);
     const second = nodes.find((node) => node.id === secondNodeId);
     if (!first || !second || first.id === second.id) return null;
     if (second.type === CanvasNodeType.Group) return null;
     if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
-    if (second.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
-    if (first.type === CanvasNodeType.Config && firstHandleType === "target") return { fromNodeId: second.id, toNodeId: first.id };
-    if (first.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
-    return { fromNodeId: first.id, toNodeId: second.id };
+
+    // 配置节点永远是下游：把另一方当作提供方。
+    if (second.type === CanvasNodeType.Config) {
+        if (!hasOutputHandle(first)) return null;
+        return { fromNodeId: first.id, toNodeId: second.id };
+    }
+    if (first.type === CanvasNodeType.Config) {
+        if (!hasOutputHandle(second)) return null;
+        return { fromNodeId: second.id, toNodeId: first.id };
+    }
+
+    const [from, to] = firstHandleType === "target" ? [second, first] : [first, second];
+    // 提供方必须有输出点。
+    if (!hasOutputHandle(from)) return null;
+    return { fromNodeId: from.id, toNodeId: to.id };
 }
 
 export type FocusFrame = {

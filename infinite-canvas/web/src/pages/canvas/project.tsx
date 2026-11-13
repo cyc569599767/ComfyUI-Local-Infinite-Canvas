@@ -135,6 +135,8 @@ type CanvasClipboard = {
 type ConnectionDropTarget = {
     nodeId: string | null;
     isNearNode: boolean;
+    /** 拖到节点上但不满足连接条件的原因，用于松手时给出可读提示。 */
+    blockedReason?: "need-output-handle";
 };
 
 type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
@@ -1003,9 +1005,14 @@ function InfiniteCanvasPage() {
             const scale = Math.max(viewportRef.current.k, 0.05);
             const padding = CONNECTION_NODE_HIT_PADDING / scale;
             const handleRadius = CONNECTION_HANDLE_HIT_RADIUS / scale;
+            // 落点判定：拖到节点身体和拖到圆点都算落到该节点，不必精确命中 40px 的小圆点
+            // （那样反向拖拽几乎不可能成功）。能不能连由 normalizeConnection 判定：
+            // 从左侧输入点拖出时要求落点节点有输出点，否则这条边没有提供方。
+            const isTargetDrag = current.handleType === "target";
             let isNearNode = false;
             let bestNodeId: string | null = null;
             let bestPriority = Number.POSITIVE_INFINITY;
+            let sawBlockedNode = false;
 
             [...nodesRef.current]
                 .reverse()
@@ -1019,16 +1026,21 @@ function InfiniteCanvasPage() {
 
                     if (!hitsHandle && !hitsInside && !hitsExpanded) return;
                     isNearNode = true;
-                    if (node.id === current.nodeId || !normalizeConnection(current.nodeId, node.id, nodesRef.current, current.handleType)) return;
+                    if (node.id === current.nodeId) return;
+                    if (!normalizeConnection(current.nodeId, node.id, nodesRef.current, current.handleType)) {
+                        sawBlockedNode = true;
+                        return;
+                    }
 
-                    const priority = hitsInside ? 0 : hitsHandle ? 1 : 2;
+                    // 反向拖拽时圆点就是落点锚点，优先吸附；正向拖拽沿用身体优先的旧手感。
+                    const priority = isTargetDrag ? (hitsHandle ? 0 : hitsInside ? 1 : 2) : hitsInside ? 0 : hitsHandle ? 1 : 2;
                     if (priority < bestPriority) {
                         bestNodeId = node.id;
                         bestPriority = priority;
                     }
                 });
 
-            return { nodeId: bestNodeId, isNearNode };
+            return { nodeId: bestNodeId, isNearNode, blockedReason: !bestNodeId && sawBlockedNode ? "need-output-handle" : undefined };
         },
         [screenToCanvas],
     );
@@ -1853,6 +1865,8 @@ function InfiniteCanvasPage() {
                     connectNodes(currentConnection, dropTarget.nodeId);
                     setConnecting(null);
                 } else if (dropTarget.isNearNode) {
+                    // 松手在节点上但没接上：告诉用户为什么，别静默失败。
+                    if (dropTarget.blockedReason === "need-output-handle") message.warning(t("canvas.projectPage.connectToOutputHandle"));
                     setConnecting(null);
                 } else {
                     setMouseWorld(screenToCanvas(event.clientX, event.clientY));
@@ -1860,7 +1874,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [connectNodes, finishNodeDrag, getConnectionDropTarget, screenToCanvas, setConnecting],
+        [connectNodes, finishNodeDrag, getConnectionDropTarget, message, screenToCanvas, setConnecting, t],
     );
 
     useEffect(() => {
