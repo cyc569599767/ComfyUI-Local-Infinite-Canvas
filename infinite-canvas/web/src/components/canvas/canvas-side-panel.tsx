@@ -18,6 +18,7 @@ import { uploadMediaFile } from "@/services/file-storage";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
 import { readWorkflowApps, writeWorkflowApps, type WorkflowApp } from "@/lib/canvas/workflow-apps";
+import { WorkflowAppEditorModal } from "./workflow-app-editor-modal";
 import { useEffectiveConfig } from "@/stores/use-config-store";
 import { fetchFreeWorkflows, deleteFreeWorkflow, renameFreeWorkflow, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -1147,10 +1148,21 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
     const { t } = useTranslation();
     const [apps, setApps] = useState<WorkflowApp[]>([]);
     const [error, setError] = useState("");
+    const [editorOpen, setEditorOpen] = useState(false);
+    const [editingApp, setEditingApp] = useState<WorkflowApp | null>(null);
 
     useEffect(() => {
         setApps(readWorkflowApps());
     }, []);
+
+    const openCreate = () => {
+        setEditingApp(null);
+        setEditorOpen(true);
+    };
+    const openEdit = (app: WorkflowApp) => {
+        setEditingApp(app);
+        setEditorOpen(true);
+    };
 
     const availableIds = useMemo(() => new Set(workflows.map((item) => item.id)), [workflows]);
     const nameOf = useMemo(() => new Map(workflows.map((item) => [item.id, item.name])), [workflows]);
@@ -1167,9 +1179,18 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
 
     return (
         <div className="flex h-full min-h-0 flex-col">
-            {/* 子标签已经写了「应用」，这里不再重复标题，只留数量。 */}
+            {/* 子标签已经写了「应用」，这里不再重复标题，只留数量与新建入口。 */}
             <div className="flex items-center gap-2 px-4 pb-2">
                 {apps.length ? <span className="min-w-0 flex-1 truncate text-xs opacity-40">{apps.length}</span> : <span className="min-w-0 flex-1" />}
+                <button
+                    type="button"
+                    className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    title={t("canvas.sidePanel.workflowAppCreate")}
+                    aria-label={t("canvas.sidePanel.workflowAppCreate")}
+                    onClick={openCreate}
+                >
+                    <Plus className="size-3.5" />
+                </button>
             </div>
             <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {error ? (
@@ -1192,6 +1213,15 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
                                         <div className="mt-0.5 truncate text-[11px] opacity-50">
                                             {app.steps.length ? app.steps.map((step) => step.label || nameOf.get(step.workflowId) || t("canvas.sidePanel.workflowAppUnknownStep")).join(" → ") : t("canvas.sidePanel.workflowAppNoSteps")}
                                         </div>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="mt-1 grid size-7 shrink-0 place-items-center rounded-md opacity-35 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                                        title={t("canvas.sidePanel.workflowAppEdit")}
+                                        aria-label={t("canvas.sidePanel.workflowAppEdit")}
+                                        onClick={() => openEdit(app)}
+                                    >
+                                        <Pencil className="size-3.5" />
                                     </button>
                                     <Popconfirm
                                         title={t("canvas.sidePanel.workflowAppDeleteTitle", { name: app.name })}
@@ -1220,6 +1250,13 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
                     </Empty>
                 )}
             </div>
+            <WorkflowAppEditorModal
+                open={editorOpen}
+                onClose={() => setEditorOpen(false)}
+                workflows={workflows}
+                editing={editingApp}
+                onSaved={() => setApps(readWorkflowApps())}
+            />
         </div>
     );
 }
