@@ -6,7 +6,6 @@ import { useTranslation } from "react-i18next";
 
 import { fetchPrompts, type Prompt } from "@/services/api/prompts";
 import { LOCAL_ONLY } from "@/constant/app-mode";
-import { navigationTools } from "@/constant/navigation-tools";
 import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -15,7 +14,6 @@ export default function IndexPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
-    const [primaryTool] = navigationTools;
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
     const [promptShowcase, setPromptShowcase] = useState<Prompt[]>([]);
@@ -38,7 +36,10 @@ export default function IndexPage() {
                 <div className="relative flex min-h-[620px] flex-col items-center justify-center pt-10 text-center">
                     <h1 className="ai-title-aurora max-w-5xl text-balance text-5xl font-semibold tracking-normal sm:text-7xl lg:text-8xl">{t("meta.title")}</h1>
                     <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
-                        <Button type="primary" size="large" onClick={() => navigate(`/${primaryTool.slug}`)} icon={<ArrowRight className="size-4" />} iconPlacement="end">
+                        {/* 「我的项目」下线后 primaryTool 就是画布库，「开始使用」和「打开画布」会变成同一去处。
+                            这里让「开始使用」直接开一张新画布（画布页已有 mode=new 自动建项目并进入），
+                            「打开画布」保留为进入画布列表。 */}
+                        <Button type="primary" size="large" onClick={() => navigate("/canvas?mode=new")} icon={<ArrowRight className="size-4" />} iconPlacement="end">
                             {t("home.start")}
                         </Button>
                         <Button size="large" onClick={() => navigate("/canvas")}>

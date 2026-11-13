@@ -15,11 +15,12 @@ import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { importCanvasProjects } from "@/lib/canvas/canvas-import";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 
-// Both library entries operate on the same persisted projects, without a migration.
-export default function CanvasPage({ library = "canvas" }: { library?: "canvas" | "projects" }) {
+// 画布库：列出所有已保存的画布。原先还有一个 /projects 入口共用本页、只换标题，
+// 两个入口指向同一批数据却没有区别，已经合并掉，这里不再接受 library 参数。
+export default function CanvasPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
-    const libraryTitle = t(library === "projects" ? "navigation.projects" : "canvas.title");
+    const libraryTitle = t("canvas.title");
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const inputRef = useRef<HTMLInputElement>(null);

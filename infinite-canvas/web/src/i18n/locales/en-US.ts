@@ -419,7 +419,6 @@ export default {
         },
     },
     navigation: {
-        projects: "My Projects",
         canvas: "My Canvases",
         image: "Image Studio",
         video: "Video Studio",

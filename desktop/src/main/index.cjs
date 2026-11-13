@@ -356,33 +356,35 @@ async function runSmokeTest() {
       if (result.desktopMenu !== '无界工作台') throw new Error('Desktop workbench label mismatch');
       result.navigation = await canvasContents.executeJavaScript(`(async () => {
         const links = [...document.querySelectorAll('header nav a')];
-        const projects = links.findIndex(link => link.getAttribute('href') === '/projects');
-        const canvas = links.findIndex(link => link.getAttribute('href') === '/canvas');
-        if (projects < 0 || canvas !== projects + 1 || links[projects].textContent.trim() !== '我的项目') {
-          throw new Error('My Projects must immediately precede My Canvases');
+        // 「我的项目」已下线：它和「我的画布」指向同一批数据，只是标题不同。
+        // 这里既要确认入口消失，也要确认没有残留的死链。
+        if (links.some(link => link.getAttribute('href') === '/projects')) {
+          throw new Error('My Projects entry should be removed from the nav');
         }
-        links[projects].click();
+        const canvas = links.findIndex(link => link.getAttribute('href') === '/canvas');
+        if (canvas !== 0) throw new Error('My Canvases should be the first nav entry');
+        links[canvas].click();
         const deadline = Date.now() + 10000;
-        while (document.querySelector('main h1')?.textContent !== '我的项目') {
-          if (Date.now() > deadline) throw new Error('Projects menu did not open its library');
+        while (document.querySelector('main h1')?.textContent !== '无限画布') {
+          if (Date.now() > deadline) throw new Error('Canvas menu did not open its library');
           await new Promise(resolve => setTimeout(resolve, 50));
         }
         return { order: links.map(link => link.textContent.trim()), path: location.pathname,
           active: document.querySelector('header nav a[aria-current=page]')?.getAttribute('href') };
       })()`);
-      if (result.navigation.path !== '/projects' || result.navigation.active !== '/projects') throw new Error('Projects route/active state mismatch');
-      await canvasContents.loadURL(`${manager.state.services.canvas.url}/projects`);
+      if (result.navigation.path !== '/canvas' || result.navigation.active !== '/canvas') throw new Error('Canvas route/active state mismatch');
+      await canvasContents.loadURL(`${manager.state.services.canvas.url}/canvas`);
       await canvasContents.executeJavaScript(`(async () => {
         const deadline = Date.now() + 10000;
-        while (document.querySelector('main h1')?.textContent !== '我的项目') {
-          if (Date.now() > deadline) throw new Error('Projects deep-link reload failed');
+        while (document.querySelector('main h1')?.textContent !== '无限画布') {
+          if (Date.now() > deadline) throw new Error('Canvas deep-link reload failed');
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       })()`);
       result.navigation.deepLinkReload = true;
       const navigationDir = path.join(application.userData, 'test-artifacts');
       fs.mkdirSync(navigationDir, { recursive: true });
-      await captureTestImage(canvasContents, path.join(navigationDir, 'projects-menu.png'));
+      await captureTestImage(canvasContents, path.join(navigationDir, 'canvas-menu.png'));
     }
     await canvasContents.loadURL(`${manager.state.services.canvas.url}/canvas?mode=recent`);
     result.project = await canvasContents.executeJavaScript(`(async () => {
