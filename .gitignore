@@ -45,6 +45,9 @@ docs/PROJECT_LOG.md
 docs/FEEDBACK-BACKLOG.md
 docs/RELEASE-HISTORY.md
 
+# AI assistant working memory (local only)
+.workbuddy-ai/
+
 # local release artifacts
 /patches/
 
