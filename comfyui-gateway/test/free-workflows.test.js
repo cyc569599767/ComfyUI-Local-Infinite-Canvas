@@ -547,3 +547,68 @@ test("describeWorkflowGraph lists bindable inputs and skips linked ones", async 
   assert.equal(sampler.inputs.find((input) => input.name === "sampler_name").kind, "combo");
   assert.equal(graph.nodes.find((node) => node.classType === "SaveImage").output, true);
 });
+
+test("surface defaults to card and round-trips through setCustomBindings and publicEntry", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-surface-"));
+  try {
+    const entry = {
+      id: "fc-surface",
+      name: "Surface",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      customBindings: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+
+    const updated = await store.setCustomBindings("fc-surface", [
+      { node: "2", input: "steps", label: "steps" },
+      { node: "2", input: "cfg", label: "cfg", surface: "settings" },
+      // 不认的 surface 落到 card，不能让整条绑定被丢掉。
+      { node: "2", input: "sampler_name", label: "sampler", surface: "sideways" },
+    ]);
+    const byInput = Object.fromEntries(updated.customBindings.map((item) => [item.input, item.surface]));
+    assert.equal(byInput.steps, "card", "missing surface defaults to card");
+    assert.equal(byInput.cfg, "settings", "explicit settings is kept");
+    assert.equal(byInput.sampler_name, "card", "unknown surface falls back to card");
+
+    // publicEntry 是前端唯一读到的形态：漏掉 surface 会让用户选的设置刷新后跳回卡片。
+    const pub = await store.publicEntry(store.get("fc-surface"));
+    const pubByInput = Object.fromEntries(pub.customBindings.map((item) => [item.input, item.surface]));
+    assert.equal(pubByInput.cfg, "settings");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("legacy bindings without surface still read back as card", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-legacy-surface-"));
+  try {
+    const entry = {
+      id: "fc-legacy",
+      name: "Legacy",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      // 加 surface 之前存下来的数据。
+      customBindings: [{ node: "2", input: "steps", label: "steps" }],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+    const pub = await store.publicEntry(store.get("fc-legacy"));
+    assert.equal(pub.customBindings[0].surface, "card");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});

@@ -30,6 +30,24 @@ function imageValue(uploaded) {
  * `steps` 是 20 而 `"20"` 会让 ComfyUI 直接报校验失败；`sampler_name` 是字符串，
  * 写成数字同样会失败。所以按工作流里该输入的现有值类型来定，而不是猜。
  */
+/** 固定项的显示位置：卡片上直接编辑，还是收进「生成设置」里。 */
+const BINDING_SURFACES = new Set(["card", "settings"]);
+
+/**
+ * 固定项对外的形态。
+ *
+ * 一律走这里再返回给前端，避免「保存时带 surface、读取时又漏掉」这种两处不同步的错：
+ * 那样用户切到生成设置、刷新后它又跳回卡片上，看起来像没保存。
+ */
+export function publicBinding(item) {
+  return {
+    node: String(item?.node ?? ""),
+    input: String(item?.input ?? ""),
+    label: String(item?.label || item?.input || ""),
+    surface: BINDING_SURFACES.has(item?.surface) ? item.surface : "card",
+  };
+}
+
 function coerceCustomValue(original, incoming) {
   if (typeof original === "number") {
     const value = Number(incoming);
@@ -337,6 +355,8 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
         node: nodeId,
         input,
         label: String(raw.label || "").trim().slice(0, 60) || input,
+        // 没带 surface 的旧数据默认放卡片上，和加这个字段之前的表现一致。
+        surface: BINDING_SURFACES.has(raw.surface) ? raw.surface : "card",
       });
     }
     entry.customBindings = next;
@@ -432,7 +452,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
       sourceChanged: source.changed,
       sourceMissing: !source.exists,
       preset: entry.preset || null,
-      customBindings: (entry.customBindings || []).map((item) => ({ node: String(item.node), input: String(item.input), label: String(item.label || item.input) })),
+      customBindings: (entry.customBindings || []).map(publicBinding),
       ...bindingSummary(entry.bindings || {}),
       warnings: entry.warnings || [],
     };

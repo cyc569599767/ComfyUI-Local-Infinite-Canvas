@@ -29,7 +29,7 @@ import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } 
 import { createVideoInterpolator } from "./video-interpolation.js";
 import { createPreviewHub } from "./preview-hub.js";
 import { absoluteTaskUrl } from "./public-url.js";
-import { createFreeWorkflowStore, applyFreeInputs } from "./free-workflows.js";
+import { createFreeWorkflowStore, applyFreeInputs, publicBinding } from "./free-workflows.js";
 import { describeWorkflowGraph } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
 import { runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
@@ -1505,7 +1505,7 @@ export async function createGatewayApp(overrides = {}) {
     const objectInfo = await comfy.objectInfo().catch(() => ({}));
     res.json({
       graph: describeWorkflowGraph(entry.workflow, objectInfo),
-      customBindings: (entry.customBindings || []).map((item) => ({ node: String(item.node), input: String(item.input), label: String(item.label || item.input) })),
+      customBindings: (entry.customBindings || []).map(publicBinding),
     });
   });
 

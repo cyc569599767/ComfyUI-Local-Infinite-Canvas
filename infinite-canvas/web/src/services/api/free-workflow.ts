@@ -63,11 +63,16 @@ export type FreeWorkflowSummary = {
     warnings: string[];
 };
 
+/** 固定项出现在哪里：卡片上直接编辑，还是收进「生成设置」弹层。 */
+export type FreeWorkflowBindingSurface = "card" | "settings";
+
 /** 用户固定到卡片上的配置项（工作流里的某个节点的某个输入）。 */
 export type FreeWorkflowCustomBinding = {
     node: string;
     input: string;
     label: string;
+    /** 缺省（旧数据）按 card 处理。 */
+    surface?: FreeWorkflowBindingSurface;
 };
 
 /** 简化节点图：只保留可绑定的输入，供画布内的可视化用。 */
@@ -211,7 +216,7 @@ export async function saveFreeWorkflowBindings(config: AiConfig, id: string, bin
     try {
         const response = await axios.patch<{ workflow?: FreeWorkflowSummary }>(
             `${root}/api/free-workflows/${encodeURIComponent(id)}/bindings`,
-            { bindings: bindings.map((item) => ({ node: item.node, input: item.input, label: item.label })) },
+            { bindings: bindings.map((item) => ({ node: item.node, input: item.input, label: item.label, surface: item.surface === "settings" ? "settings" : "card" })) },
             { timeout: 30000 },
         );
         if (!response.data?.workflow) throw new Error("保存固定配置失败");

@@ -84,3 +84,40 @@ test('数字清空时跳过，避免把空串写进 INT/FLOAT 字段', () => {
 test('没有固定项时不提交任何值', () => {
     expect(buildCustomValues([], {})).toEqual([]);
 });
+
+// ── 显示位置（卡片 / 生成设置） ──
+
+const { bindingSurface, splitBySurface } = await import('../src/lib/canvas/free-card-pinned');
+
+test('旧数据没有 surface 时落在卡片上，和加字段之前一致', () => {
+    const merged = mergePinned([{ node: '2', input: 'steps', label: '步数' }], graph());
+    expect(merged[0].surface).toBe('card');
+    // 不认识的值也不该让这条绑定消失，回落到卡片。
+    expect(bindingSurface({ surface: 'nonsense' })).toBe('card');
+});
+
+test('surface 从绑定读回，不会在合并时丢掉', () => {
+    const merged = mergePinned([{ node: '2', input: 'steps', label: '步数', surface: 'settings' }], graph());
+    expect(merged[0].surface).toBe('settings');
+});
+
+test('按显示位置分组且保持原有顺序', () => {
+    const merged = mergePinned(
+        [
+            { node: '2', input: 'steps', label: 'a' },
+            { node: '2', input: 'cfg', label: 'b', surface: 'settings' },
+            { node: '2', input: 'sampler_name', label: 'c' },
+            { node: '2', input: 'positive', label: 'd', surface: 'settings' },
+        ],
+        graph(),
+    );
+    const { card, settings } = splitBySurface(merged);
+    expect(card.map((item) => item.label)).toEqual(['a', 'c']);
+    expect(settings.map((item) => item.label)).toEqual(['b', 'd']);
+});
+
+test('两边都为空时不产生多余分组', () => {
+    const { card, settings } = splitBySurface([]);
+    expect(card).toEqual([]);
+    expect(settings).toEqual([]);
+});

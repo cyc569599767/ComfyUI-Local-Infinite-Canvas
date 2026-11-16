@@ -4,7 +4,7 @@
  * 从组件里抽出来是为了能测：这里的关键判断（哪些绑定还有效、值怎么传回网关）
  * 出错时表现是「卡片上少一个控件」或「改了没生效」，靠肉眼看界面很难发现。
  */
-import type { FreeWorkflowCustomBinding, FreeWorkflowGraph, FreeWorkflowGraphInput, FreeWorkflowGraphNode } from "@/services/api/free-workflow";
+import type { FreeWorkflowBindingSurface, FreeWorkflowCustomBinding, FreeWorkflowGraph, FreeWorkflowGraphInput, FreeWorkflowGraphNode } from "@/services/api/free-workflow";
 
 export type PinnedItem = FreeWorkflowCustomBinding & {
     /** 输入类型，决定卡片上渲染什么控件。 */
@@ -13,10 +13,25 @@ export type PinnedItem = FreeWorkflowCustomBinding & {
     integer: boolean;
     /** 工作流里的原始值，作为卡片控件的默认值。 */
     value: FreeWorkflowGraphInput["value"];
+    /** 固定项显示在哪里，缺省按卡片处理。 */
+    surface: FreeWorkflowBindingSurface;
 };
 
 export function customKey(item: { node: string; input: string }) {
     return `${item.node}\u0000${item.input}`;
+}
+
+/** 归一化显示位置：不认识的取值一律落到卡片上，避免整条绑定凭空消失。 */
+export function bindingSurface(item: { surface?: string }): FreeWorkflowBindingSurface {
+    return item.surface === "settings" ? "settings" : "card";
+}
+
+/** 按显示位置分组，顺序保持不变（用户在弹窗里排的次序就是卡片上的次序）。 */
+export function splitBySurface(pinned: PinnedItem[]) {
+    const card: PinnedItem[] = [];
+    const settings: PinnedItem[] = [];
+    for (const item of pinned) (item.surface === "settings" ? settings : card).push(item);
+    return { card, settings };
 }
 
 /**
@@ -36,6 +51,7 @@ export function mergePinned(bindings: FreeWorkflowCustomBinding[], graph: FreeWo
             node: binding.node,
             input: binding.input,
             label: binding.label || binding.input,
+            surface: bindingSurface(binding),
             kind: input.kind,
             options: input.options,
             integer: input.integer,
