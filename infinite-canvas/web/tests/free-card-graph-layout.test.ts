@@ -201,3 +201,54 @@ test('可视区没测量时用默认尺寸，不闪', () => {
     expect(g.columnGap).toBe(GRAPH_COLUMN_GAP);
     expect(g.nodeWidth).toBe(GRAPH_NODE_WIDTH);
 });
+
+// ── 视图变换（滚轮缩放 / 中键平移） ──
+// 这里错了的表现很隐蔽：图能显示，但缩放时光标下的位置慢慢漂移，用起来「说不清哪里不对」。
+
+const { MAX_VIEW_SCALE, MIN_VIEW_SCALE, centerGraphView, clampViewScale, zoomViewAt } = await import(
+    '../src/lib/canvas/free-card-graph-layout'
+);
+
+/** 世界坐标 → 屏幕坐标。和 CSS 的 translate(x,y) scale(s) 一致。 */
+function toScreen(view: { scale: number; x: number; y: number }, world: { x: number; y: number }) {
+    return { x: world.x * view.scale + view.x, y: world.y * view.scale + view.y };
+}
+
+test('缩放锚点不动：光标下的内容保持在光标位置', () => {
+    const view = { scale: 1, x: 0, y: 0 };
+    const cursor = { x: 300, y: 200 };
+    const world = { x: 300, y: 200 };
+    const next = zoomViewAt(view, cursor, 2);
+    const screen = toScreen(next, world);
+    expect(screen.x).toBeCloseTo(cursor.x, 6);
+    expect(screen.y).toBeCloseTo(cursor.y, 6);
+});
+
+test('已有平移/缩放时锚点仍然不动', () => {
+    const view = { scale: 1.7, x: -140, y: 60 };
+    const cursor = { x: 250, y: 90 };
+    // 反推光标下的世界坐标，缩放后必须回到同一屏幕点。
+    const world = { x: (cursor.x - view.x) / view.scale, y: (cursor.y - view.y) / view.scale };
+    const next = zoomViewAt(view, cursor, 2.4);
+    const screen = toScreen(next, world);
+    expect(screen.x).toBeCloseTo(cursor.x, 6);
+    expect(screen.y).toBeCloseTo(cursor.y, 6);
+});
+
+test('缩放被夹在上下限内', () => {
+    expect(clampViewScale(99)).toBe(MAX_VIEW_SCALE);
+    expect(clampViewScale(0.001)).toBe(MIN_VIEW_SCALE);
+    expect(clampViewScale(Number.NaN)).toBe(1);
+    // 触到上限后继续放大不再移动内容，避免越滚越偏。
+    const view = { scale: MAX_VIEW_SCALE, x: 10, y: 10 };
+    expect(zoomViewAt(view, { x: 100, y: 100 }, 99)).toEqual(view);
+});
+
+test('内容比视口小时的居中偏移是正的，大于视口时不推出左上角', () => {
+    const small = centerGraphView({ width: 200, height: 100 }, { width: 600, height: 400 }, 1);
+    expect(small.x).toBe(200);
+    expect(small.y).toBe(150);
+    const large = centerGraphView({ width: 2000, height: 2000 }, { width: 600, height: 400 }, 1);
+    expect(large.x).toBe(0);
+    expect(large.y).toBe(0);
+});

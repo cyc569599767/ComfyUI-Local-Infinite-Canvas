@@ -22,7 +22,6 @@ import {
     importFreeWorkflow,
     saveFreeWorkflowBindings,
     syncFreeWorkflow,
-    type FreeWorkflowCustomBinding,
     type FreeWorkflowGraph,
     type FreeWorkflowPreset,
     type FreeWorkflowSource,
@@ -30,7 +29,7 @@ import {
     type FreeWorkflowOutputType,
 } from "@/services/api/free-workflow";
 import { FreeCardGraphPanel } from "@/components/canvas/free-card-graph-panel";
-import { buildCustomValues, customKey, mergePinned, type PinnedItem } from "@/lib/canvas/free-card-pinned";
+import { buildCustomValues, customKey, mergePinned, splitBySurface, type PinnedItem } from "@/lib/canvas/free-card-pinned";
 import { CanvasNodeType, isAudioNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 
@@ -267,7 +266,9 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     const ratioValue = node.metadata?.aspectRatio || info?.aspectRatio || ratioOptions[0] || "";
     const sourceMissing = Boolean(summary?.sourceMissing);
     const hasSeedSetting = Boolean(info && (info.hasSeed || info.seed != null));
-    const hasSettings = Boolean(info && (info.size || ratioOptions.length || info.count != null || hasSeedSetting));
+    const workflowHasSettings = Boolean(info && (info.size || ratioOptions.length || info.count != null || hasSeedSetting));
+    // 固定项也可能全部放在生成设置里：此时即使工作流自身没有可调项，弹层也得能打开。
+    const hasSettings = workflowHasSettings || pinned.some((item) => item.surface === "settings");
     const settingsSummary = [
         info?.size && sizeText ? settingsSizeLabel(sizeText) : "",
         ratioOptions.length && ratioValue ? ratioValue : "",
@@ -276,6 +277,10 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     ]
         .filter(Boolean)
         .join(" · ");
+    // 固定项按显示位置分两处渲染：卡片上直接改，或收进「生成设置」弹层，避免卡片过长。
+    const pinnedBySurface = useMemo(() => splitBySurface(pinned), [pinned]);
+    const cardPinned = pinnedBySurface.card;
+    const settingsPinned = pinnedBySurface.settings;
 
     const setCard = (next: FreeWorkflowSummary, { resetSettings = false } = {}) => {
         const card = freeCardInfoFromSummary(next);
@@ -357,7 +362,12 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
         if (!info?.id) return;
         setPinned(next);
         try {
-            const updated = await saveFreeWorkflowBindings(config, info.id, next.map((item) => ({ node: item.node, input: item.input, label: item.label })));
+            const updated = await saveFreeWorkflowBindings(
+                config,
+                info.id,
+                // surface 必须一起传：漏掉它，用户在弹窗里选的「生成设置」会在保存后被覆盖回卡片。
+                next.map((item) => ({ node: item.node, input: item.input, label: item.label, surface: item.surface })),
+            );
             const effective = mergePinned(updated.customBindings || [], graph);
             setPinned(effective);
             setSummary(updated);
@@ -619,58 +629,13 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                     {t("canvas.freeCard.pinnedOpen")}
                                 </Button>
                             </div>
-                            {pinned.length ? (
-                                pinned.map((item) => {
-                                    const key = customKey(item);
-                                    const value = key in customValues ? customValues[key] : item.value;
-                                    return (
-                                        <div key={key} className="space-y-1">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span className="min-w-0 truncate text-xs font-medium" style={{ color: theme.node.muted }}>
-                                                    {item.label}
-                                                </span>
-                                                <span className="shrink-0 text-[10px] opacity-40">
-                                                    #{item.node} · {item.input}
-                                                </span>
-                                            </div>
-                                            {item.kind === "combo" ? (
-                                                <Select
-                                                    className="w-full"
-                                                    size="small"
-                                                    value={String(value)}
-                                                    options={item.options.map((option) => ({ value: option, label: option }))}
-                                                    onChange={(next) => commitCustomValue(item, next)}
-                                                />
-                                            ) : item.kind === "number" ? (
-                                                <InputNumber
-                                                    className="w-full"
-                                                    size="small"
-                                                    value={typeof value === "number" ? value : Number(value) || 0}
-                                                    precision={item.integer ? 0 : undefined}
-                                                    onChange={(next) => commitCustomValue(item, next ?? 0)}
-                                                />
-                                            ) : item.kind === "boolean" ? (
-                                                <Select
-                                                    className="w-full"
-                                                    size="small"
-                                                    value={String(value) === "true" ? "true" : "false"}
-                                                    options={[
-                                                        { value: "true", label: t("common.yes") },
-                                                        { value: "false", label: t("common.no") },
-                                                    ]}
-                                                    onChange={(next) => commitCustomValue(item, next === "true")}
-                                                />
-                                            ) : (
-                                                <textarea
-                                                    className="min-h-16 w-full resize-y rounded-xl border bg-transparent px-3 py-2 text-sm outline-none"
-                                                    style={{ borderColor: theme.node.stroke, color: theme.node.text }}
-                                                    value={String(value ?? "")}
-                                                    onChange={(event) => commitCustomValue(item, event.target.value)}
-                                                />
-                                            )}
-                                        </div>
-                                    );
-                                })
+                            {cardPinned.length ? (
+                                <PinnedFields items={cardPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} />
+                            ) : pinned.length ? (
+                                // 全都放在生成设置里：这里不重复渲染，但要说清它们去哪了，否则像丢了。
+                                <div className="rounded-lg px-2.5 py-2 text-[11px] leading-5" style={{ background: theme.node.fill, color: theme.node.muted }}>
+                                    {t("canvas.freeCard.pinnedAllInSettings", { count: settingsPinned.length })}
+                                </div>
                             ) : (
                                 <div className="rounded-lg px-2.5 py-2 text-[11px] leading-5" style={{ background: theme.node.fill, color: theme.node.muted }}>
                                     {t("canvas.freeCard.pinnedEmptyHint")}
@@ -781,6 +746,15 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                         content={
                                             <div className="space-y-4" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                                                 {ratioBlock}
+                                                {/* 固定项里选了「生成设置」的那些，收在这里，避免卡片越铺越长。 */}
+                                                {settingsPinned.length ? (
+                                                    <div className="space-y-2">
+                                                        <div className="text-xs font-medium" style={{ color: theme.node.muted }}>
+                                                            {t("canvas.freeCard.settingsPinned")}
+                                                        </div>
+                                                        <PinnedFields items={settingsPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} compact />
+                                                    </div>
+                                                ) : null}
                                                 <ImageSettingsPanel
                                                     config={settingsConfig}
                                                     onConfigChange={(key, value) => {
@@ -800,8 +774,13 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                             </div>
                                         }
                                     >
-                                        <Button size="small" icon={<Settings2 className="size-3.5" />} title={settingsSummary ? `${t("canvas.freeCard.settings")} · ${settingsSummary}` : undefined}>
-                                            {settingsSummary ? `${t("canvas.freeCard.settings")} · ${settingsSummary}` : t("canvas.freeCard.settings")}
+                                        <Button
+                                            size="small"
+                                            icon={<Settings2 className="size-3.5" />}
+                                            title={settingsSummary ? `${t("canvas.freeCard.settings")} · ${settingsSummary}` : undefined}
+                                        >
+                                            {/* 设置项全空但里面有固定项时，按钮上要能看出来——否则像个空按钮。 */}
+                                            {settingsSummary || `${t("canvas.freeCard.settings")}${settingsPinned.length ? ` · ${settingsPinned.length}` : ""}`}
                                         </Button>
                                     </Popover>
                                 ) : null}
@@ -840,5 +819,83 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                 <FreeCardGraphPanel graph={graph} loading={graphLoading} error={graphError} pinned={pinned} onPinnedChange={(next) => void commitPinned(next)} onContentHeight={setGraphHeight} />
             </Modal>
         </ImageSettingsTheme>
+    );
+}
+
+/**
+ * 固定配置项的编辑控件。
+ *
+ * 卡片上和「生成设置」里都要渲染同一批控件，所以抽出来复用——复制两份的话，
+ * 以后改一个控件（比如数字的精度处理）必然漏掉另一份，同一个参数在两处表现不一样。
+ */
+function PinnedFields({
+    items,
+    values,
+    onChangeValue,
+    theme,
+    compact = false,
+}: {
+    items: PinnedItem[];
+    values: Record<string, string | number | boolean>;
+    onChangeValue: (item: PinnedItem, value: string | number | boolean) => void;
+    theme: ReturnType<typeof useCanvasTheme>;
+    /** 弹层里宽度有限，文本域矮一点。 */
+    compact?: boolean;
+}) {
+    const { t } = useTranslation();
+    return (
+        <>
+            {items.map((item) => {
+                const key = customKey(item);
+                const value = key in values ? values[key] : item.value;
+                return (
+                    <div key={key} className="space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate text-xs font-medium" style={{ color: theme.node.muted }}>
+                                {item.label}
+                            </span>
+                            <span className="shrink-0 text-[10px] opacity-40">
+                                #{item.node} · {item.input}
+                            </span>
+                        </div>
+                        {item.kind === "combo" ? (
+                            <Select
+                                className="w-full"
+                                size="small"
+                                value={String(value)}
+                                options={item.options.map((option) => ({ value: option, label: option }))}
+                                onChange={(next) => onChangeValue(item, next)}
+                            />
+                        ) : item.kind === "number" ? (
+                            <InputNumber
+                                className="w-full"
+                                size="small"
+                                value={typeof value === "number" ? value : Number(value) || 0}
+                                precision={item.integer ? 0 : undefined}
+                                onChange={(next) => onChangeValue(item, next ?? 0)}
+                            />
+                        ) : item.kind === "boolean" ? (
+                            <Select
+                                className="w-full"
+                                size="small"
+                                value={String(value) === "true" ? "true" : "false"}
+                                options={[
+                                    { value: "true", label: t("common.yes") },
+                                    { value: "false", label: t("common.no") },
+                                ]}
+                                onChange={(next) => onChangeValue(item, next === "true")}
+                            />
+                        ) : (
+                            <textarea
+                                className={`w-full resize-y rounded-xl border bg-transparent px-3 py-2 text-sm outline-none ${compact ? "min-h-12" : "min-h-16"}`}
+                                style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                value={String(value ?? "")}
+                                onChange={(event) => onChangeValue(item, event.target.value)}
+                            />
+                        )}
+                    </div>
+                );
+            })}
+        </>
     );
 }

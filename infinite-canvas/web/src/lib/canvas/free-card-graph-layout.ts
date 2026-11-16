@@ -200,3 +200,53 @@ export function fitGraphColumns(
     const widthForMinGap = columnCount > 0 ? (available - (columnCount - 1) * minColumnGap) / columnCount : GRAPH_NODE_WIDTH;
     return { columnGap: minColumnGap, nodeWidth: Math.max(minNodeWidth, Math.floor(widthForMinGap)) };
 }
+
+/**
+ * 节点图的视图变换：先缩放再平移，等价于 CSS `translate(x, y) scale(s)`。
+ *
+ * 抽出来是因为这里错了的表现很隐蔽：图能显示，只是缩放时光标下的位置会慢慢漂移，
+ * 用起来「说不清哪里不对」，靠肉眼很难定位到是换算写反了。
+ */
+export type GraphView = {
+    /** 缩放比。 */
+    scale: number;
+    /** 平移量，单位是屏幕像素（未缩放）。 */
+    x: number;
+    y: number;
+};
+
+export const MIN_VIEW_SCALE = 0.2;
+export const MAX_VIEW_SCALE = 3;
+
+export function clampViewScale(scale: number) {
+    if (!Number.isFinite(scale)) return 1;
+    return Math.min(MAX_VIEW_SCALE, Math.max(MIN_VIEW_SCALE, scale));
+}
+
+/**
+ * 以某个屏幕坐标为锚点缩放，该点下的内容保持不动。
+ *
+ * 锚点不动是滚轮缩放的核心：用户指哪儿放大哪儿。若按左上角缩放，每次滚轮都把内容
+ * 往右下甩一截，想看的节点会跑出视野。
+ */
+export function zoomViewAt(view: GraphView, cursor: { x: number; y: number }, nextScale: number): GraphView {
+    const scale = clampViewScale(nextScale);
+    if (scale === view.scale) return view;
+    // 光标下的世界坐标在两套变换里必须落到同一屏幕位置：(cursor - x) / scale 不变。
+    const ratio = scale / view.scale;
+    return {
+        scale,
+        x: cursor.x - (cursor.x - view.x) * ratio,
+        y: cursor.y - (cursor.y - view.y) * ratio,
+    };
+}
+
+/** 让内容在视口里居中。图比视口小时居中，比视口大时从左上开始。 */
+export function centerGraphView(content: { width: number; height: number }, viewport: { width: number; height: number }, scale: number): GraphView {
+    const next = clampViewScale(scale);
+    return {
+        scale: next,
+        x: Math.max(0, (viewport.width - content.width * next) / 2),
+        y: Math.max(0, (viewport.height - content.height * next) / 2),
+    };
+}
