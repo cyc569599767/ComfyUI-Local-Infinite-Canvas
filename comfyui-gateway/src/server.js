@@ -30,6 +30,7 @@ import { createVideoInterpolator } from "./video-interpolation.js";
 import { createPreviewHub } from "./preview-hub.js";
 import { absoluteTaskUrl } from "./public-url.js";
 import { createFreeWorkflowStore, applyFreeInputs } from "./free-workflows.js";
+import { describeWorkflowGraph } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
 import { runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
 import { createSkinUnlockStore } from "./skin-unlocks.js";
@@ -166,6 +167,22 @@ function abortOnDisconnect(req, res, register) {
 }
 
 function parseFreeTexts(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 自定义绑定项的值。格式与 texts 相同（{node, input, value}），但来源不同：
+ * 这些是用户主动固定到卡片上的配置项，值可能是数字/布尔，不做字符串化，
+ * 交给 applyFreeInputs 按工作流原值类型转换。
+ */
+function parseFreeValues(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== "string" || !value.trim()) return [];
   try {
@@ -1476,6 +1493,33 @@ export async function createGatewayApp(overrides = {}) {
     }
   });
 
+  /**
+   * 简化节点图：给画布内嵌的可视化用。
+   *
+   * 输出的是「节点 + 可绑定的输入」，不是完整工作流——用户只需要认出
+   * 「哪个节点里的哪个参数」，不需要看懂整张图。
+   */
+  app.get("/api/free-workflows/:id/graph", async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    await freeWorkflows.ensureBindings(entry);
+    const objectInfo = await comfy.objectInfo().catch(() => ({}));
+    res.json({
+      graph: describeWorkflowGraph(entry.workflow, objectInfo),
+      customBindings: (entry.customBindings || []).map((item) => ({ node: String(item.node), input: String(item.input), label: String(item.label || item.input) })),
+    });
+  });
+
+  // 固定到卡片上的配置项。只接受工作流里真实存在且未被连线的输入。
+  app.patch("/api/free-workflows/:id/bindings", async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    try {
+      const updated = await freeWorkflows.setCustomBindings(entry.id, req.body?.bindings);
+      res.json({ workflow: await freeWorkflows.publicEntry(updated) });
+    } catch (error) {
+      throw new HttpError(`保存固定配置失败：${error.message}`, { status: 400, code: "free_workflow_bindings_failed" });
+    }
+  });
+
   app.get("/api/free-workflows/:id/open", async (req, res) => {
     const entry = requireFreeWorkflow(req.params.id);
     const source = await freeWorkflows.sourceState(entry);
@@ -1536,6 +1580,7 @@ export async function createGatewayApp(overrides = {}) {
     const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
       prompt: effectivePrompt,
       texts,
+      values: parseFreeValues(body.values),
       uploadedImages,
       size: parsedSize ? { width: parsedSize.width, height: parsedSize.height } : undefined,
       count: body.n ?? body.count,
@@ -1602,6 +1647,7 @@ export async function createGatewayApp(overrides = {}) {
     const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
       prompt: effectivePrompt,
       texts,
+      values: parseFreeValues(body.values),
       uploadedImages,
       size: parsedSize ? { width: parsedSize.width, height: parsedSize.height } : undefined,
       count: body.n ?? body.count,
@@ -1663,6 +1709,7 @@ export async function createGatewayApp(overrides = {}) {
     const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
       prompt: effectivePrompt,
       texts,
+      values: parseFreeValues(body.values),
       uploadedAudios,
       seed: body.seed,
       seedFixed: body.seedFixed,

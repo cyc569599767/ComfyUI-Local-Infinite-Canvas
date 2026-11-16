@@ -23,10 +23,28 @@ function imageValue(uploaded) {
   return uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
 }
 
-export function applyFreeInputs(workflow, bindings, { prompt, texts = [], uploadedImages = [], uploadedAudios = [], size, count, seed, seedFixed, ratio } = {}) {
+/**
+ * 自定义绑定项的写回值转换。
+ *
+ * 前端传上来的统一是字符串或数字，但写回工作流时必须保持原类型：
+ * `steps` 是 20 而 `"20"` 会让 ComfyUI 直接报校验失败；`sampler_name` 是字符串，
+ * 写成数字同样会失败。所以按工作流里该输入的现有值类型来定，而不是猜。
+ */
+function coerceCustomValue(original, incoming) {
+  if (typeof original === "number") {
+    const value = Number(incoming);
+    return Number.isFinite(value) ? value : original;
+  }
+  if (typeof original === "boolean") return incoming === true || String(incoming) === "true";
+  return typeof incoming === "string" ? incoming : String(incoming ?? "");
+}
+
+export function applyFreeInputs(workflow, bindings, { prompt, texts = [], values = [], uploadedImages = [], uploadedAudios = [], size, count, seed, seedFixed, ratio } = {}) {
   const next = deepClone(pruneUnreachableNodes(workflow) || {});
-  // 只允许写回扫描时识别出的文本输入，避免通过接口改到模型名/文件名等字段。
+  // 只允许写回已明确登记的位置：扫描出的文本输入，或用户主动固定到卡片上的配置项。
+  // 不做「任意输入可写」，否则前端能改到模型文件名、图片路径这类字段。
   const allowed = new Set((bindings.textInputs || []).map((item) => `${item.node}\u0000${item.input}`));
+  const customAllowed = new Set((bindings.customBindings || []).map((item) => `${item.node}\u0000${item.input}`));
   const textWrites = new Map();
   for (const item of Array.isArray(texts) ? texts : []) {
     const key = `${item?.node}\u0000${item?.input}`;
@@ -37,6 +55,14 @@ export function applyFreeInputs(workflow, bindings, { prompt, texts = [], upload
     const [nodeId, input] = key.split("\u0000");
     const node = next[nodeId];
     if (node?.inputs) node.inputs[input] = value;
+  }
+  // 自定义绑定项排在文本之后：同一个输入若既被识别成文本框又被固定，以固定值为准。
+  for (const item of Array.isArray(values) ? values : []) {
+    const key = `${item?.node}\u0000${item?.input}`;
+    if (!customAllowed.has(key) || item?.value === undefined) continue;
+    const node = next[String(item.node)];
+    if (!node?.inputs) continue;
+    node.inputs[String(item.input)] = coerceCustomValue(node.inputs[String(item.input)], item.value);
   }
   if (bindings.prompt && !textWrites.has(`${bindings.prompt.node}\u0000${bindings.prompt.input}`)) {
     const node = next[bindings.prompt.node];
@@ -252,6 +278,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
       bindings,
       preset: null,
       warnings,
+      customBindings: [],
       archivedAt: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -279,6 +306,43 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     entry.updatedAt = nowIso();
     await persist();
     return { changed: true, entry };
+  }
+
+  /**
+   * 设置「固定到卡片上」的配置项。
+   *
+   * 每个条目必须是工作流里真实存在、且未被连线占用的输入——否则前端传什么就写什么，
+   * 等于把整个工作流暴露成可写。这里先解析一遍工作流再校验，不信任入参。
+   */
+  async function setCustomBindings(id, list) {
+    const entry = entries.get(id);
+    if (!entry) throw new Error("自由卡片不存在");
+    const workflow = pruneUnreachableNodes(entry.workflow) || {};
+    const wanted = Array.isArray(list) ? list : [];
+    const seen = new Set();
+    const next = [];
+    for (const raw of wanted.slice(0, 32)) {
+      if (!raw || typeof raw !== "object") continue;
+      const nodeId = String(raw.node ?? "").trim();
+      const input = String(raw.input ?? "").trim();
+      if (!nodeId || !input) continue;
+      const key = `${nodeId}\u0000${input}`;
+      if (seen.has(key)) continue;
+      const node = workflow[nodeId];
+      if (!node?.inputs || !(input in node.inputs)) continue;
+      // 已连线的输入由上游决定，写回去没有意义。
+      if (Array.isArray(node.inputs[input])) continue;
+      seen.add(key);
+      next.push({
+        node: nodeId,
+        input,
+        label: String(raw.label || "").trim().slice(0, 60) || input,
+      });
+    }
+    entry.customBindings = next;
+    entry.updatedAt = nowIso();
+    await persist();
+    return entry;
   }
 
   async function setArchived(id, archived, preset) {
@@ -368,6 +432,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
       sourceChanged: source.changed,
       sourceMissing: !source.exists,
       preset: entry.preset || null,
+      customBindings: (entry.customBindings || []).map((item) => ({ node: String(item.node), input: String(item.input), label: String(item.label || item.input) })),
       ...bindingSummary(entry.bindings || {}),
       warnings: entry.warnings || [],
     };
@@ -383,5 +448,5 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return result;
   }
 
-  return { load, listSources, importSource, sync, setArchived, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings };
+  return { load, listSources, importSource, sync, setArchived, setCustomBindings, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings };
 }

@@ -583,6 +583,72 @@ export function detectFreeBindings(workflow, objectInfo = {}) {
   };
 }
 
+/**
+ * 把工作流描述成一张「简化节点图」，供画布内嵌的可视化用。
+ *
+ * 目的只有一个：让用户能在图上找到某个节点里的某个配置项，把它拖到自由卡片上固定下来。
+ * 所以这里输出的不是 ComfyUI 的完整节点定义，而是「节点 + 可绑定的输入」：
+ *
+ * - 只保留能从输出节点回溯到的节点（`pruneUnreachableNodes` 会丢掉的分支不展示）；
+ * - 每个输入标出类型（text / number / combo / boolean / other），前端据此选控件；
+ * - combo 带上选项列表，否则前端只能给一个输入框，用户没法知道合法取值。
+ *
+ * 已连线的输入不作为可绑定项：它的值由上游决定，写回去也会被覆盖。
+ */
+export function describeWorkflowGraph(workflow, objectInfo = {}) {
+  const pruned = pruneUnreachableNodes(workflow) || {};
+  const entries = listNodes(pruned);
+
+  const nodes = entries.map(([id, node]) => {
+    const classType = String(node?.class_type || "");
+    const specs = new Map(inputSpecs(objectInfo, classType).map((spec) => [spec.name, spec]));
+    const inputs = [];
+    for (const [name, raw] of Object.entries(node?.inputs || {})) {
+      // 已是链路的值不由用户填写。
+      if (linkTarget(raw)) continue;
+      const spec = specs.get(name);
+      const options = comboOptions(objectInfo, classType, name);
+      const type = normalizeType(spec?.type ?? (Array.isArray(raw) ? "COMBO" : typeof raw === "number" ? "number" : "string"));
+      const kind = options.length ? "combo" : type === "INT" || type === "FLOAT" || typeof raw === "number" ? "number" : type === "BOOLEAN" || typeof raw === "boolean" ? "boolean" : typeof raw === "string" ? "text" : "other";
+      // image / audio 这类是文件名或上传字段，让用户手填只会填错。
+      if (kind === "other") continue;
+      inputs.push({
+        name,
+        kind,
+        value: raw,
+        options: kind === "combo" ? options.map((option) => String(option)) : [],
+        integer: type === "INT",
+      });
+    }
+    return {
+      id: String(id),
+      title: String(node?._meta?.title || classType || id),
+      classType,
+      mode: Number(node?.mode || 0),
+      inputs,
+    };
+  });
+
+  // 输出节点标出来，前端好把它画成终点。
+  const outputIds = new Set(
+    entries
+      .filter(([, node]) => isImageOutputClass(node.class_type) || isVideoOutputClass(node.class_type) || isAudioOutputClass(node.class_type))
+      .map(([id]) => String(id)),
+  );
+  for (const node of nodes) node.output = outputIds.has(node.id);
+
+  const links = [];
+  for (const [id, node] of entries) {
+    for (const [input, raw] of Object.entries(node?.inputs || {})) {
+      const target = linkTarget(raw);
+      if (!target) continue;
+      links.push({ from: target, to: String(id), input });
+    }
+  }
+
+  return { nodes, links };
+}
+
 export function bindingSummary(bindings) {
   const ratioBindings = bindings.ratios || [];
   const aspectRatios = [...new Set(ratioBindings.flatMap((binding) => binding.ratios || []))];

@@ -59,12 +59,45 @@ export type FreeWorkflowSummary = {
     hasSeed: boolean;
     seed: string | null;
     preset?: FreeWorkflowPreset | null;
+    customBindings?: FreeWorkflowCustomBinding[];
     warnings: string[];
+};
+
+/** 用户固定到卡片上的配置项（工作流里的某个节点的某个输入）。 */
+export type FreeWorkflowCustomBinding = {
+    node: string;
+    input: string;
+    label: string;
+};
+
+/** 简化节点图：只保留可绑定的输入，供画布内的可视化用。 */
+export type FreeWorkflowGraphInput = {
+    name: string;
+    kind: "text" | "number" | "combo" | "boolean";
+    value: string | number | boolean;
+    options: string[];
+    integer: boolean;
+};
+
+export type FreeWorkflowGraphNode = {
+    id: string;
+    title: string;
+    classType: string;
+    mode: number;
+    output: boolean;
+    inputs: FreeWorkflowGraphInput[];
+};
+
+export type FreeWorkflowGraph = {
+    nodes: FreeWorkflowGraphNode[];
+    links: Array<{ from: string; to: string; input: string }>;
 };
 
 export type FreeWorkflowRequest = {
     prompt: string;
     texts?: Array<{ node: string; input: string; value: string }>;
+    /** 固定配置项的当前值；只对已登记的 customBindings 生效。 */
+    values?: Array<{ node: string; input: string; value: string | number | boolean }>;
     size?: string;
     ratio?: string;
     count?: number;
@@ -158,6 +191,36 @@ export async function renameFreeWorkflow(config: AiConfig, id: string, name: str
     }
 }
 
+/** 读简化节点图 + 已固定的配置项。 */
+export async function fetchFreeWorkflowGraph(config: AiConfig, id: string): Promise<{ graph: FreeWorkflowGraph; customBindings: FreeWorkflowCustomBinding[] }> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.get<{ graph?: FreeWorkflowGraph; customBindings?: FreeWorkflowCustomBinding[] }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/graph`, { timeout: 30000 });
+        return {
+            graph: { nodes: response.data?.graph?.nodes || [], links: response.data?.graph?.links || [] },
+            customBindings: response.data?.customBindings || [],
+        };
+    } catch (error) {
+        throw new Error(readError(error, "读取工作流节点图失败"));
+    }
+}
+
+/** 保存固定的配置项。网关会丢弃不存在的节点/输入，返回的就是实际生效的列表。 */
+export async function saveFreeWorkflowBindings(config: AiConfig, id: string, bindings: FreeWorkflowCustomBinding[]): Promise<FreeWorkflowSummary> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.patch<{ workflow?: FreeWorkflowSummary }>(
+            `${root}/api/free-workflows/${encodeURIComponent(id)}/bindings`,
+            { bindings: bindings.map((item) => ({ node: item.node, input: item.input, label: item.label })) },
+            { timeout: 30000 },
+        );
+        if (!response.data?.workflow) throw new Error("保存固定配置失败");
+        return response.data.workflow;
+    } catch (error) {
+        throw new Error(readError(error, "保存固定配置失败"));
+    }
+}
+
 export async function freeWorkflowComfyUrl(config: AiConfig, id: string): Promise<{ url: string; name: string; sourceRel: string; sourceFormat: "ui" | "api"; bridge: boolean; bridgeReason?: string }> {
     const root = gatewayRoot(config);
     const response = await axios.get<{ url?: string; name?: string; sourceRel?: string; sourceFormat?: "ui" | "api"; bridge?: boolean; bridgeReason?: string }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/open`, { timeout: 15000 });
@@ -176,6 +239,7 @@ async function buildFormData(config: AiConfig, request: FreeWorkflowRequest) {
     const formData = new FormData();
     formData.set("prompt", request.prompt);
     if (request.texts?.length) formData.set("texts", JSON.stringify(request.texts));
+    if (request.values?.length) formData.set("values", JSON.stringify(request.values));
     if (request.size) formData.set("size", request.size);
     if (request.ratio) formData.set("ratio", request.ratio);
     if (request.count) formData.set("n", String(request.count));

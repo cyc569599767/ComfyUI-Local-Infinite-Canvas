@@ -174,6 +174,8 @@ export type CanvasNodeMetadata = {
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
     freeCardTextValues?: Record<string, string>;
+    /** 固定配置项在当前节点上的取值，键为 `节点id\u0000输入名`。 */
+    freeCardValues?: Record<string, string | number | boolean>;
     freeWorkflowId?: string;
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.

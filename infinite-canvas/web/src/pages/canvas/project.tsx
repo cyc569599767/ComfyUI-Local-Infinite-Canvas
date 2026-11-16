@@ -4496,7 +4496,7 @@ function InfiniteCanvasPage() {
     // during click, hover, or viewport changes, which is especially expensive for Markdown. These useCallback values
     // and their memoized map/handler dependencies remain stable during interaction, so unchanged nodes do not rerender.
     const generateFreeCard = useCallback(
-        async (nodeId: string, prompt: string, texts?: Array<{ node: string; input: string; value: string }>) => {
+        async (nodeId: string, prompt: string, texts?: Array<{ node: string; input: string; value: string }>, values?: Array<{ node: string; input: string; value: string | number | boolean }>) => {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             const info = sourceNode?.metadata?.freeCard;
             if (!sourceNode || !info) return;
@@ -4559,7 +4559,7 @@ function InfiniteCanvasPage() {
                     const audioFile = referenceAudio
                         ? new File([await resolveReferenceAudioBlob(referenceAudio.storageKey || referenceAudio.url)], referenceAudio.name || "reference.wav", { type: referenceAudio.type || "audio/wav" })
                         : undefined;
-                    const { blob } = await requestFreeWorkflowAudio(effectiveConfig, info.id, { prompt: effectivePrompt, texts, seed, seedFixed, audio: audioFile, signal: controller.signal });
+                    const { blob } = await requestFreeWorkflowAudio(effectiveConfig, info.id, { prompt: effectivePrompt, texts, values, seed, seedFixed, audio: audioFile, signal: controller.signal });
                     const audio = await storeGeneratedAudio(blob, generationConfig.audioFormat);
                     setNodes((prev) =>
                         prev.map((item) =>
@@ -4591,7 +4591,7 @@ function InfiniteCanvasPage() {
                     setNodes((prev) => [...prev, videoNode]);
                     setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: childId }]);
                     const controller = startGenerationRequest(childId, nodeId, nodeId, runController);
-                    const taskId = await createFreeWorkflowVideoTask(effectiveConfig, info.id, { prompt: effectivePrompt, texts, size, ratio, count, seed, seedFixed, images: references, signal: controller.signal });
+                    const taskId = await createFreeWorkflowVideoTask(effectiveConfig, info.id, { prompt: effectivePrompt, texts, values, size, ratio, count, seed, seedFixed, images: references, signal: controller.signal });
                     setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, videoTaskId: taskId, videoTaskProvider: "openai" } } : item)));
                     const localVideoModel = effectiveConfig.videoModel || effectiveConfig.model;
                     const video = await storeGeneratedVideo(
@@ -4639,7 +4639,7 @@ function InfiniteCanvasPage() {
                     setNodes((prev) => [...prev, imageNode]);
                     setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: childId }]);
                     const controller = startGenerationRequest(childId, nodeId, nodeId, runController);
-                    const images = await requestFreeWorkflowImage(effectiveConfig, info.id, { prompt: effectivePrompt, texts, size, ratio, count, seed, seedFixed, images: references, signal: controller.signal });
+                    const images = await requestFreeWorkflowImage(effectiveConfig, info.id, { prompt: effectivePrompt, texts, values, size, ratio, count, seed, seedFixed, images: references, signal: controller.signal });
                     const uploadedItems: CanvasNodeImage[] = [];
                     let firstUploaded: Awaited<ReturnType<typeof uploadImage>> | null = null;
                     for (let index = 0; index < images.length; index += 1) {
@@ -4890,7 +4890,7 @@ function InfiniteCanvasPage() {
                     connectedNodes={connectedNodesByNodeId.get(panelNode.id) || []}
                     isRunning={hasActiveGeneration(panelNode.id)}
                     onChange={(patch) => handleConfigNodeChange(panelNode.id, patch)}
-                    onGenerate={(nodeId, prompt, texts) => void generateFreeCard(nodeId, prompt, texts)}
+                    onGenerate={(nodeId, prompt, texts, values) => void generateFreeCard(nodeId, prompt, texts, values)}
                     onStop={confirmStopGeneration}
                     onDisconnectReference={disconnectNodeReference}
                     onStartReferenceSelection={startNodeReferenceSelection}

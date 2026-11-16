@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Popover, Select } from "antd";
-import { Archive, ExternalLink, RefreshCw, Settings2, Sparkles, Square, ArrowUp } from "lucide-react";
+import { App, Button, InputNumber, Modal, Popover, Select } from "antd";
+import { Archive, ExternalLink, GripVertical, RefreshCw, Settings2, Sparkles, Square, ArrowUp } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { CanvasNodeReferenceBar } from "@/components/canvas/canvas-node-reference-bar";
@@ -16,15 +16,21 @@ import { usePromptCapabilities } from "@/hooks/use-prompt-capabilities";
 import {
     archiveFreeWorkflow,
     fetchFreeWorkflow,
+    fetchFreeWorkflowGraph,
     fetchFreeWorkflowSources,
     freeWorkflowComfyUrl,
     importFreeWorkflow,
+    saveFreeWorkflowBindings,
     syncFreeWorkflow,
+    type FreeWorkflowCustomBinding,
+    type FreeWorkflowGraph,
     type FreeWorkflowPreset,
     type FreeWorkflowSource,
     type FreeWorkflowSummary,
     type FreeWorkflowOutputType,
 } from "@/services/api/free-workflow";
+import { FreeCardGraphPanel } from "@/components/canvas/free-card-graph-panel";
+import { buildCustomValues, customKey, mergePinned, type PinnedItem } from "@/lib/canvas/free-card-pinned";
 import { CanvasNodeType, isAudioNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 
@@ -34,7 +40,7 @@ type CanvasFreeCardPanelProps = {
     connectedNodes: CanvasNodeData[];
     isRunning: boolean;
     onChange: (patch: Partial<CanvasNodeData["metadata"]>) => void;
-    onGenerate: (nodeId: string, prompt: string, texts?: Array<{ node: string; input: string; value: string }>) => void;
+    onGenerate: (nodeId: string, prompt: string, texts?: Array<{ node: string; input: string; value: string }>, values?: Array<{ node: string; input: string; value: string | number | boolean }>) => void;
     onStop: (nodeId: string) => void;
     onDisconnectReference: (fromNodeId: string, toNodeId: string) => void;
     onStartReferenceSelection: (nodeId: string) => void;
@@ -114,6 +120,15 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     const [optimizing, setOptimizing] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [optimizeOptionsOpen, setOptimizeOptionsOpen] = useState(false);
+    // 固定配置项：把工作流里某个节点的某个输入拖到卡片上，作为一个可编辑字段。
+    // 绑定关系存在卡片条目上（网关落盘），每个节点的取值存在节点 metadata 里，
+    // 因为同一张卡片在不同画布节点上往往要给不同的值。
+    const [graphOpen, setGraphOpen] = useState(false);
+    const [graph, setGraph] = useState<FreeWorkflowGraph | null>(null);
+    const [graphLoading, setGraphLoading] = useState(false);
+    const [graphError, setGraphError] = useState("");
+    const [pinned, setPinned] = useState<PinnedItem[]>([]);
+    const [customValues, setCustomValues] = useState<Record<string, string | number | boolean>>(node.metadata?.freeCardValues || {});
     const optimizeEngine = config.promptApiEngine === "cloud" ? "cloud" : "local";
     const optimizeLanguage = config.promptOptimizeLanguage === "en" ? "en" : "zh";
     const optimizeCloudReady = Boolean((config.promptCloudBaseUrl || "").trim() && (config.promptCloudApiKey || "").trim() && (config.promptCloudModel || "").trim());
@@ -125,6 +140,10 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     useEffect(() => {
         setTextValues(node.metadata?.freeCardTextValues || {});
     }, [node.id, node.metadata?.freeCardTextValues]);
+
+    useEffect(() => {
+        setCustomValues(node.metadata?.freeCardValues || {});
+    }, [node.id, node.metadata?.freeCardValues]);
 
     const loadSources = useCallback(async () => {
         setSourcesLoading(true);
@@ -295,6 +314,66 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
         }
     };
 
+    /**
+     * 拉取节点图 + 已固定的配置项。
+     *
+     * 面板一打开就要拉：固定的项要直接显示成可编辑控件，不能等用户点开节点图才出现。
+     * graph 同时供节点图弹窗使用，一次请求两边共享。
+     */
+    const loadGraph = useCallback(async () => {
+        const id = info?.id;
+        if (!id) {
+            setGraph(null);
+            setPinned([]);
+            return;
+        }
+        setGraphLoading(true);
+        setGraphError("");
+        try {
+            const result = await fetchFreeWorkflowGraph(config, id);
+            setGraph(result.graph);
+            setPinned(mergePinned(result.customBindings, result.graph));
+        } catch (error) {
+            setGraphError(error instanceof Error ? error.message : t("canvas.freeCard.graphLoadFailed"));
+        } finally {
+            setGraphLoading(false);
+        }
+    }, [config, info?.id, t]);
+
+    // 卡片或来源变化时重新拉：固定项属于卡片条目，换一张卡就得换一份列表。
+    useEffect(() => {
+        void loadGraph();
+    }, [loadGraph]);
+
+    const openGraph = () => {
+        setGraphOpen(true);
+        // 已加载过就不重复请求；失败过则重试，否则用户只能关掉重开面板。
+        if (!graph || graphError) void loadGraph();
+    };
+
+    /** 保存固定列表到条目。网关会丢掉无效项，回写的结果才是真相。 */
+    const commitPinned = async (next: PinnedItem[]) => {
+        if (!info?.id) return;
+        setPinned(next);
+        try {
+            const updated = await saveFreeWorkflowBindings(config, info.id, next.map((item) => ({ node: item.node, input: item.input, label: item.label })));
+            const effective = mergePinned(updated.customBindings || [], graph);
+            setPinned(effective);
+            setSummary(updated);
+            onChange({ freeCard: freeCardInfoFromSummary(updated) });
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("canvas.freeCard.pinnedSaveFailed"));
+            void loadGraph();
+        }
+    };
+
+    const commitCustomValue = (item: PinnedItem, value: string | number | boolean) => {
+        const key = customKey(item);
+        const next = { ...customValues, [key]: value };
+        setCustomValues(next);
+        onChange({ freeCardValues: next });
+    };
+
     const syncCard = async () => {
         if (!info?.id) return;
         setSyncing(true);
@@ -424,9 +503,11 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
             return;
         }
         const texts = buildFreeTexts();
+        const values = buildCustomValues(pinned, customValues);
         commitPrompt();
         if (texts.length) onChange({ freeCardTextValues: { ...(node.metadata?.freeCardTextValues || {}), ...textValues } });
-        onGenerate(node.id, prompt.trim(), texts.length ? texts : undefined);
+        if (values.length) onChange({ freeCardValues: { ...(node.metadata?.freeCardValues || {}), ...customValues } });
+        onGenerate(node.id, prompt.trim(), texts.length ? texts : undefined, values.length ? values : undefined);
     };
 
     const sourceOptions = useMemo(
@@ -525,6 +606,76 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                 <span>：{settingsSummary || t("canvas.freeCard.noSettings")}</span>
                             </div>
                         ) : null}
+
+                        {/* 固定配置项：从工作流图里挑出来的参数，直接在这里编辑。 */}
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
+                                    {t("canvas.freeCard.pinnedTitle")}
+                                    {pinned.length ? <span className="ml-1 text-[10px] opacity-50">{pinned.length}</span> : null}
+                                </span>
+                                <Button size="small" type="text" icon={<GripVertical className="size-3.5" />} disabled={sourceMissing} onClick={openGraph}>
+                                    {t("canvas.freeCard.pinnedOpen")}
+                                </Button>
+                            </div>
+                            {pinned.length ? (
+                                pinned.map((item) => {
+                                    const key = customKey(item);
+                                    const value = key in customValues ? customValues[key] : item.value;
+                                    return (
+                                        <div key={key} className="space-y-1">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="min-w-0 truncate text-xs font-medium" style={{ color: theme.node.muted }}>
+                                                    {item.label}
+                                                </span>
+                                                <span className="shrink-0 text-[10px] opacity-40">
+                                                    #{item.node} · {item.input}
+                                                </span>
+                                            </div>
+                                            {item.kind === "combo" ? (
+                                                <Select
+                                                    className="w-full"
+                                                    size="small"
+                                                    value={String(value)}
+                                                    options={item.options.map((option) => ({ value: option, label: option }))}
+                                                    onChange={(next) => commitCustomValue(item, next)}
+                                                />
+                                            ) : item.kind === "number" ? (
+                                                <InputNumber
+                                                    className="w-full"
+                                                    size="small"
+                                                    value={typeof value === "number" ? value : Number(value) || 0}
+                                                    precision={item.integer ? 0 : undefined}
+                                                    onChange={(next) => commitCustomValue(item, next ?? 0)}
+                                                />
+                                            ) : item.kind === "boolean" ? (
+                                                <Select
+                                                    className="w-full"
+                                                    size="small"
+                                                    value={String(value) === "true" ? "true" : "false"}
+                                                    options={[
+                                                        { value: "true", label: t("common.yes") },
+                                                        { value: "false", label: t("common.no") },
+                                                    ]}
+                                                    onChange={(next) => commitCustomValue(item, next === "true")}
+                                                />
+                                            ) : (
+                                                <textarea
+                                                    className="min-h-16 w-full resize-y rounded-xl border bg-transparent px-3 py-2 text-sm outline-none"
+                                                    style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                                    value={String(value ?? "")}
+                                                    onChange={(event) => commitCustomValue(item, event.target.value)}
+                                                />
+                                            )}
+                                        </div>
+                                    );
+                                })
+                            ) : (
+                                <div className="rounded-lg px-2.5 py-2 text-[11px] leading-5" style={{ background: theme.node.fill, color: theme.node.muted }}>
+                                    {t("canvas.freeCard.pinnedEmptyHint")}
+                                </div>
+                            )}
+                        </div>
 
                         {info.prompt || textInputs.length ? (
                             <div className="space-y-2">
@@ -673,6 +824,19 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                     </>
                 ) : null}
             </div>
+            {/* 节点图放在 Modal 里：面板只有 540px，铺不开一张能拖拽的图。 */}
+            <Modal
+                title={t("canvas.freeCard.graphTitle")}
+                open={graphOpen}
+                onCancel={() => setGraphOpen(false)}
+                footer={null}
+                width={860}
+                destroyOnHidden
+                styles={{ body: { height: 520, display: "flex", flexDirection: "column" } }}
+            >
+                <div className="mb-2 text-[11px] opacity-55">{t("canvas.freeCard.graphHint")}</div>
+                <FreeCardGraphPanel graph={graph} loading={graphLoading} error={graphError} pinned={pinned} onPinnedChange={(next) => void commitPinned(next)} />
+            </Modal>
         </ImageSettingsTheme>
     );
 }

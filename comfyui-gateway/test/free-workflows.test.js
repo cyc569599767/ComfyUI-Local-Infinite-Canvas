@@ -435,3 +435,115 @@ test("UI conversion skips frontend-only group control nodes", () => {
   assert.equal(result.workflow["2"], undefined);
   assert.equal(result.warnings.some((warning) => warning.includes("UI 辅助节点")), false);
 });
+
+// —— 自定义绑定：把某个节点的配置项固定到卡片上 ——
+// 用户在工作流图上拖一个配置项到卡片，网关只允许写回「工作流里真实存在且未被连线」的输入。
+// 这两条限制是安全边界：没有它们，前端等于能改写整张工作流。
+
+function apiWorkflow() {
+  return {
+    "1": { class_type: "EmptyLatentImage", inputs: { width: 512, height: 512, batch_size: 1 } },
+    "2": { class_type: "KSampler", inputs: { model: ["9", 0], seed: 42, steps: 20, cfg: 7.5, sampler_name: "euler", scheduler: "simple", positive: ["3", 0], negative: ["4", 0], latent_image: ["1", 0], denoise: 1 } },
+    "3": { class_type: "CLIPTextEncode", inputs: { text: "a cat", clip: ["9", 1] } },
+    "4": { class_type: "CLIPTextEncode", inputs: { text: "ugly", clip: ["9", 1] } },
+    "5": { class_type: "VAEDecode", inputs: { samples: ["2", 0], vae: ["9", 2] } },
+    "6": { class_type: "SaveImage", inputs: { images: ["5", 0], filename_prefix: "out" } },
+    "9": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "model.safetensors" } },
+  };
+}
+
+test("custom bindings write back numbers and strings with their original types", () => {
+  const workflow = apiWorkflow();
+  const bindings = {
+    prompt: { node: "3", input: "text" },
+    textInputs: [{ node: "3", input: "text" }],
+    customBindings: [
+      { node: "2", input: "steps", label: "steps" },
+      { node: "2", input: "sampler_name", label: "sampler" },
+    ],
+  };
+  // 前端传上来的数字是字符串，写回时必须还原成数字，否则 ComfyUI 校验会失败。
+  const next = applyFreeInputs(workflow, bindings, {
+    prompt: "a dog",
+    values: [
+      { node: "2", input: "steps", value: "8" },
+      { node: "2", input: "sampler_name", value: "dpmpp_2m" },
+    ],
+  });
+  assert.equal(next["2"].inputs.steps, 8);
+  assert.equal(typeof next["2"].inputs.steps, "number");
+  assert.equal(next["2"].inputs.sampler_name, "dpmpp_2m");
+  assert.equal(next["3"].inputs.text, "a dog");
+});
+
+test("inputs that are not registered as custom bindings are ignored", () => {
+  const workflow = apiWorkflow();
+  const bindings = { textInputs: [{ node: "3", input: "text" }], customBindings: [{ node: "2", input: "steps" }] };
+  // cfg 没被固定：即使请求里带了值也不能写进去，否则前端能改任意输入。
+  const next = applyFreeInputs(workflow, bindings, {
+    prompt: "x",
+    values: [
+      { node: "2", input: "cfg", value: "1" },
+      { node: "9", input: "ckpt_name", value: "evil.safetensors" },
+    ],
+  });
+  assert.equal(next["2"].inputs.cfg, 7.5);
+  assert.equal(next["9"].inputs.ckpt_name, "model.safetensors");
+});
+
+test("a linked input cannot be pinned: setCustomBindings drops it", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-custom-"));
+  try {
+    const entry = {
+      id: "fc-pin",
+      name: "Pin",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      customBindings: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+
+    await assert.rejects(() => store.setCustomBindings("missing", []), /自由卡片不存在/);
+
+    const updated = await store.setCustomBindings("fc-pin", [
+      { node: "2", input: "steps", label: "步数" },
+      // positive 在工作流里是 ["3", 0] 连线，值由上游决定，不能固定。
+      { node: "2", input: "positive", label: "连线输入" },
+      { node: "999", input: "steps", label: "不存在的节点" },
+      { node: "2", input: "nope", label: "不存在的输入" },
+      { node: "2", input: "steps", label: "重复项" },
+    ]);
+    const keys = updated.customBindings.map((item) => `${item.node}.${item.input}`);
+    assert.deepEqual(keys, ["2.steps"]);
+    assert.equal(updated.customBindings[0].label, "步数", "重复项不覆盖首次的 label");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("describeWorkflowGraph lists bindable inputs and skips linked ones", async () => {
+  const { describeWorkflowGraph } = await import("../src/ui-workflow.js");
+  // objectInfo 里的 combo 必须带 options，前端才能给出下拉而不是自由输入。
+  const info = {
+    ...objectInfo,
+    KSampler: { input: { required: { ...objectInfo.KSampler.input.required, sampler_name: ["COMBO", { options: ["euler", "dpmpp_2m"] }] } } },
+  };
+  const graph = describeWorkflowGraph(apiWorkflow(), info);
+  const sampler = graph.nodes.find((node) => node.classType === "KSampler");
+  assert.ok(sampler, "sampler node must be present");
+  const names = sampler.inputs.map((input) => input.name);
+  // 已连线的 model/positive/negative/latent_image 不应出现：它们的值由上游决定。
+  assert.ok(!names.includes("positive"));
+  assert.ok(!names.includes("latent_image"));
+  assert.ok(names.includes("steps"));
+  assert.equal(sampler.inputs.find((input) => input.name === "steps").kind, "number");
+  assert.equal(sampler.inputs.find((input) => input.name === "sampler_name").kind, "combo");
+  assert.equal(graph.nodes.find((node) => node.classType === "SaveImage").output, true);
+});
