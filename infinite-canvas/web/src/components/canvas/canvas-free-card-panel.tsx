@@ -127,6 +127,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     const [graph, setGraph] = useState<FreeWorkflowGraph | null>(null);
     const [graphLoading, setGraphLoading] = useState(false);
     const [graphError, setGraphError] = useState("");
+    const [graphHeight, setGraphHeight] = useState(420);
     const [pinned, setPinned] = useState<PinnedItem[]>([]);
     const [customValues, setCustomValues] = useState<Record<string, string | number | boolean>>(node.metadata?.freeCardValues || {});
     const optimizeEngine = config.promptApiEngine === "cloud" ? "cloud" : "local";
@@ -830,12 +831,13 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                 open={graphOpen}
                 onCancel={() => setGraphOpen(false)}
                 footer={null}
-                width={860}
+                width={1040}
                 destroyOnHidden
-                styles={{ body: { height: 520, display: "flex", flexDirection: "column" } }}
+                // 高度跟着图走：图只有两三列时写死高度会留一大片空白。
+                styles={{ body: { height: graphHeight, display: "flex", flexDirection: "column" } }}
             >
                 <div className="mb-2 text-[11px] opacity-55">{t("canvas.freeCard.graphHint")}</div>
-                <FreeCardGraphPanel graph={graph} loading={graphLoading} error={graphError} pinned={pinned} onPinnedChange={(next) => void commitPinned(next)} />
+                <FreeCardGraphPanel graph={graph} loading={graphLoading} error={graphError} pinned={pinned} onPinnedChange={(next) => void commitPinned(next)} onContentHeight={setGraphHeight} />
             </Modal>
         </ImageSettingsTheme>
     );
