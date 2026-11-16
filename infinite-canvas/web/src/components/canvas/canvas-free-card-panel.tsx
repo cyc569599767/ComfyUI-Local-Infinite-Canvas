@@ -889,6 +889,8 @@ function PinnedFields({
                                 value={String(value)}
                                 options={item.options.map((option) => ({ value: option, label: option }))}
                                 getPopupContainer={popupContainer}
+                                // 选项为空说明本地没装对应模型，别让下拉看起来像坏了。
+                                notFoundContent={<span className="text-[11px] opacity-60">{t("canvas.freeCard.comboEmpty")}</span>}
                                 onChange={(next) => onChangeValue(item, next)}
                             />
                         ) : item.kind === "number" ? (

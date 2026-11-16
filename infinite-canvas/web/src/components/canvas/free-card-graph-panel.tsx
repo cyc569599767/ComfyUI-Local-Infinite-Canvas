@@ -42,6 +42,8 @@ type Props = {
 };
 
 const DRAG_TYPE = "application/x-free-card-binding";
+/** 固定槽内部重排用的类型，和「从节点图拖进来」区分开。 */
+const REORDER_TYPE = "application/x-free-card-reorder";
 /** 每次滚轮的缩放倍率。和画布主视图的手感接近，不会一下跨太远。 */
 const ZOOM_STEP = 1.12;
 
@@ -49,6 +51,10 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
     const { t } = useTranslation();
     const [dragOver, setDragOver] = useState(false);
     const [activeNodeId, setActiveNodeId] = useState("");
+    /** 正在被拖动的固定项下标，用于把原位画淡。 */
+    const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+    /** 拖动经过时高亮的目标位置。 */
+    const [dropIndex, setDropIndex] = useState<number | null>(null);
     const [viewport, setViewport] = useState({ width: 0, height: 0 });
     /** 用户手动缩放/平移后的视图。null 表示「还没动过」，跟着自适应尺寸走。 */
     const [view, setView] = useState<GraphView | null>(null);
@@ -101,11 +107,12 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
 
     const unpin = (index: number) => onPinnedChange(pinned.filter((_, i) => i !== index));
 
-    const move = (index: number, delta: number) => {
-        const target = index + delta;
-        if (target < 0 || target >= pinned.length) return;
+    /** 把第 from 项移到第 to 项的位置（拖拽重排）。 */
+    const reorder = (from: number, to: number) => {
+        if (from === to || from < 0 || to < 0 || from >= pinned.length || to >= pinned.length) return;
         const next = [...pinned];
-        [next[index], next[target]] = [next[target], next[index]];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
         onPinnedChange(next);
     };
 
@@ -369,6 +376,7 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
             <div
                 className={`flex min-h-0 flex-col rounded-xl border border-dashed p-2 transition ${dragOver ? "border-sky-500 bg-sky-500/5" : "border-stone-300 dark:border-stone-600"}`}
                 onDragOver={(event) => {
+                    // 内部重排由卡片自己处理，这里只管从左边节点图拖进来的。
                     if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
                     event.preventDefault();
                     setDragOver(true);
@@ -380,25 +388,55 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                     <Pin className="size-3" />
                     {t("canvas.freeCard.pinnedTitle")}
                     {pinned.length ? <span className="opacity-60">{pinned.length}</span> : null}
+                    {/* 拖拽排序没有可见入口，不提示的话用户不会去试。 */}
+                    {pinned.length > 1 ? <span className="ml-auto text-[10px] font-normal opacity-70">{t("canvas.freeCard.pinnedReorderHint")}</span> : null}
                 </div>
                 <div data-graph-pin-list className="thin-scrollbar min-h-0 flex-1 space-y-1 overflow-y-auto">
                     {pinned.length ? (
                         pinned.map((item, index) => (
-                            <div key={`${item.node}\u0000${item.input}`} className="group rounded-md border border-stone-200 bg-white px-1.5 py-1 dark:border-stone-700 dark:bg-stone-900">
+                            <div
+                                key={`${item.node}\u0000${item.input}`}
+                                // 整块可拖：把手只是视觉提示，抓着卡片任意空白处都能拖。
+                                draggable
+                                onDragStart={(event) => {
+                                    event.dataTransfer.setData(REORDER_TYPE, String(index));
+                                    event.dataTransfer.effectAllowed = "move";
+                                    setDraggingIndex(index);
+                                }}
+                                onDragEnd={() => {
+                                    setDraggingIndex(null);
+                                    setDropIndex(null);
+                                }}
+                                onDragOver={(event) => {
+                                    // 只有内部重排才接管，从节点图拖进来的交给外层槽位处理。
+                                    if (!event.dataTransfer.types.includes(REORDER_TYPE)) return;
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setDropIndex(index);
+                                }}
+                                onDragLeave={() => setDropIndex((current) => (current === index ? null : current))}
+                                onDrop={(event) => {
+                                    const raw = event.dataTransfer.getData(REORDER_TYPE);
+                                    if (!raw) return;
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    reorder(Number(raw), index);
+                                    setDraggingIndex(null);
+                                    setDropIndex(null);
+                                }}
+                                className={`group rounded-md border bg-white px-1.5 py-1 transition dark:bg-stone-900 ${dropIndex === index && draggingIndex !== index ? "border-sky-500 ring-1 ring-sky-500/40" : "border-stone-200 dark:border-stone-700"} ${draggingIndex === index ? "opacity-40" : ""}`}
+                            >
                                 <div className="flex items-center gap-1">
+                                    <GripVertical className="size-3 shrink-0 cursor-grab opacity-35" />
                                     <span className="shrink-0 font-mono text-[10px] opacity-40">#{item.node}</span>
                                     <input
                                         value={item.label}
                                         maxLength={40}
                                         className="min-w-0 flex-1 bg-transparent text-[11px] font-medium outline-none"
                                         onChange={(event) => renamePinned(index, event.target.value)}
+                                        // 输入框里拖动会选中文字，不要触发整块重排。
+                                        onDragStart={(event) => event.stopPropagation()}
                                     />
-                                    <button type="button" className="grid size-5 shrink-0 place-items-center rounded opacity-35 hover:opacity-100" title={t("canvas.freeCard.pinnedMoveUp")} disabled={index === 0} onClick={() => move(index, -1)}>
-                                        <Pin className="size-2.5 rotate-180" />
-                                    </button>
-                                    <button type="button" className="grid size-5 shrink-0 place-items-center rounded opacity-35 hover:opacity-100" title={t("canvas.freeCard.pinnedMoveDown")} disabled={index === pinned.length - 1} onClick={() => move(index, 1)}>
-                                        <Pin className="size-2.5" />
-                                    </button>
                                     <button type="button" className="grid size-5 shrink-0 place-items-center rounded opacity-35 hover:opacity-100" title={t("canvas.freeCard.pinnedRemove")} onClick={() => unpin(index)}>
                                         <Trash2 className="size-2.5" />
                                     </button>

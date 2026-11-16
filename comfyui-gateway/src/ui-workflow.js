@@ -50,10 +50,23 @@ export function canonicalAspectRatio(value) {
   return `${Number(match[1])}:${Number(match[2])}`;
 }
 
+/**
+ * 取出某个输入的合法选项。
+ *
+ * ComfyUI 有两种写法，都得认：
+ *   老格式  ["STRING", ["a.ckpt", "b.ckpt"]]        —— 选项直接是数组的第一项
+ *   新格式  ["COMBO", { options: ["a", "b"] }]      —— 选项包在第二项的对象里
+ * VAELoader / LoraLoader / CLIPLoader 这些模型加载节点至今还是老格式，只认新格式的话
+ * vae_name、lora_name 会退化成文本框，用户得手打文件名。
+ */
 function comboOptions(objectInfo, classType, inputName) {
   const input = objectInfo?.[classType]?.input;
   const spec = input?.required?.[inputName] ?? input?.optional?.[inputName];
-  if (Array.isArray(spec) && Array.isArray(spec[1]?.options)) return spec[1].options;
+  if (Array.isArray(spec)) {
+    // 老格式：首项本身是选项数组。
+    if (Array.isArray(spec[0])) return spec[0];
+    if (Array.isArray(spec[1]?.options)) return spec[1].options;
+  }
   if (Array.isArray(spec?.options)) return spec.options;
   return [];
 }
@@ -609,7 +622,10 @@ export function describeWorkflowGraph(workflow, objectInfo = {}) {
       const spec = specs.get(name);
       const options = comboOptions(objectInfo, classType, name);
       const type = normalizeType(spec?.type ?? (Array.isArray(raw) ? "COMBO" : typeof raw === "number" ? "number" : "string"));
-      const kind = options.length ? "combo" : type === "INT" || type === "FLOAT" || typeof raw === "number" ? "number" : type === "BOOLEAN" || typeof raw === "boolean" ? "boolean" : typeof raw === "string" ? "text" : "other";
+      // COMBO 即使当前没有可选文件（比如没装 checkpoint）也保持下拉：退化成文本框会让用户
+      // 以为这里该手打文件名，而实际上他需要先装模型。
+      const isCombo = type === "COMBO" || /COMBO/i.test(String(type)) || options.length > 0;
+      const kind = isCombo ? "combo" : type === "INT" || type === "FLOAT" || typeof raw === "number" ? "number" : type === "BOOLEAN" || typeof raw === "boolean" ? "boolean" : typeof raw === "string" ? "text" : "other";
       // image / audio 这类是文件名或上传字段，让用户手填只会填错。
       if (kind === "other") continue;
       inputs.push({

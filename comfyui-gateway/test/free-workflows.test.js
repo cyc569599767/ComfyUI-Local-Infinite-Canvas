@@ -612,3 +612,52 @@ test("legacy bindings without surface still read back as card", async () => {
     await fsp.rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// ComfyUI 有两种 combo 写法，模型加载节点至今还是老格式。
+// 只认新格式的话 vae_name / lora_name / clip_name 会退化成文本框，用户得手打文件名。
+test("describeWorkflowGraph reads legacy combo specs where options sit in the first slot", async () => {
+  const { describeWorkflowGraph } = await import("../src/ui-workflow.js");
+  // 三个节点都接进同一条链：只有能从输出回溯到的节点才会出现在图里。
+  const workflow = {
+    "60": { class_type: "VAELoader", inputs: { vae_name: "ae.safetensors" } },
+    "61": { class_type: "LoraLoader", inputs: { lora_name: "anime.safetensors", strength_model: 1, strength_clip: 1, vae: ["60", 0] } },
+    "62": { class_type: "SaveImage", inputs: { images: ["61", 0], filename_prefix: "out" } },
+  };
+  const info = {
+    // 老格式：options 直接是 spec[0]，第二项只放 tooltip。
+    VAELoader: { input: { required: { vae_name: [["ae.safetensors", "ema_vae_fp16.safetensors"], { tooltip: "pick a vae" }] } } },
+    LoraLoader: {
+      input: {
+        required: {
+          lora_name: [["anime.safetensors", "realistic.safetensors"]],
+          strength_model: ["FLOAT", {}],
+          strength_clip: ["FLOAT", {}],
+        },
+      },
+    },
+    SaveImage: { input: { required: { filename_prefix: ["STRING", {}] } } },
+  };
+
+  const graph = describeWorkflowGraph(workflow, info);
+  const vae = graph.nodes.find((node) => node.classType === "VAELoader").inputs.find((input) => input.name === "vae_name");
+  assert.equal(vae.kind, "combo", "legacy combo must not degrade to a text box");
+  assert.deepEqual(vae.options, ["ae.safetensors", "ema_vae_fp16.safetensors"]);
+
+  const lora = graph.nodes.find((node) => node.classType === "LoraLoader").inputs.find((input) => input.name === "lora_name");
+  assert.equal(lora.kind, "combo");
+  assert.deepEqual(lora.options, ["anime.safetensors", "realistic.safetensors"]);
+});
+
+test("a combo with no local files stays a dropdown instead of becoming a text box", async () => {
+  const { describeWorkflowGraph } = await import("../src/ui-workflow.js");
+  const workflow = {
+    "70": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "" } },
+    "71": { class_type: "SaveImage", inputs: { images: ["70", 0], filename_prefix: "out" } },
+  };
+  // 没装 checkpoint 时，ComfyUI 返回空选项列表。
+  const info = { CheckpointLoaderSimple: { input: { required: { ckpt_name: [[], { tooltip: "pick a checkpoint" }] } } } };
+  const graph = describeWorkflowGraph(workflow, info);
+  const ckpt = graph.nodes.find((node) => node.classType === "CheckpointLoaderSimple").inputs.find((input) => input.name === "ckpt_name");
+  assert.equal(ckpt.kind, "combo", "an empty combo is still a combo");
+  assert.deepEqual(ckpt.options, []);
+});
