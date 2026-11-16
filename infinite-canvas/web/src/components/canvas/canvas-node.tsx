@@ -652,11 +652,11 @@ export const CanvasNode = React.memo(function CanvasNode({
 /**
  * 节点下方展开的面板层。
  *
- * 面板从节点底部往下长，但节点可能在画布靠下的位置：直接用 72vh 会让面板底部跑到
- * 视口外，用户既看不到底部的按钮（归档、生成设置、生成），也够不到滚动条。这里量一次
- * 可用高度交给面板，超出的内容在面板内部滚动。
+ * 面板从节点底部往下长，但节点可能在画布靠下的位置：固定 72vh 会让面板底部跑到视口外，
+ * 用户既看不到底部的按钮（归档、生成设置、生成），也够不到滚动条。这里量一次节点到窗口
+ * 底部的距离当上限，超出的内容在面板内部滚动。
  *
- * 面板有 scale(1/scale) 的反向缩放，所以量到的屏幕高度就是面板的 CSS 高度。
+ * 面板有 scale(1/scale) 的反向缩放，所以量到的屏幕距离就是面板的 CSS 尺寸。
  */
 function NodePanelLayer({ nodeId, scale, children }: { nodeId: string; scale: number; children: ReactNode }) {
     const ref = useRef<HTMLDivElement | null>(null);
@@ -665,10 +665,12 @@ function NodePanelLayer({ nodeId, scale, children }: { nodeId: string; scale: nu
     useEffect(() => {
         const element = ref.current;
         if (!element) return;
+        const margin = 16;
+        // 量节点的位置而不是面板自己：面板高度会随内容变，用它自己算会形成回馈。
+        const nodeElement = element.parentElement;
         const measure = () => {
-            const rect = element.getBoundingClientRect();
-            // 留 16px 呼吸空间，避免面板底边贴着窗口边缘。
-            const available = window.innerHeight - rect.top - 16;
+            const nodeRect = (nodeElement ?? element).getBoundingClientRect();
+            const available = window.innerHeight - nodeRect.bottom - margin;
             // 极矮的窗口下也别把面板压没：至少留 220px，超出部分由内层滚动。
             setMaxHeight(Math.max(220, available));
         };
