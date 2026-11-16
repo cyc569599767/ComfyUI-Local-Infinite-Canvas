@@ -16,9 +16,9 @@ export const GRAPH_HEADER_HEIGHT = 46;
 /** 每个可固定输入的行走高度。 */
 export const GRAPH_ROW_HEIGHT = 20;
 /** 节点底部留白。 */
-export const GRAPH_NODE_PAD = 8;
+const GRAPH_NODE_PAD = 8;
 export const GRAPH_COLUMN_GAP = 76;
-export const GRAPH_ROW_GAP = 18;
+const GRAPH_ROW_GAP = 18;
 
 export type PlacedNode = {
     node: FreeWorkflowGraphNode;

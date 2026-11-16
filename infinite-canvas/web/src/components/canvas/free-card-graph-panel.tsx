@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import type { FreeWorkflowGraph, FreeWorkflowGraphNode } from "@/services/api/free-workflow";
 import type { PinnedItem } from "@/lib/canvas/free-card-pinned";
-import { GRAPH_HEADER_HEIGHT, GRAPH_NODE_WIDTH, GRAPH_ROW_HEIGHT, fitGraphColumns, fitGraphScale, graphNodeHeight, layoutWorkflowGraph } from "@/lib/canvas/free-card-graph-layout";
+import { GRAPH_HEADER_HEIGHT, GRAPH_ROW_HEIGHT, fitGraphColumns, fitGraphScale, graphNodeHeight, layoutWorkflowGraph } from "@/lib/canvas/free-card-graph-layout";
 
 /**
  * 工作流配置项的「固定」界面。
