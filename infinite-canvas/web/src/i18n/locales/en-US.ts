@@ -304,7 +304,7 @@ export default {
             aspectRatio: "Aspect ratio", aspectRatioHint: "Written to the workflow's resolution/aspect-ratio node; final pixels still depend on the workflow",
             generate: "Generate", stop: "Stop", needPrompt: "Enter a prompt", imageInputs: "Image inputs", audioInputs: "Reference audio", audioInputsHint: "Connect an audio node as the reference voice first; otherwise the workflow fails validation for a missing reference", warnings: "Notes",
             sourceChanged: "The source workflow changed; click Sync workflow", sourceMissing: "The source workflow file is missing", sourceMissingHint: "The source may have been deleted in ComfyUI. You can still generate from the current snapshot, but sync and Edit in ComfyUI are unavailable. Select another workflow if needed.", importFailed: "Failed to import workflow", imported: "Workflow imported", selectFirst: "Select a workflow first",
-            cardArchived: "Archived to free cards", saveFailed: "Operation failed",
+            cardArchived: "Archived to free cards", cardRearchived: "Archive updated", archiveUpdate: "Update archive", archiveUpdateHint: "Overwrite the archived template with the current settings", saveFailed: "Operation failed",
             graphTitle: "Pick the settings to pin",
             graphHint: "Drag a parameter from a node on the left to the right; it becomes an editable field on the card. Parameters wired from upstream are decided by the link and are not listed. Scroll to zoom, drag with the middle button to pan.",
             graphLoadFailed: "Could not load the workflow graph", graphEmpty: "This workflow has no pinnable parameters",

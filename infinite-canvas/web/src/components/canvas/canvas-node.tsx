@@ -641,13 +641,59 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             {/* Counter-scale the panel so its on-screen size stays constant while the canvas zooms. */}
             {showPanel && !isGroup && renderPanel ? (
-                <div className="absolute left-1/2 top-full z-[70] w-max min-w-[560px] max-w-[min(920px,calc(100vw-32px))] pt-4" style={{ transform: `translateX(-50%) scale(${1 / scale})`, transformOrigin: "top center" }} data-node-panel={data.id}>
+                <NodePanelLayer nodeId={data.id} scale={scale}>
                     {renderPanel(data)}
-                </div>
+                </NodePanelLayer>
             ) : null}
         </div>
     );
 });
+
+/**
+ * 节点下方展开的面板层。
+ *
+ * 面板从节点底部往下长，但节点可能在画布靠下的位置：直接用 72vh 会让面板底部跑到
+ * 视口外，用户既看不到底部的按钮（归档、生成设置、生成），也够不到滚动条。这里量一次
+ * 可用高度交给面板，超出的内容在面板内部滚动。
+ *
+ * 面板有 scale(1/scale) 的反向缩放，所以量到的屏幕高度就是面板的 CSS 高度。
+ */
+function NodePanelLayer({ nodeId, scale, children }: { nodeId: string; scale: number; children: ReactNode }) {
+    const ref = useRef<HTMLDivElement | null>(null);
+    const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined);
+
+    useEffect(() => {
+        const element = ref.current;
+        if (!element) return;
+        const measure = () => {
+            const rect = element.getBoundingClientRect();
+            // 留 16px 呼吸空间，避免面板底边贴着窗口边缘。
+            const available = window.innerHeight - rect.top - 16;
+            // 极矮的窗口下也别把面板压没：至少留 220px，超出部分由内层滚动。
+            setMaxHeight(Math.max(220, available));
+        };
+        measure();
+        // 窗口尺寸变化、画布缩放都会改变可用高度。
+        window.addEventListener("resize", measure);
+        const observer = new ResizeObserver(measure);
+        observer.observe(document.body);
+        return () => {
+            window.removeEventListener("resize", measure);
+            observer.disconnect();
+        };
+    }, [scale]);
+
+    return (
+        <div
+            ref={ref}
+            className="absolute left-1/2 top-full z-[70] w-max min-w-[560px] max-w-[min(920px,calc(100vw-32px))] pt-4"
+            style={{ transform: `translateX(-50%) scale(${1 / scale})`, transformOrigin: "top center", maxHeight, display: "flex", flexDirection: "column" }}
+            data-node-panel={nodeId}
+        >
+            {children}
+        </div>
+    );
+}
 
 function NodeGenerationElapsed({ startedAt }: { startedAt: number }) {
     const theme = useCanvasTheme();

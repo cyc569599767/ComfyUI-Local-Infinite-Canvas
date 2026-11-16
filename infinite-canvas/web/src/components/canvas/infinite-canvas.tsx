@@ -237,6 +237,8 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
         >
             <CanvasGrid viewport={viewport} mode={backgroundMode} />
             <div
+                // 挂在画布坐标系里的浮层（下拉、弹层）用它做容器，才能跟着平移一起走。
+                data-canvas-transform-layer
                 className="absolute origin-top-left"
                 style={{
                     transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.k})`,

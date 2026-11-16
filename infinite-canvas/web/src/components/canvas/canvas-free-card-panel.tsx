@@ -30,6 +30,7 @@ import {
 } from "@/services/api/free-workflow";
 import { FreeCardGraphPanel } from "@/components/canvas/free-card-graph-panel";
 import { buildCustomValues, customKey, mergePinned, splitBySurface, type PinnedItem } from "@/lib/canvas/free-card-pinned";
+import { canvasPopupContainer } from "@/lib/canvas/canvas-popup";
 import { CanvasNodeType, isAudioNodeType, type CanvasFreeCardInfo, type CanvasFreeCardOutputType, type CanvasNodeData } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
 
@@ -99,6 +100,8 @@ function settingsSizeLabel(size: string | undefined) {
 
 export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, onChange, onGenerate, onStop, onDisconnectReference, onStartReferenceSelection }: CanvasFreeCardPanelProps) {
     const { t } = useTranslation();
+    // 下拉和弹层挂到画布变换层里，跟随平移与缩放（和节点里的文字表现一致）。
+    const popupContainer = useCallback((trigger: HTMLElement) => canvasPopupContainer(trigger), []);
     const { message } = App.useApp();
     const theme = useCanvasTheme();
     const config = useEffectiveConfig();
@@ -399,8 +402,15 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
         }
     };
 
+    /**
+     * 归档 / 重新归档。
+     *
+     * 已归档时不禁用而是继续可点：归档保存的是「当前参数快照」，用户改了尺寸、种子之后
+     * 需要能再存一次覆盖旧快照。以前这里直接 return 并禁用按钮，表现是「点了没反应」，
+     * 而按钮上又写着「归档」，看起来像坏了。
+     */
     const archiveCard = async () => {
-        if (!info?.id || info.archived) return;
+        if (!info?.id) return;
         const preset: FreeWorkflowPreset = {
             size: info.size ? normalizePixelSize(sizeText) || undefined : undefined,
             aspectRatio: ratioOptions.length ? ratioValue || undefined : undefined,
@@ -412,7 +422,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
         try {
             const next = await archiveFreeWorkflow(config, info.id, true, preset);
             setCard(next);
-            message.success(t("canvas.freeCard.cardArchived"));
+            message.success(t(info.archived ? "canvas.freeCard.cardRearchived" : "canvas.freeCard.cardArchived"));
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("canvas.freeCard.saveFailed"));
         } finally {
@@ -560,7 +570,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
     return (
         <ImageSettingsTheme theme={theme}>
             <div
-                className="thin-scrollbar max-h-[72vh] w-[540px] space-y-3 overflow-y-auto rounded-2xl border px-4 py-4 shadow-[0_18px_50px_rgba(28,25,23,.18)]"
+                className="thin-scrollbar min-h-0 max-h-full w-[540px] space-y-3 overflow-y-auto rounded-2xl border px-4 py-4 shadow-[0_18px_50px_rgba(28,25,23,.18)]"
                 style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                 onPointerDown={(event) => event.stopPropagation()}
                 onMouseDown={(event) => event.stopPropagation()}
@@ -583,6 +593,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                         options={sourceOptions}
                         loading={sourcesLoading || importing}
                         onChange={(value) => void selectSource(value)}
+                        getPopupContainer={popupContainer}
                         notFoundContent={sourcesLoading ? t("canvas.freeCard.loadingSources") : sourcesError || t("canvas.freeCard.sourcesEmpty")}
                     />
                     <Button size="small" icon={<RefreshCw className={`size-3.5 ${sourcesLoading ? "animate-spin" : ""}`} />} title={t("canvas.freeCard.refreshSources")} disabled={importing} onClick={() => void loadSources()} />
@@ -630,7 +641,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                 </Button>
                             </div>
                             {cardPinned.length ? (
-                                <PinnedFields items={cardPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} />
+                                <PinnedFields items={cardPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} popupContainer={popupContainer} />
                             ) : pinned.length ? (
                                 // 全都放在生成设置里：这里不重复渲染，但要说清它们去哪了，否则像丢了。
                                 <div className="rounded-lg px-2.5 py-2 text-[11px] leading-5" style={{ background: theme.node.fill, color: theme.node.muted }}>
@@ -743,6 +754,8 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                         open={settingsOpen}
                                         onOpenChange={setSettingsOpen}
                                         placement="topLeft"
+                                        // 挂到画布变换层：拖动/缩放画布时设置窗口跟着卡片走。
+                                        getPopupContainer={popupContainer}
                                         content={
                                             <div className="space-y-4" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                                                 {ratioBlock}
@@ -752,7 +765,7 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                                         <div className="text-xs font-medium" style={{ color: theme.node.muted }}>
                                                             {t("canvas.freeCard.settingsPinned")}
                                                         </div>
-                                                        <PinnedFields items={settingsPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} compact />
+                                                        <PinnedFields items={settingsPinned} values={customValues} onChangeValue={commitCustomValue} theme={theme} popupContainer={popupContainer} compact />
                                                     </div>
                                                 ) : null}
                                                 <ImageSettingsPanel
@@ -787,8 +800,16 @@ export function CanvasFreeCardPanel({ node, nodes, connectedNodes, isRunning, on
                                 <Button size="small" icon={<ExternalLink className="size-3.5" />} disabled={isRunning || sourceMissing} title={sourceMissing ? t("canvas.freeCard.sourceMissing") : undefined} onClick={() => void openComfyUI()}>
                                     {t("canvas.freeCard.openInComfy")}
                                 </Button>
-                                <Button size="small" icon={<Archive className="size-3.5" />} loading={archiving} disabled={isRunning || info.archived} onClick={() => void archiveCard()}>
-                                    {t("canvas.freeCard.archive")}
+                                <Button
+                                    size="small"
+                                    icon={<Archive className="size-3.5" />}
+                                    loading={archiving}
+                                    // 已归档仍可点：再存一次会覆盖旧快照，等于「更新归档」。
+                                    disabled={isRunning}
+                                    title={info.archived ? t("canvas.freeCard.archiveUpdateHint") : undefined}
+                                    onClick={() => void archiveCard()}
+                                >
+                                    {info.archived ? t("canvas.freeCard.archiveUpdate") : t("canvas.freeCard.archive")}
                                 </Button>
                             </div>
                             {isRunning ? (
@@ -833,12 +854,15 @@ function PinnedFields({
     values,
     onChangeValue,
     theme,
+    popupContainer,
     compact = false,
 }: {
     items: PinnedItem[];
     values: Record<string, string | number | boolean>;
     onChangeValue: (item: PinnedItem, value: string | number | boolean) => void;
     theme: ReturnType<typeof useCanvasTheme>;
+    /** 下拉挂到画布变换层，才能跟着画布平移。 */
+    popupContainer?: (trigger: HTMLElement) => HTMLElement;
     /** 弹层里宽度有限，文本域矮一点。 */
     compact?: boolean;
 }) {
@@ -864,6 +888,7 @@ function PinnedFields({
                                 size="small"
                                 value={String(value)}
                                 options={item.options.map((option) => ({ value: option, label: option }))}
+                                getPopupContainer={popupContainer}
                                 onChange={(next) => onChangeValue(item, next)}
                             />
                         ) : item.kind === "number" ? (

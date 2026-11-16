@@ -304,7 +304,7 @@ export default {
             aspectRatio: "画幅", aspectRatioHint: "写入工作流里的分辨率/画幅节点；输出像素仍由工作流内部决定",
             generate: "开始生成", stop: "停止", needPrompt: "请输入提示词", imageInputs: "图片输入", audioInputs: "参考音频", audioInputsHint: "请先连入音频节点作为参考音色，否则工作流会因缺少参考音频而校验失败", warnings: "提示",
             sourceChanged: "源工作流已变化，点「同步工作流」更新", sourceMissing: "源工作流文件已不存在", sourceMissingHint: "源文件可能已在 ComfyUI 中删除；仍可使用当前快照生成，但无法同步或在 ComfyUI 编辑。可重新选择工作流。", importFailed: "导入工作流失败", imported: "已导入工作流", selectFirst: "请先选择工作流",
-            cardArchived: "已归档到自由卡片库", saveFailed: "操作失败",
+            cardArchived: "已归档到自由卡片库", cardRearchived: "已更新归档", archiveUpdate: "更新归档", archiveUpdateHint: "用当前参数覆盖已归档的模板", saveFailed: "操作失败",
             graphTitle: "选择要固定的配置项",
             graphHint: "把左边节点上的参数拖到右侧，它会成为卡片上的一个可编辑字段。已连线的参数由上游决定，不在此列。滚轮缩放，中键拖动。",
             graphLoadFailed: "读取工作流节点图失败", graphEmpty: "这个工作流没有可固定的参数",
