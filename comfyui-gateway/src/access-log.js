@@ -5,10 +5,13 @@
  * 每一条都记下来的话，服务面板的 100 行缓冲会在十几秒内被刷满，
  * 真正有用的错误反而看不到。
  *
- * 但「安静」不等于「静默失败」：非 2xx 仍然要记，否则轮询出错时日志里
- * 一片空白，排查时反而更难。这个判定只负责「成功时是否安静」。
+ * 但「安静」不等于「静默失败」：HTTP 4xx/5xx 仍然要记，否则轮询出错时日志里
+ * 一片空白。304 是正常的条件轮询响应，同样应静默；任务失败另有独立警告。
  */
+// 只匹配单个视频任务的状态接口，不包括创建、取消或内容下载。
+const VIDEO_STATUS_PATH = /^\/v1\/videos\/[^/]+\/?$/;
 const QUIET_PATTERNS = [
+    VIDEO_STATUS_PATH,
     /^\/api\/progress\//,
     /^\/api\/session\/status\b/,
     /^\/v1\/models$/,
@@ -23,8 +26,13 @@ export function isQuietRequestPath(requestPath) {
     return QUIET_PATTERNS.some((pattern) => pattern.test(value));
 }
 
-/** 成功的高频轮询不记，失败一律记。 */
-export function shouldLogRequest(requestPath, statusCode) {
-    if (Number(statusCode) >= 400) return true;
+/** 成功的高频轮询不记，失败一律记；省略 method 保持原有读取调用兼容。 */
+export function shouldLogRequest(requestPath, statusCode, method = "GET") {
+    const status = Number(statusCode);
+    if (status >= 400) return true;
+    if (VIDEO_STATUS_PATH.test(String(requestPath || ""))) {
+        const read = method === "GET" || method === "HEAD";
+        return !(read && ((status >= 200 && status < 300) || status === 304));
+    }
     return !isQuietRequestPath(requestPath);
 }

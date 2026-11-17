@@ -7,6 +7,31 @@ import { isQuietRequestPath, shouldLogRequest } from "../src/access-log.js";
 // /api/system/stats（5s），如果每条都记，十几秒就能把真实错误挤出去。
 // 这组测试锁定「高频成功轮询安静、失败仍然记录」这条边界。
 
+test("视频任务状态正常轮询的 200 和 304 不写访问日志", () => {
+    for (const path of ["/v1/videos/task_786f3e25-e9de-4ca3-8b08-ef1d082ff4c0", "/v1/videos/task_abc/"]) {
+        assert.equal(isQuietRequestPath(path), true);
+        for (const method of ["GET", "HEAD"]) {
+            for (const status of [200, 204, 304, "304"]) {
+                assert.equal(shouldLogRequest(path, status, method), false, `${method} ${path} ${status}`);
+            }
+        }
+    }
+});
+
+test("视频轮询的异常、非读取请求和其他视频操作仍写日志", () => {
+    const path = "/v1/videos/task_abc";
+    for (const status of [301, 302, 400, 401, 403, 404, 429, 500, 503]) {
+        assert.equal(shouldLogRequest(path, status, "GET"), true, `${status} 应记录`);
+    }
+    for (const method of ["POST", "PATCH", "DELETE", "OPTIONS"]) {
+        assert.equal(shouldLogRequest(path, 200, method), true, `${method} 应记录`);
+    }
+    for (const other of ["/v1/videos", "/v1/videos/", "/v1/videos/task_abc/content", "/v1/videos/task_abc/cancel", "/v1/videos/task_abc/extra", "/v1/videos-other/task_abc"]) {
+        assert.equal(isQuietRequestPath(other), false, other);
+        assert.equal(shouldLogRequest(other, 200), true, other);
+    }
+});
+
 test("模型列表与系统状态的成功轮询不写访问日志", () => {
     assert.equal(isQuietRequestPath("/v1/models"), true);
     assert.equal(isQuietRequestPath("/api/system/stats"), true);

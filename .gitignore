@@ -38,6 +38,9 @@ infinite-canvas/plugins/canvas/*/dist/
 
 # local test artifacts
 tmp-*
+# 交互测试夹具与浏览器缓存：可能含真实画布的导出数据，只在本地用
+comfyui-gateway/.e2e/
+.playwright-cli/
 
 # internal working docs (local only, never published)
 docs/HANDOFF.md
