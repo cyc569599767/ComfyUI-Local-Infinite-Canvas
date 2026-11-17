@@ -497,7 +497,11 @@
         "seedvr2_dep_omegaconf",
         "seedvr2_dep_opencv",
         "seedvr2_dep_einops",
-        "rife_v426"
+        "rife_v426",
+        "relayvsr_x2_model",
+        "relayvsr_x2_vae",
+        "relayvsr_x4_model",
+        "relayvsr_x4_vae"
       ],
       "optionalResources": [
         "esrgan_x2plus",
@@ -511,13 +515,19 @@
         "seedvr2_dep_omegaconf",
         "seedvr2_dep_opencv",
         "seedvr2_dep_einops",
-        "rife_v426"
+        "rife_v426",
+        "relayvsr_x2_model",
+        "relayvsr_x2_vae",
+        "relayvsr_x4_model",
+        "relayvsr_x4_vae"
       ],
       "workflows": [
         "image-esrgan-upscale",
         "video-esrgan_2x",
         "image-seedvr2-upscale",
-        "video-seedvr2-upscale"
+        "video-seedvr2-upscale",
+        "video-relayvsr-upscale",
+        "video-dlss5-upscale"
       ],
       "family": "upscale",
       "tier": "utility",
@@ -553,7 +563,14 @@
           "seedvr2_dep_omegaconf",
           "seedvr2_dep_opencv",
           "seedvr2_dep_einops"
-        ]
+        ],
+        "video-relayvsr-upscale": [
+          "relayvsr_x2_model",
+          "relayvsr_x2_vae",
+          "relayvsr_x4_model",
+          "relayvsr_x4_vae"
+        ],
+        "video-dlss5-upscale": []
       }
     },
     {
@@ -2002,22 +2019,43 @@
       ]
     },
     {
-      "id": "h3_draft_fl2va_int8", "type": "model", "label": "H3 草稿 FL2VA INT8（剪枝）",
-      "target": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "size": 20970379616,
-      "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a", "license": "MiniMax H3 Community License",
-      "sources": ["https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"]
+      "id": "h3_draft_fl2va_int8",
+      "type": "model",
+      "label": "H3 草稿 FL2VA INT8（剪枝）",
+      "target": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "size": 20970379616,
+      "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+      "license": "MiniMax H3 Community License",
+      "sources": [
+        "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+      ]
     },
     {
-      "id": "h3_draft_turbo4_v12", "type": "model", "label": "H3 草稿 FL2V Turbo 4步 v1.2 LoRA",
-      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors", "size": 1956193000,
-      "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8", "license": "见 LightX2V / MiniMax H3 上游许可",
-      "sources": ["https://hf-mirror.com/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors", "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors"]
+      "id": "h3_draft_turbo4_v12",
+      "type": "model",
+      "label": "H3 草稿 FL2V Turbo 4步 v1.2 LoRA",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8",
+      "license": "见 LightX2V / MiniMax H3 上游许可",
+      "sources": [
+        "https://hf-mirror.com/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+        "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/main/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors"
+      ]
     },
     {
-      "id": "h3_draft_video_vae_fp16", "type": "model", "label": "H3 草稿原生视频 VAE fp16",
-      "target": "vae/minimax_h3_video_vae_fp16.safetensors", "size": 5207808496,
-      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522", "license": "MiniMax H3 Community License",
-      "sources": ["https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors", "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"]
+      "id": "h3_draft_video_vae_fp16",
+      "type": "model",
+      "label": "H3 草稿原生视频 VAE fp16",
+      "target": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "license": "MiniMax H3 Community License",
+      "sources": [
+        "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+        "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"
+      ]
     },
     {
       "id": "h3_video_vae_int8",
@@ -2271,6 +2309,86 @@
           "kind": "bundled",
           "path": "resources/nodes/unpacked/Goohaitools-comfyui",
           "label": "随包"
+        }
+      ]
+    },
+    {
+      "id": "relayvsr_x2_model",
+      "type": "model",
+      "label": "RelayVSR x2 主模型（LightX2V）",
+      "target": "diffusion_models/relayvsr_x2_lightx2v_int8_convrot.safetensors",
+      "size": 5163295248,
+      "sha256": "240e75e0c17cf2845d559b25254a230ff7458f81449d7a8c5e7e3fb8275c7b3c",
+      "license": "Apache-2.0",
+      "note": "RelayVSR 2× 视频超分主模型（含 convrot int8）；与 x2 Flash 解码 VAE 配对使用。",
+      "sources": [
+        {
+          "url": "https://hf-mirror.com/Comfy-Org/RelayVSR/resolve/main/diffusion_models/relayvsr_x2_lightx2v_int8_convrot.safetensors",
+          "label": "HF 镜像"
+        },
+        {
+          "url": "https://huggingface.co/Comfy-Org/RelayVSR/resolve/main/diffusion_models/relayvsr_x2_lightx2v_int8_convrot.safetensors",
+          "label": "Hugging Face"
+        }
+      ]
+    },
+    {
+      "id": "relayvsr_x2_vae",
+      "type": "model",
+      "label": "RelayVSR x2 Flash 解码 VAE",
+      "target": "vae/relayvsr_flash_vae_x2_fp32.safetensors",
+      "size": 127759464,
+      "sha256": "b5bb0339acb5b52545911ea29a51b4c5b805776a779222b5a14591571f42e21c",
+      "license": "Apache-2.0",
+      "note": "RelayVSR 2× 专用 Flash 解码器；与 x2 主模型配对，不能与 x4 混用。",
+      "sources": [
+        {
+          "url": "https://hf-mirror.com/Comfy-Org/RelayVSR/resolve/main/vae/relayvsr_flash_vae_x2_fp32.safetensors",
+          "label": "HF 镜像"
+        },
+        {
+          "url": "https://huggingface.co/Comfy-Org/RelayVSR/resolve/main/vae/relayvsr_flash_vae_x2_fp32.safetensors",
+          "label": "Hugging Face"
+        }
+      ]
+    },
+    {
+      "id": "relayvsr_x4_model",
+      "type": "model",
+      "label": "RelayVSR x4 主模型",
+      "target": "diffusion_models/relayvsr_x4_int8_convrot.safetensors",
+      "size": 5164179952,
+      "sha256": "21303b3c5f9ab4e1fd3fe00df5dd2e0b343f0cf2e3d269e03a9872000a313a2e",
+      "license": "Apache-2.0",
+      "note": "RelayVSR 4× 视频超分主模型；与 x4 Flash 解码 VAE 配对使用。",
+      "sources": [
+        {
+          "url": "https://hf-mirror.com/Comfy-Org/RelayVSR/resolve/main/diffusion_models/relayvsr_x4_int8_convrot.safetensors",
+          "label": "HF 镜像"
+        },
+        {
+          "url": "https://huggingface.co/Comfy-Org/RelayVSR/resolve/main/diffusion_models/relayvsr_x4_int8_convrot.safetensors",
+          "label": "Hugging Face"
+        }
+      ]
+    },
+    {
+      "id": "relayvsr_x4_vae",
+      "type": "model",
+      "label": "RelayVSR x4 Flash 解码 VAE",
+      "target": "vae/relayvsr_flash_vae_x4_fp32.safetensors",
+      "size": 127759784,
+      "sha256": "7b8b8c99275fd5c4501b0589cc7b4c4506456a5df83160ef4e207e147b30f714",
+      "license": "Apache-2.0",
+      "note": "RelayVSR 4× 专用 Flash 解码器；与 x4 主模型配对，不能与 x2 混用。",
+      "sources": [
+        {
+          "url": "https://hf-mirror.com/Comfy-Org/RelayVSR/resolve/main/vae/relayvsr_flash_vae_x4_fp32.safetensors",
+          "label": "HF 镜像"
+        },
+        {
+          "url": "https://huggingface.co/Comfy-Org/RelayVSR/resolve/main/vae/relayvsr_flash_vae_x4_fp32.safetensors",
+          "label": "Hugging Face"
         }
       ]
     }

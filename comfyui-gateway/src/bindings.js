@@ -93,6 +93,8 @@ function applyTransform(value, binding) {
       return Math.round(Number(value));
     case "int":
       return Math.trunc(Number(value));
+    case "float":
+      return Number(value);
     case "invert10":
       return 10 - Number(value);
     case "boolean":
@@ -295,7 +297,13 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
       if (binding.required) throw new BindingError(`缺少必填参数：${key}`, { code: "missing_parameter" });
       continue;
     }
-    if (binding.map && Object.prototype.hasOwnProperty.call(binding.map, value)) value = binding.map[value];
+    if (binding.map) {
+      // 映射表故意不覆盖全部取值时（如 RelayVSR 只认 2/4 倍率），未命中的值必须回落到
+      // default 再写回，否则会把「3」这样的档位当成模型文件名提交，ComfyUI 会直接报缺文件。
+      // 判定必须用映射前的原值：映射后的值已经是文件名，再查一次表会永远落空。
+      const raw = value;
+      value = Object.prototype.hasOwnProperty.call(binding.map, raw) ? binding.map[raw] : binding.default !== undefined ? binding.default : value;
+    }
     value = applyTransform(value, binding);
     node.inputs[binding.input] = value;
     if (key === "seed") {

@@ -911,7 +911,8 @@ test("krea2 and four-view packs keep the base workflow and standalone resource e
     ]);
     assert.equal(index.resources.some((item) => item.id === "krea2_darkbrush_lora"), false);
     assert.equal(index.resources.some((item) => item.id === "krea2_retroanime_lora"), false);
-    assert.equal(index.resources.length, 91);
+    // 95 = 原有 91 + RelayVSR 的 x2/x4 各一套「主模型 + Flash VAE」。
+    assert.equal(index.resources.length, 95);
     assert.equal(new Set(index.resources.map(item => item.id)).size, index.resources.length);
 });
 
@@ -967,6 +968,8 @@ test("upscale pack ships the node with the app and downloads ESRGAN/SeedVR2 weig
         "video-esrgan_2x",
         "image-seedvr2-upscale",
         "video-seedvr2-upscale",
+        "video-relayvsr-upscale",
+        "video-dlss5-upscale",
     ]);
     assert.deepEqual(pack.workflowDependencies["image-esrgan-upscale"], ["esrgan_x2plus"]);
     assert.deepEqual(pack.workflowDependencies["image-esrgan-upscale"], pack.workflowDependencies["video-esrgan_2x"]);
@@ -1010,6 +1013,24 @@ test("upscale pack ships the node with the app and downloads ESRGAN/SeedVR2 weig
     assert.match(rife.sha256, /^[0-9a-f]{64}$/);
     assert.ok(Number(rife.size) > 0);
     assert.ok(rife.sources.some((source) => /Comfy-Org\/frame_interpolation/.test(source.url || "")));
+
+    // RelayVSR 走 ComfyUI 0.45 核心节点（RelayVSRConditioning / VSRDecode），不含自定义节点，
+    // 但 x2 与 x4 的权重对必须成套下载：倍率来自权重，混用会直接失败。
+    assert.deepEqual(pack.workflowDependencies["video-relayvsr-upscale"], ["relayvsr_x2_model", "relayvsr_x2_vae", "relayvsr_x4_model", "relayvsr_x4_vae"]);
+    const relayTargets = { relayvsr_x2_model: "diffusion_models/relayvsr_x2_lightx2v_int8_convrot.safetensors", relayvsr_x2_vae: "vae/relayvsr_flash_vae_x2_fp32.safetensors", relayvsr_x4_model: "diffusion_models/relayvsr_x4_int8_convrot.safetensors", relayvsr_x4_vae: "vae/relayvsr_flash_vae_x4_fp32.safetensors" };
+    for (const [id, target] of Object.entries(relayTargets)) {
+        const resource = index.resources.find((item) => item.id === id);
+        assert.ok(resource, `RelayVSR 资源缺失：${id}`);
+        assert.equal(resource.type, "model");
+        assert.equal(resource.target, target, `${id} target`);
+        assert.match(resource.sha256, /^[0-9a-f]{64}$/, `${id} sha256`);
+        assert.ok(Number(resource.size) > 0, `${id} size`);
+        assert.ok(resource.sources.some((source) => /Comfy-Org\/RelayVSR/.test(source.url || "")), `${id} 必须指向官方 Comfy-Org/RelayVSR`);
+    }
+
+    // DLSS5 的 NVIDIA 运行时 DLL 由用户自备、不随包分发，所以这里只能声明工作流本身，
+    // 不能编造下载源——否则会引导用户去下载没有授权的二进制。
+    assert.deepEqual(pack.workflowDependencies["video-dlss5-upscale"], []);
 });
 
 test("h3 pack exposes only noVDN workflows while keeping VDN runtime dependencies", () => {

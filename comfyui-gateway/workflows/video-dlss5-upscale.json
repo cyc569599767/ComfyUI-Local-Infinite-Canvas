@@ -1,0 +1,59 @@
+{
+  "1": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "placeholder.mp4"
+    },
+    "_meta": {
+      "title": "DLSS5 源视频"
+    }
+  },
+  "2": {
+    "class_type": "RH_DLSS5Enhance",
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ],
+      "upscaling_mode": "1.5x (Quality)",
+      "style": "default",
+      "preset": 0,
+      "intensity": 1,
+      "tone": 1,
+      "structure": 1.5,
+      "skin": -1,
+      "auto_mask": "on",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "batch_mode": "temporal sequence",
+      "warmup_frames": 0,
+      "keep_audio": "on",
+      "backend": "auto",
+      "channel_order": "auto",
+      "hdr": "off",
+      "global_tone": -1,
+      "detail": 1,
+      "color": 1,
+      "runtime_dir": "",
+      "wine_prefix": ""
+    },
+    "_meta": {
+      "title": "DLSS5 神经渲染超分"
+    }
+  },
+  "3": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "2",
+        1
+      ],
+      "filename_prefix": "video/dlss5-upscale",
+      "format": "auto",
+      "codec": "auto"
+    },
+    "_meta": {
+      "title": "DLSS5 视频输出"
+    }
+  }
+}

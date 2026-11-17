@@ -1,0 +1,235 @@
+{
+  "48": {
+    "inputs": {
+      "filename_prefix": "pictures\\image_minimax_h3_t2i",
+      "images": [
+        "58:10",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "79": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 4,
+      "multiple": 8
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "分辨率选择器"
+    }
+  },
+  "58:6": {
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "58:41": {
+    "inputs": {
+      "lora_name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "58:6",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Turbo LoRA (8 step) - bypass for base 30 steps"
+    }
+  },
+  "58:12": {
+    "inputs": {
+      "text": "Cinematic 3D render, photorealistic, sci-fi action scene.\n\nSubject and action: a masked superhero in a form-fitting red-and-blue tactical suit,\nslim white spider-eye lenses on the mask, black webbing pattern across the fabric,\nlunging forward in a low crouch, right fist mid-swing, left hand firing a strand of\nglowing synthetic webbing. Opposite him, a female spider demon mid-transformation:\nbeautiful humanoid upper body with porcelain-pale skin, elaborate black-and-gold\nornamental armor, six long chitinous spider legs erupting from her back, each leg\ntipped with a metallic joint, her hands trailing hundreds of razor-thin silk threads\nthat fan out like fiber-optic cables.\n\nEnvironment: a vast underground cavern fused with a derelict sci-fi facility —\ncarved stone walls veined with pulsing cyan energy conduits, hanging cocoons of\ntranslucent silk glowing faintly from within, broken server racks and rusted\nindustrial pipes on the wet floor, shallow water reflecting neon light.\n\nCamera: 35mm anamorphic lens, low angle slightly below chest height, medium-wide\nshot, shallow depth of field, subject sharp in the foreground, cavern receding into\natmospheric haze.\n\nLighting: hard cyan rim light from the left conduit wall, warm amber practical spill\nfrom a broken ceiling lamp, cool magenta bounce off the water, high contrast,\nvolumetric god rays through dust and silk fibers.\n\nMaterial and render: physically based shading, subsurface scattering on skin,\nanisotropic sheen on the suit fabric, subsurface glow on the silk threads,\nmicro-detail on the chitin legs, subtle motion blur on the swinging arm,\nray-traced reflections, 8K detail, Unreal Engine 5 cinematic quality, film grain,\ncolor-graded like a modern blockbuster.\n\nConstraints: anatomically correct hands, exactly six spider legs, clean readable\nsilhouettes, no text, no watermark, no extra limbs.\n",
+      "clip": [
+        "58:13",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "58:13": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "58:11": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "58:46": {
+    "inputs": {
+      "width": [
+        "79",
+        0
+      ],
+      "height": [
+        "79",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "58:52": {
+    "inputs": {
+      "switch": false,
+      "on_false": [
+        "58:6",
+        0
+      ],
+      "on_true": [
+        "58:41",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "If/Else Switch (Model)"
+    }
+  },
+  "58:16": {
+    "inputs": {
+      "model": [
+        "58:44",
+        0
+      ],
+      "conditioning": [
+        "58:12",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "58:15": {
+    "inputs": {
+      "noise_seed": 168665928104209
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "58:17": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "58:9": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 50,
+      "denoise": 1,
+      "model": [
+        "58:44",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "58:44": {
+    "inputs": {
+      "attention": "comfy kitchen attention",
+      "model": [
+        "58:52",
+        0
+      ]
+    },
+    "class_type": "ModelAttentionBackend",
+    "_meta": {
+      "title": "模型注意力后端"
+    }
+  },
+  "58:14": {
+    "inputs": {
+      "noise": [
+        "58:15",
+        0
+      ],
+      "guider": [
+        "58:16",
+        0
+      ],
+      "sampler": [
+        "58:17",
+        0
+      ],
+      "sigmas": [
+        "58:9",
+        0
+      ],
+      "latent_image": [
+        "58:46",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "58:39": {
+    "inputs": {
+      "av_latent": [
+        "58:14",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "分离 AV 潜空间"
+    }
+  },
+  "58:10": {
+    "inputs": {
+      "samples": [
+        "58:39",
+        0
+      ],
+      "vae": [
+        "58:11",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  }
+}

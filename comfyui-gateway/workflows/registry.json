@@ -1356,6 +1356,158 @@
       "label": "SeedVR2 视频超分"
     },
     {
+      "id": "video-relayvsr-upscale",
+      "name": "video-relayvsr-upscale",
+      "type": "video",
+      "category": "upscale",
+      "hidden": true,
+      "file": "video-relayvsr-upscale.json",
+      "description": "RelayVSR one-step video upscale; factor comes from the weight pair (x2 LightX2V or x4), audio and frame rate pass through.",
+      "bindings": {
+        "video": {
+          "node": "1",
+          "input": "file",
+          "from": "video",
+          "videoIndex": 0,
+          "required": true
+        },
+        "unet_name": {
+          "node": "3",
+          "input": "unet_name",
+          "from": "params.factor",
+          "transform": "string",
+          "map": {
+            "2": "relayvsr_x2_lightx2v_int8_convrot.safetensors",
+            "4": "relayvsr_x4_int8_convrot.safetensors"
+          },
+          "default": "relayvsr_x2_lightx2v_int8_convrot.safetensors"
+        },
+        "vae_name": {
+          "node": "4",
+          "input": "vae_name",
+          "from": "params.factor",
+          "transform": "string",
+          "map": {
+            "2": "relayvsr_flash_vae_x2_fp32.safetensors",
+            "4": "relayvsr_flash_vae_x4_fp32.safetensors"
+          },
+          "default": "relayvsr_flash_vae_x2_fp32.safetensors"
+        },
+        "seed": {
+          "node": "6",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "default": 42
+        },
+        "detail": {
+          "node": "7",
+          "input": "detail",
+          "from": "params.detail",
+          "transform": "float",
+          "default": 1
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "default": 42
+        },
+        {
+          "key": "detail",
+          "label": "细节强度",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 1
+        }
+      ],
+      "label": "RelayVSR 视频超分"
+    },
+    {
+      "id": "video-dlss5-upscale",
+      "name": "video-dlss5-upscale",
+      "type": "video",
+      "category": "upscale",
+      "hidden": true,
+      "file": "video-dlss5-upscale.json",
+      "description": "NVIDIA DLSS 5 Neural Rendering video upscale (1.5x/1.72x/2x/3x); needs user-supplied NGX runtimes, audio stream-copied.",
+      "bindings": {
+        "video": {
+          "node": "1",
+          "input": "file",
+          "from": "video",
+          "videoIndex": 0,
+          "required": true
+        },
+        "upscaling_mode": {
+          "node": "2",
+          "input": "upscaling_mode",
+          "from": "params.factor",
+          "map": {
+            "1.5": "1.5x (Quality)",
+            "1.724": "1.724x (Balanced)",
+            "2": "2x (Performance)",
+            "3": "3x (Ultra Performance)"
+          },
+          "default": "1.5x (Quality)"
+        },
+        "style": {
+          "node": "2",
+          "input": "style",
+          "from": "params.style",
+          "default": "default"
+        },
+        "detail": {
+          "node": "2",
+          "input": "detail",
+          "from": "params.detail",
+          "transform": "float",
+          "default": 1
+        },
+        "color": {
+          "node": "2",
+          "input": "color",
+          "from": "params.color",
+          "transform": "float",
+          "default": 1
+        },
+        "motion": {
+          "node": "2",
+          "input": "motion",
+          "from": "params.motion",
+          "default": "auto"
+        }
+      },
+      "parameters": [
+        {
+          "key": "detail",
+          "label": "细节强度",
+          "type": "number",
+          "min": 0,
+          "max": 2,
+          "step": 0.05,
+          "default": 1
+        },
+        {
+          "key": "color",
+          "label": "色彩跟随",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 1
+        }
+      ],
+      "label": "DLSS5 视频超分"
+    },
+    {
       "id": "image-krea2-aesthetics",
       "name": "image-krea2-aesthetics",
       "type": "image",
@@ -3638,6 +3790,791 @@
           "description": "留空则每次随机"
         }
       ]
+    },
+    {
+      "id": "image-audio_minimax_music_3",
+      "name": "image-audio_minimax_music_3",
+      "type": "image",
+      "label": "image-audio_minimax_music_3",
+      "description": "",
+      "file": "image-audio_minimax_music_3.json",
+      "bindings": {
+        "steps": {
+          "node": "37:9",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 30
+        },
+        "cfg": {
+          "node": "37:9",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 1.7
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:11.685Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\audio_minimax_music_3.json"
+      }
+    },
+    {
+      "id": "image-image_minimax_h3_t2i",
+      "name": "image-image_minimax_h3_t2i",
+      "type": "image",
+      "label": "image-image_minimax_h3_t2i",
+      "description": "",
+      "file": "image-image_minimax_h3_t2i.json",
+      "bindings": {
+        "prompt": {
+          "node": "58:12",
+          "input": "text"
+        },
+        "batch": {
+          "node": "58:46",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "58:15",
+          "input": "noise_seed",
+          "random": true
+        },
+        "steps": {
+          "node": "58:9",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 50
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.127Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\image_minimax_h3_t2i.json"
+      }
+    },
+    {
+      "id": "image-image_qwen_image_2_1_image_edit_api",
+      "name": "image-image_qwen_image_2_1_image_edit_api",
+      "type": "image",
+      "label": "image-image_qwen_image_2_1_image_edit_api",
+      "description": "",
+      "file": "image-image_qwen_image_2_1_image_edit_api.json",
+      "bindings": {
+        "width": {
+          "node": "459:456",
+          "input": "width",
+          "from": "size.width",
+          "default": 1080
+        },
+        "height": {
+          "node": "459:456",
+          "input": "height",
+          "from": "size.height",
+          "default": 1920
+        },
+        "batch": {
+          "node": "459:456",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "459:458",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "459:458",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 25
+        },
+        "cfg": {
+          "node": "459:458",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 1
+        },
+        "denoise": {
+          "node": "459:458",
+          "input": "denoise",
+          "from": "params.denoise",
+          "default": 1
+        },
+        "image": {
+          "node": "470",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "prompt": {
+          "node": "459:500",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.192Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\image_qwen_image_2_1_image_edit_api.json"
+      }
+    },
+    {
+      "id": "image-image_qwen_image_2_1_t2i_api",
+      "name": "image-image_qwen_image_2_1_t2i_api",
+      "type": "image",
+      "label": "image-image_qwen_image_2_1_t2i_api",
+      "description": "",
+      "file": "image-image_qwen_image_2_1_t2i_api.json",
+      "bindings": {
+        "width": {
+          "node": "459:456",
+          "input": "width",
+          "from": "size.width",
+          "default": 1080
+        },
+        "height": {
+          "node": "459:456",
+          "input": "height",
+          "from": "size.height",
+          "default": 1920
+        },
+        "batch": {
+          "node": "459:456",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "459:458",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "459:458",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 25
+        },
+        "cfg": {
+          "node": "459:458",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 1
+        },
+        "prompt": {
+          "node": "459:471",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.255Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\image_qwen_image_2_1_t2i_api.json"
+      }
+    },
+    {
+      "id": "image-image_qwen_image_edit_2511_i2i",
+      "name": "image-image_qwen_image_edit_2511_i2i",
+      "type": "image",
+      "label": "image-image_qwen_image_edit_2511_i2i",
+      "description": "",
+      "file": "image-image_qwen_image_edit_2511_i2i.json",
+      "bindings": {
+        "seed": {
+          "node": "170:169",
+          "input": "seed",
+          "random": true
+        },
+        "denoise": {
+          "node": "170:169",
+          "input": "denoise",
+          "from": "params.denoise",
+          "default": 1
+        },
+        "image": {
+          "node": "41",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "prompt": {
+          "node": "170:151",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.321Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\image_qwen_image_edit_2511_i2i.json"
+      }
+    },
+    {
+      "id": "image-krea2_hyperreal_2608",
+      "name": "image-krea2_hyperreal_2608",
+      "type": "image",
+      "label": "image-krea2_hyperreal_2608",
+      "description": "",
+      "file": "image-krea2_hyperreal_2608.json",
+      "bindings": {
+        "prompt": {
+          "node": "102",
+          "input": "text"
+        },
+        "width": {
+          "node": "100",
+          "input": "width",
+          "from": "size.width",
+          "default": 1920
+        },
+        "height": {
+          "node": "100",
+          "input": "height",
+          "from": "size.height",
+          "default": 1080
+        },
+        "batch": {
+          "node": "100",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "96",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "96",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 8
+        },
+        "cfg": {
+          "node": "96",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 1
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.388Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\krea2_hyperreal_2608.json"
+      }
+    },
+    {
+      "id": "video-minimax_h3_easy_hybrid_r2v_sigma_latent_upscale",
+      "name": "video-MiniMax_H3_Easy_hybrid_r2v_Sigma_Latent_Upscale",
+      "type": "video",
+      "label": "video-minimax_h3_easy_hybrid_r2v_sigma_latent_upscale",
+      "description": "",
+      "file": "video-minimax_h3_easy_hybrid_r2v_sigma_latent_upscale.json",
+      "bindings": {
+        "seed": {
+          "node": "129",
+          "input": "noise_seed",
+          "random": true
+        },
+        "steps": {
+          "node": "124",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 8
+        },
+        "image": {
+          "node": "269",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "image2": {
+          "node": "270",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 1
+        },
+        "width": {
+          "node": "256",
+          "input": "width",
+          "from": "size.width",
+          "default": 960,
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "256",
+          "input": "height",
+          "from": "size.height",
+          "default": 544,
+          "transform": "snap32"
+        },
+        "fps": {
+          "node": "256",
+          "input": "fps",
+          "default": 24
+        },
+        "prompt": {
+          "node": "256",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.451Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\MiniMax_H3_Easy_hybrid_r2v_Sigma_Latent_Upscale.json"
+      }
+    },
+    {
+      "id": "video-minimax_h3_easy_r2v",
+      "name": "video-MiniMax_H3_Easy_r2v",
+      "type": "video",
+      "label": "video-minimax_h3_easy_r2v",
+      "description": "",
+      "file": "video-minimax_h3_easy_r2v.json",
+      "bindings": {
+        "seed": {
+          "node": "6",
+          "input": "noise_seed",
+          "random": true
+        },
+        "steps": {
+          "node": "5",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 8
+        },
+        "image": {
+          "node": "15",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "image2": {
+          "node": "32",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 1
+        },
+        "width": {
+          "node": "2",
+          "input": "width",
+          "from": "size.width",
+          "default": 1344,
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "2",
+          "input": "height",
+          "from": "size.height",
+          "default": 1344,
+          "transform": "snap32"
+        },
+        "fps": {
+          "node": "2",
+          "input": "fps",
+          "default": 24
+        },
+        "prompt": {
+          "node": "2",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.514Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\MiniMax_H3_Easy_r2v.json"
+      }
+    },
+    {
+      "id": "video-minimax_h3_ref2v-gguf-8b-heretic-op",
+      "name": "video-minimax_h3_ref2v-gguf-8b-heretic-op",
+      "type": "video",
+      "label": "video-minimax_h3_ref2v-gguf-8b-heretic-op",
+      "description": "",
+      "file": "video-minimax_h3_ref2v-gguf-8b-heretic-op.json",
+      "bindings": {
+        "seed": {
+          "node": "131",
+          "input": "noise_seed",
+          "random": true
+        },
+        "steps": {
+          "node": "128",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 20
+        },
+        "image": {
+          "node": "149",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "width": {
+          "node": "145",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "145",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32"
+        },
+        "length": {
+          "node": "145",
+          "input": "length",
+          "from": "seconds",
+          "transform": "secondsToFrames17",
+          "fps": 24
+        },
+        "prompt": {
+          "node": "145",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.581Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\minimax_h3_ref2v-gguf-8b-heretic-op.json"
+      }
+    },
+    {
+      "id": "audio-qwen3-tts_voice_clone_reference",
+      "name": "audio-Qwen3-TTS_Voice_Clone_Reference",
+      "type": "audio",
+      "label": "audio-qwen3-tts_voice_clone_reference",
+      "description": "",
+      "file": "audio-qwen3-tts_voice_clone_reference.json",
+      "bindings": {
+        "prompt": {
+          "node": "42",
+          "input": "text"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.681Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\Qwen3-TTS_Voice_Clone_Reference.json"
+      }
+    },
+    {
+      "id": "audio-qwen3_tts_voice_design",
+      "name": "audio-qwen3_tts_voice_design",
+      "type": "audio",
+      "label": "audio-qwen3_tts_voice_design",
+      "description": "",
+      "file": "audio-qwen3_tts_voice_design.json",
+      "bindings": {},
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:12.912Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\qwen3_tts_voice_design.json"
+      }
+    },
+    {
+      "id": "audio-qwen3_tts_voice_design_gguf",
+      "name": "audio-qwen3_tts_voice_design_GGUF",
+      "type": "audio",
+      "label": "audio-qwen3_tts_voice_design_gguf",
+      "description": "",
+      "file": "audio-qwen3_tts_voice_design_gguf.json",
+      "bindings": {},
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:13.782Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\qwen3_tts_voice_design_GGUF.json"
+      }
+    },
+    {
+      "id": "image-qwen_image_2_1_image_edit-q8_0_gguf",
+      "name": "image-qwen_image_2_1_image_edit-Q8_0_gguf",
+      "type": "image",
+      "label": "image-qwen_image_2_1_image_edit-q8_0_gguf",
+      "description": "",
+      "file": "image-qwen_image_2_1_image_edit-q8_0_gguf.json",
+      "bindings": {
+        "width": {
+          "node": "459:456",
+          "input": "width",
+          "from": "size.width",
+          "default": 1024
+        },
+        "height": {
+          "node": "459:456",
+          "input": "height",
+          "from": "size.height",
+          "default": 1024
+        },
+        "batch": {
+          "node": "459:456",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "459:458",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "459:458",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 25
+        },
+        "cfg": {
+          "node": "459:458",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 2
+        },
+        "denoise": {
+          "node": "459:458",
+          "input": "denoise",
+          "from": "params.denoise",
+          "default": 1
+        },
+        "image": {
+          "node": "470",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "image2": {
+          "node": "475",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 1
+        },
+        "prompt": {
+          "node": "459:495",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:13.861Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\qwen_image_2_1_image_edit-Q8_0_gguf.json"
+      }
+    },
+    {
+      "id": "image-qwen_image_2_1_t2i-q8_0_gguf",
+      "name": "image-qwen_image_2_1_t2i-Q8_0_gguf",
+      "type": "image",
+      "label": "image-qwen_image_2_1_t2i-q8_0_gguf",
+      "description": "",
+      "file": "image-qwen_image_2_1_t2i-q8_0_gguf.json",
+      "bindings": {
+        "batch": {
+          "node": "459:456",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "459:458",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "459:458",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 25
+        },
+        "cfg": {
+          "node": "459:458",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 2
+        },
+        "prompt": {
+          "node": "459:471",
+          "input": "prompt"
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T12:38:13.931Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\qwen_image_2_1_t2i-Q8_0_gguf.json"
+      }
+    },
+    {
+      "id": "video-pika_api",
+      "name": "video-妲己大撒哔-音频驱动Pika_api",
+      "type": "video",
+      "label": "video-pika_api",
+      "description": "",
+      "file": "video-pika_api.json",
+      "bindings": {
+        "seed": {
+          "node": "129",
+          "input": "noise_seed",
+          "random": true
+        },
+        "steps": {
+          "node": "124",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 8
+        },
+        "image": {
+          "node": "137",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0
+        },
+        "width": {
+          "node": "136",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32"
+        },
+        "height": {
+          "node": "136",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32"
+        },
+        "length": {
+          "node": "136",
+          "input": "length",
+          "from": "seconds",
+          "transform": "secondsToFrames17",
+          "fps": 24
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-16T13:25:30.110Z",
+      "source": {
+        "kind": "path",
+        "path": "D:\\software\\ComfyUI_windows_portable\\ComfyUI\\user\\default\\workflows\\妲己大撒哔-音频驱动Pika_api.json"
+      }
+    },
+    {
+      "id": "image-cfg-e2e",
+      "name": "image-cfg-e2e",
+      "type": "image",
+      "label": "image-cfg-e2e",
+      "description": "",
+      "file": "image-cfg-e2e.json",
+      "bindings": {
+        "prompt": {
+          "node": "3",
+          "input": "text"
+        },
+        "negative": {
+          "node": "4",
+          "input": "text",
+          "default": ""
+        },
+        "width": {
+          "node": "1",
+          "input": "width",
+          "from": "size.width",
+          "default": 512
+        },
+        "height": {
+          "node": "1",
+          "input": "height",
+          "from": "size.height",
+          "default": 512
+        },
+        "batch": {
+          "node": "1",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "2",
+          "input": "seed",
+          "random": true
+        },
+        "steps": {
+          "node": "2",
+          "input": "steps",
+          "from": "quality.steps",
+          "default": 20
+        },
+        "cfg": {
+          "node": "2",
+          "input": "cfg",
+          "from": "quality.cfg",
+          "default": 7.5
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null,
+      "importedAt": "2026-11-17T03:02:44.254Z",
+      "source": {
+        "kind": "path",
+        "path": "C:\\Users\\admin\\AppData\\Local\\Temp\\free-cfg-e2e-Q5h0sX\\workflows\\cfg-e2e.json"
+      }
     }
   ]
 }
