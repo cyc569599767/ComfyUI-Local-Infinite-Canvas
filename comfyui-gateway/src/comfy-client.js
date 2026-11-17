@@ -25,7 +25,7 @@ function formatNodeErrors(nodeErrors) {
   return messages.slice(0, 8).join("；");
 }
 
-export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true } = {}) {
+export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloadTimeoutMs = 60 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   if (!base) throw new Error("ComfyUI baseUrl 不能为空");
   let activeBase = base;
@@ -96,7 +96,19 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
 
   async function requestOnce(pathname, { method = "GET", body, headers = {}, signal, timeout = timeoutMs, raw = false } = {}) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("ComfyUI 请求超时")), timeout);
+    // 超时是「多久没有进展」，不是「总共多久」。下载大文件时只要还在收数据就不该被杀，
+    // 否则 40 分钟的视频任务会因为前 10 分钟没下完而被判超时——文件其实早就生成好了。
+    let timedOut = false;
+    let timer = null;
+    const arm = () => {
+      clearTimeout(timer);
+      if (!(timeout > 0)) return;
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(new Error("ComfyUI 请求超时"));
+      }, timeout);
+    };
+    arm();
     const onAbort = () => controller.abort(signal.reason);
     if (signal) {
       if (signal.aborted) controller.abort(signal.reason);
@@ -112,8 +124,27 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
       });
       if (raw) {
         if (!response.ok) throw new ComfyUIError(`ComfyUI ${pathname} 返回 ${response.status}`, { status: 502, code: "comfy_http_error", httpStatus: response.status });
+        // 边收边推超时：每收到一块数据就重置计时，慢但活着的下载不会被误杀。
+        if (!response.body || typeof response.body.getReader !== "function") {
+          return {
+            buffer: Buffer.from(await response.arrayBuffer()),
+            contentType: response.headers.get("content-type") || "application/octet-stream",
+          };
+        }
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value?.byteLength) {
+            chunks.push(Buffer.from(value));
+            received += value.byteLength;
+            arm();
+          }
+        }
         return {
-          buffer: Buffer.from(await response.arrayBuffer()),
+          buffer: Buffer.concat(chunks, received),
           contentType: response.headers.get("content-type") || "application/octet-stream",
         };
       }
@@ -140,9 +171,11 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
     } catch (error) {
       if (error instanceof ComfyUIError) throw error;
       if (controller.signal.aborted || error?.name === "AbortError") {
-        throw new ComfyUIError("ComfyUI 请求已取消或超时", { status: 504, code: "comfy_aborted", details: error?.message || String(error) });
+        throw new ComfyUIError("ComfyUI 请求已取消或超时", { status: 504, code: timedOut ? "comfy_timeout" : "comfy_aborted", details: error?.message || String(error) });
       }
-      throw new ComfyUIError(`无法连接 ComfyUI：${error?.message || error}`, { status: 502, code: "comfy_unreachable" });
+      // undici 在连接被对端提前关闭时抛 "terminated"。这类错误是可重试的瞬时故障，
+      // 不能当成「ComfyUI 挂了」直接让任务失败。
+      throw new ComfyUIError(`无法连接 ComfyUI：${error?.message || error}`, { status: 502, code: "comfy_unreachable", cause: error?.code || error?.cause?.code || "" });
     } finally {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
@@ -150,6 +183,8 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
   }
 
   function isRetryable(error) {
+    // 超时说明时间预算已经耗尽，再试一轮只会把等待翻倍——直接交给上层。
+    if (error?.code === "comfy_timeout" || error?.code === "comfy_aborted") return false;
     if (error?.code === "comfy_unreachable") return true;
     return error?.code === "comfy_http_error" && Number(error.httpStatus) >= 500;
   }
@@ -165,6 +200,8 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
         lastError = error;
         if (attempt >= attempts || !isRetryable(error) || options.signal?.aborted) throw error;
         if (error?.code === "comfy_unreachable") {
+          // 已经是本机回环地址还报「连不上」，多半是 ComfyUI 正在重启或端口漂移；
+          // 先重新定位，别盲目重试同一个死端口。
           const found = await discoverBase({ force: attempt > 1 });
           if (found) {
             logger?.warn?.(`ComfyUI 已重新定位到 ${found}，重试 ${pathname}`);
@@ -203,13 +240,14 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, retryAt
     return data?.[promptId] || data?.[String(promptId)] || null;
   }
 
-  async function view(file, { signal } = {}) {
+  async function view(file, { signal, timeout = downloadTimeoutMs } = {}) {
     const params = new URLSearchParams({
       filename: String(file.filename || ""),
       subfolder: String(file.subfolder || ""),
       type: String(file.type || "output"),
     });
-    return request(`/view?${params.toString()}`, { raw: true, signal });
+    // 下载用独立的超时预算：它比普通 API 慢得多，混用同一个 10 分钟会让大文件永远失败。
+    return request(`/view?${params.toString()}`, { raw: true, signal, timeout });
   }
 
   async function uploadImage(buffer, filename = "input.png", mimeType = "image/png") {

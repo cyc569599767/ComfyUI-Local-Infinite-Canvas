@@ -415,6 +415,8 @@ export function createMockComfyServer(options = {}) {
   const runs = new Map();
   const cancelRequests = [];
   let promptCounter = 0;
+  // 最后一次提交的工作流，供 /__last_prompt 回显（端到端测试核对配置用）。
+  let lastPrompt = null;
 
   function isComplete(run) {
     return run.completed || Date.now() >= run.completeAt;
@@ -469,6 +471,7 @@ export function createMockComfyServer(options = {}) {
       const promptId = crypto.randomUUID();
       promptCounter += 1;
       const now = Date.now();
+      lastPrompt = { id: promptId, workflow: graph };
 
       const run = {
         number: promptCounter,
@@ -565,6 +568,13 @@ export function createMockComfyServer(options = {}) {
 
       if (method === 'GET' && pathname === '/internal/folder_paths') {
         json(res, 200, {});
+        return;
+      }
+
+      // 调试端点：回显最后一次提交的工作流。端到端测试靠它核对「网关到底提交了什么」，
+      // 因为 mock 不跑真模型，光看返回的图片无法判断配置是否生效。
+      if (method === 'GET' && pathname === '/__last_prompt') {
+        json(res, 200, lastPrompt ? { promptId: lastPrompt.id, workflow: lastPrompt.workflow } : {});
         return;
       }
 

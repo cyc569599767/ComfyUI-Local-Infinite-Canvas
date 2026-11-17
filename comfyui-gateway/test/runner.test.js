@@ -339,3 +339,100 @@ test("explicit request params override the selected base model", async () => {
   });
   assert.equal(submittedWorkflow[1].inputs.unet_name, "request.safetensors");
 });
+
+// ── 视频生成完成后取回失败：不能丢掉已完成的产出线索（task_33b4d0aa） ──
+
+test("history 已完成但 view 失败时，错误里带上 promptId 与文件名", async () => {
+  const comfy = {
+    submit: async () => ({ promptId: "prompt-done" }),
+    history: async () => ({
+      status: { status_str: "success" },
+      outputs: { 12: { gifs: [{ filename: "czx_00001.mp4", subfolder: "MiniMaxH3", type: "output" }] } },
+    }),
+    view: async () => {
+      throw Object.assign(new Error("无法连接 ComfyUI：terminated"), { code: "comfy_unreachable" });
+    },
+  };
+  const events = [];
+  await assert.rejects(
+    runVideo({
+      entry: { name: "v", type: "video", workflow: { 1: { class_type: "Test", inputs: {} } }, bindings: {}, defaults: {}, presets: {} },
+      context: buildContext({ prompt: "x" }),
+      comfy,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      onProgress: (event) => events.push(event),
+    }),
+    (error) => {
+      // 视频确实生成了，只是没取回来。必须明确告诉用户「已生成」，
+      // 否则他会以为白跑一遍而重新生成，白烧一次算力。
+      assert.equal(error.code, "output_download_failed");
+      assert.match(error.message, /已生成/);
+      assert.equal(error.details.promptId, "prompt-done");
+      assert.equal(error.details.filename, "czx_00001.mp4");
+      assert.equal(error.details.subfolder, "MiniMaxH3");
+      return true;
+    },
+  );
+  // 到达 0.65 说明 history 判定完成——这正是本次故障里 progress 停住的位置。
+  assert.ok(events.some((event) => event.progress === 0.65), "应上报过「ComfyUI 已完成」这个节点");
+});
+
+test("等待期间持续上报进度，画布不会一直停在 5%", async () => {
+  let polls = 0;
+  const comfy = {
+    submit: async () => ({ promptId: "prompt-slow" }),
+    history: async () => {
+      polls += 1;
+      if (polls < 6) return null; // 还在跑
+      return {
+        status: { status_str: "success" },
+        outputs: { 1: { gifs: [{ filename: "a.mp4", subfolder: "", type: "output" }] } },
+      };
+    },
+    view: async () => ({ buffer: Buffer.from([1]), contentType: "video/mp4" }),
+  };
+  const events = [];
+  await runVideo({
+    entry: { name: "v", type: "video", workflow: { 1: { class_type: "Test", inputs: {} } }, bindings: {}, defaults: {}, presets: {} },
+    context: buildContext({ prompt: "x" }),
+    comfy,
+    timeoutMs: 60000,
+    pollIntervalMs: 5,
+    onProgress: (event) => events.push(event),
+  });
+  const running = events.filter((event) => event.phase === "running");
+  assert.ok(running.length > 0, "轮询期间必须有 running 进度事件");
+  assert.ok(running.every((event) => event.progress > 0.05 && event.progress < 0.65), "running 进度应落在 5% 与 65% 之间");
+  // 进度必须单调不减，否则界面会来回跳。
+  const values = events.map((event) => event.progress);
+  for (let index = 1; index < values.length; index += 1) {
+    assert.ok(values[index] >= values[index - 1], "进度不能倒退");
+  }
+});
+
+test("轮询遇到瞬时断连时继续等待，不判整个生成失败", async () => {
+  let calls = 0;
+  const comfy = {
+    submit: async () => ({ promptId: "prompt-flaky" }),
+    history: async () => {
+      calls += 1;
+      if (calls <= 3) throw Object.assign(new Error("无法连接 ComfyUI：terminated"), { code: "comfy_unreachable" });
+      return {
+        status: { status_str: "success" },
+        outputs: { 1: { gifs: [{ filename: "a.mp4", subfolder: "", type: "output" }] } },
+      };
+    },
+    view: async () => ({ buffer: Buffer.from([1]), contentType: "video/mp4" }),
+  };
+  // 三次查询失败后恢复：任务应当成功，而不是因为一次抖动就报废。
+  const result = await runVideo({
+    entry: { name: "v", type: "video", workflow: { 1: { class_type: "Test", inputs: {} } }, bindings: {}, defaults: {}, presets: {} },
+    context: buildContext({ prompt: "x" }),
+    comfy,
+    timeoutMs: 60000,
+    pollIntervalMs: 5,
+  });
+  assert.equal(result.promptId, "prompt-flaky");
+  assert.ok(calls >= 4);
+});

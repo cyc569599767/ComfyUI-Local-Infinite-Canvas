@@ -68,6 +68,9 @@ export function loadConfig(overrides = {}) {
     launcherControlUrl: String(overrides.launcherControlUrl ?? process.env.LAUNCHER_CONTROL_URL ?? "").replace(/\/+$/, ""),
     corsOrigins: overrides.corsOrigins ?? list(process.env.CORS_ORIGINS, "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8188,http://127.0.0.1:8188"),
     requestTimeoutMs: num(overrides.requestTimeoutMs ?? process.env.REQUEST_TIMEOUT_MS, 10 * 60 * 1000),
+    // 下载产出文件（/view）的独立预算，比普通 API 宽得多。
+    // 视频动辄几十 MB，和 10 分钟的接口超时混用会让大文件永远失败。
+    comfyDownloadTimeoutMs: num(overrides.comfyDownloadTimeoutMs ?? process.env.COMFY_DOWNLOAD_TIMEOUT_MS, 60 * 60 * 1000),
     videoTimeoutMs: num(overrides.videoTimeoutMs ?? process.env.VIDEO_TIMEOUT_MS, 0),
     interpolationTimeoutMs: num(overrides.interpolationTimeoutMs ?? process.env.INTERPOLATION_TIMEOUT_MS, 30 * 60 * 1000),
     // 留空则按 frame_interpolation 目录里实际存在的权重自动挑一个。
