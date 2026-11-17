@@ -6,7 +6,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
-import { createFreeWorkflowVideoTask, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
+import { createFreeWorkflowVideoTask, fetchFreeWorkflow, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
 import { generateCanvasAudio, resolveReferenceAudioBlob, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
 import { createVideoGenerationTask, createVideoInterpolateTask, createVideoUpscaleTask, isVideoTaskFailed, readVideoTaskResumeInfo, storeGeneratedVideo, waitForVideoGenerationTask, type VideoPreview } from "@/services/api/video";
@@ -36,7 +36,7 @@ import { CanvasNodeOutpaintDialog, type CanvasOutpaintPayload } from "@/componen
 import { CanvasNodeMossLayoutDialog, type CanvasMossLayoutPayload } from "@/components/canvas/canvas-node-moss-layout-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeSuperResolveDialog, type CanvasSuperResolveParams } from "@/components/canvas/canvas-node-super-resolve-dialog";
-import { CanvasNodeVideoUpscaleDialog, type CanvasVideoUpscaleParams } from "@/components/canvas/canvas-node-video-upscale-dialog";
+import { CanvasNodeVideoUpscaleDialog, type CanvasVideoUpscaleMethod, type CanvasVideoUpscaleParams } from "@/components/canvas/canvas-node-video-upscale-dialog";
 import { CanvasImageCompareModal } from "@/components/canvas/canvas-image-compare-modal";
 import { audioReferenceFromNode, buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasGenerationTimer } from "@/components/canvas/canvas-generation-timer";
@@ -338,6 +338,7 @@ function InfiniteCanvasPage() {
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [videoUpscaleNodeId, setVideoUpscaleNodeId] = useState<string | null>(null);
+    const [videoUpscaleMethod, setVideoUpscaleMethod] = useState<CanvasVideoUpscaleMethod>("seedvr2");
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [compareNodeIds, setCompareNodeIds] = useState<[string, string] | null>(null);
@@ -2864,8 +2865,9 @@ function InfiniteCanvasPage() {
     );
 
     const upscaleVideoNode = useCallback(
-        async (node: CanvasNodeData, params: CanvasVideoUpscaleParams) => {
+        async (node: CanvasNodeData, params: CanvasVideoUpscaleParams, method: CanvasVideoUpscaleMethod = "seedvr2") => {
             if (!node.metadata?.content) return;
+            const methodLabel = method === "relayvsr" ? "RelayVSR 超分" : method === "dlss5" ? "DLSS5 超分" : "SeedVR2 超分";
             const childId = nanoid();
             const sourceWidth = node.metadata?.naturalWidth || node.width;
             const sourceHeight = node.metadata?.naturalHeight || node.height;
@@ -2876,7 +2878,7 @@ function InfiniteCanvasPage() {
                 {
                     id: childId,
                     type: CanvasNodeType.Video,
-                    title: "SeedVR2 超分",
+                    title: methodLabel,
                     position: { x: node.position.x + node.width + 96, y: node.position.y },
                     width: size.width,
                     height: size.height,
@@ -2897,8 +2899,8 @@ function InfiniteCanvasPage() {
                         url: node.metadata?.content,
                         storageKey: node.metadata?.storageKey,
                     },
-                    { scale: params.scale, resolution: params.resolution, fps: params.fps },
-                    { signal: controller.signal },
+                    { scale: params.scale, resolution: params.resolution, fps: params.fps, factor: params.factor, detail: params.detail, color: params.color, style: params.style, motion: params.motion },
+                    { signal: controller.signal, method },
                 );
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -2913,7 +2915,7 @@ function InfiniteCanvasPage() {
                         item.id === childId
                             ? applyGeneratedVideo(item, video, {
                                   prompt: node.metadata?.prompt,
-                                  model: "video-seedvr2-upscale",
+                                  model: method === "relayvsr" ? "video-relayvsr-upscale" : method === "dlss5" ? "video-dlss5-upscale" : "video-seedvr2-upscale",
                                   videoMode: "upscale",
                                   previewUrl: undefined,
                                   previewMime: undefined,
@@ -4519,16 +4521,31 @@ function InfiniteCanvasPage() {
             setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, prompt: effectivePrompt, composerContent: effectivePrompt } } : item)));
             let childId = "";
             try {
+                // 节点上的 freeCard 是「加进来那一刻」的快照。卡片在别处被改过配置（固定项、
+                // 输出类型、输入数量）后，这张旧节点仍旧按老快照执行，表现就是「改了配置但生成
+                // 还是旧的」。执行前按 id 拿一次最新摘要纠正它；拉不到就用本地快照继续，
+                // 不要因为一次刷新失败把用户卡住。
+                let live = info;
+                try {
+                    const latest = await fetchFreeWorkflow(effectiveConfig, info.id);
+                    live = freeCardInfoFromSummary(latest);
+                    if (runController.signal.aborted) return;
+                    if (JSON.stringify(live) !== JSON.stringify(info)) {
+                        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, freeCard: live } } : item)));
+                    }
+                } catch {
+                    // 网关临时不可用时继续用本地快照；真正的错误会在提交阶段暴露。
+                }
                 const context = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, effectivePrompt));
                 if (runController.signal.aborted) return;
-                const references = context.referenceImages.slice(0, Math.max(0, info.imageInputs));
-                const count = info.count != null ? Math.max(1, Math.min(15, Math.floor(Number(sourceNode.metadata?.count ?? info.count) || 1))) : 1;
-                const size = normalizePixelSize(sourceNode.metadata?.size || (info.size ? `${info.size.width}x${info.size.height}` : undefined));
-                const ratio = sourceNode.metadata?.aspectRatio || info.aspectRatio || "";
-                const seed = sourceNode.metadata?.seed || info.seed || "";
+                const references = context.referenceImages.slice(0, Math.max(0, live.imageInputs));
+                const count = live.count != null ? Math.max(1, Math.min(15, Math.floor(Number(sourceNode.metadata?.count ?? live.count) || 1))) : 1;
+                const size = normalizePixelSize(sourceNode.metadata?.size || (live.size ? `${live.size.width}x${live.size.height}` : undefined));
+                const ratio = sourceNode.metadata?.aspectRatio || live.aspectRatio || "";
+                const seed = sourceNode.metadata?.seed || live.seed || "";
                 const seedFixed = (sourceNode.metadata?.seedFixed || "false") === "true";
 
-                if (info.outputType === "audio") {
+                if (live.outputType === "audio") {
                     // 音频工作流产出音频节点：与音频卡片一致，先落一个 loading 节点再回填，
                     // 这样用户能立刻看到「在生成」而不是等接口同步返回后才出现。
                     childId = nanoid();
@@ -4549,7 +4566,7 @@ function InfiniteCanvasPage() {
                     const referenceAudio = context.referenceAudios[0];
                     // 工作流明确需要参考音频却没连，别提交——ComfyUI 会拿工作流里写死的
                     // 占位文件名做校验，返回一句难以理解的 "Custom validation failed"。
-                    if ((info.audioInputs || 0) > 0 && !referenceAudio) {
+                    if ((live.audioInputs || 0) > 0 && !referenceAudio) {
                         message.warning(t("canvas.freeCard.audioInputsHint"));
                         setNodes((prev) => prev.filter((item) => item.id !== childId).map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined } } : item)));
                         setConnections((prev) => prev.filter((item) => item.toNodeId !== childId));
@@ -4570,7 +4587,7 @@ function InfiniteCanvasPage() {
                                   : item,
                         ),
                     );
-                } else if (info.outputType === "video") {
+                } else if (live.outputType === "video") {
                     childId = nanoid();
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const videoNode: CanvasNodeData = {
@@ -4591,7 +4608,20 @@ function InfiniteCanvasPage() {
                     setNodes((prev) => [...prev, videoNode]);
                     setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: childId }]);
                     const controller = startGenerationRequest(childId, nodeId, nodeId, runController);
-                    const taskId = await createFreeWorkflowVideoTask(effectiveConfig, info.id, { prompt: effectivePrompt, texts, values, size, ratio, count, seed, seedFixed, images: references, signal: controller.signal });
+                    // 数字人、音频驱动这类视频工作流要靠一段驱动音频决定口型和台词。
+                    // 没连音频就提交的话，ComfyUI 会拿工作流里写死的占位文件名去校验，
+                    // 只丢回一句 "Custom validation failed for node: audio"，看不出缺什么。
+                    const videoReferenceAudio = context.referenceAudios[0];
+                    if ((live.audioInputs || 0) > 0 && !videoReferenceAudio) {
+                        message.warning(t("canvas.freeCard.audioInputsHint"));
+                        setNodes((prev) => prev.filter((item) => item.id !== childId));
+                        setConnections((prev) => prev.filter((item) => item.toNodeId !== childId));
+                        return;
+                    }
+                    const videoAudioFile = videoReferenceAudio
+                        ? new File([await resolveReferenceAudioBlob(videoReferenceAudio.storageKey || videoReferenceAudio.url)], videoReferenceAudio.name || "reference.wav", { type: videoReferenceAudio.type || "audio/wav" })
+                        : undefined;
+                    const taskId = await createFreeWorkflowVideoTask(effectiveConfig, info.id, { prompt: effectivePrompt, texts, values, size, ratio, count, seed, seedFixed, images: references, audio: videoAudioFile, signal: controller.signal });
                     setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, videoTaskId: taskId, videoTaskProvider: "openai" } } : item)));
                     const localVideoModel = effectiveConfig.videoModel || effectiveConfig.model;
                     const video = await storeGeneratedVideo(
@@ -5181,7 +5211,10 @@ function InfiniteCanvasPage() {
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
-                    onVideoUpscale={(node) => setVideoUpscaleNodeId(node.id)}
+                    onVideoUpscale={(node, method) => {
+                        setVideoUpscaleMethod(method === "relayvsr" ? "relayvsr" : method === "dlss5" ? "dlss5" : "seedvr2");
+                        setVideoUpscaleNodeId(node.id);
+                    }}
                     onInterpolateVideo={(node) => void interpolateVideoNode(node)}
                     onDraftVideo={(node) => void draftVideoNode(node)}
                     onDownload={downloadNodeImage}
@@ -5428,11 +5461,17 @@ function InfiniteCanvasPage() {
                 <CanvasNodeVideoUpscaleDialog
                     open={Boolean(videoUpscaleNode)}
                     node={videoUpscaleNode}
-                    onClose={() => setVideoUpscaleNodeId(null)}
+                    method={videoUpscaleMethod}
+                    onClose={() => {
+                        setVideoUpscaleNodeId(null);
+                        setVideoUpscaleMethod("seedvr2");
+                    }}
                     onConfirm={(params) => {
                         const target = videoUpscaleNode;
+                        const selected = videoUpscaleMethod;
                         setVideoUpscaleNodeId(null);
-                        if (target) void upscaleVideoNode(target, params);
+                        setVideoUpscaleMethod("seedvr2");
+                        if (target) void upscaleVideoNode(target, params, selected);
                     }}
                 />
 

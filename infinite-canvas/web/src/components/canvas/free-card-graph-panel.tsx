@@ -4,7 +4,7 @@ import { Check, GripVertical, Maximize2, Pin, RotateCcw, Trash2, ZoomIn, ZoomOut
 import { useTranslation } from "react-i18next";
 
 import type { FreeWorkflowBindingSurface, FreeWorkflowGraph, FreeWorkflowGraphNode } from "@/services/api/free-workflow";
-import type { PinnedItem } from "@/lib/canvas/free-card-pinned";
+import { customKey, resolvePinnedDrag, type PinnedItem } from "@/lib/canvas/free-card-pinned";
 import {
     GRAPH_HEADER_HEIGHT,
     GRAPH_ROW_HEIGHT,
@@ -51,8 +51,10 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
     const { t } = useTranslation();
     const [dragOver, setDragOver] = useState(false);
     const [activeNodeId, setActiveNodeId] = useState("");
-    /** 正在被拖动的固定项下标，用于把原位画淡。 */
-    const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+    /** 按稳定身份跟踪拖拽，保存或重排后不会删错下标。 */
+    const [draggingKey, setDraggingKey] = useState<string | null>(null);
+    const draggingKeyRef = useRef<string | null>(null);
+    const [removeOver, setRemoveOver] = useState(false);
     /** 拖动经过时高亮的目标位置。 */
     const [dropIndex, setDropIndex] = useState<number | null>(null);
     const [viewport, setViewport] = useState({ width: 0, height: 0 });
@@ -105,7 +107,36 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
         ]);
     };
 
-    const unpin = (index: number) => onPinnedChange(pinned.filter((_, i) => i !== index));
+    const endDrag = () => {
+        draggingKeyRef.current = null;
+        setDraggingKey(null);
+        setDropIndex(null);
+        setRemoveOver(false);
+        setDragOver(false);
+    };
+    const hasLocalDrag = (event: React.DragEvent) => !loading && Boolean(draggingKeyRef.current)
+        && Array.from(event.dataTransfer.types).includes(REORDER_TYPE);
+    const removeDragOver = (event: React.DragEvent) => {
+        if (!hasLocalDrag(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        setRemoveOver(true);
+        setDropIndex(null);
+    };
+    const removeDragLeave = (event: React.DragEvent) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        setRemoveOver(false);
+    };
+    const removeDrop = (event: React.DragEvent) => {
+        if (!hasLocalDrag(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const item = resolvePinnedDrag(pinned, event.dataTransfer.getData(REORDER_TYPE), draggingKeyRef.current);
+        // 仅明确的 drop 才提交删除；dragend/移出窗口/Esc 一律只清理状态。
+        endDrag();
+        if (item) onPinnedChange(pinned.filter((candidate) => customKey(candidate) !== customKey(item)));
+    };
 
     /** 把第 from 项移到第 to 项的位置（拖拽重排）。 */
     const reorder = (from: number, to: number) => {
@@ -125,7 +156,9 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
     };
 
     const handleDrop = (event: React.DragEvent) => {
+        if (loading || !Array.from(event.dataTransfer.types).includes(DRAG_TYPE)) return;
         event.preventDefault();
+        event.stopPropagation();
         setDragOver(false);
         const raw = event.dataTransfer.getData(DRAG_TYPE);
         if (!raw) return;
@@ -226,9 +259,17 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
     }, [canvasHeight, fitScale, layout.nodes.length, onContentHeight]);
 
     return (
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_250px] gap-3 overflow-hidden">
+        <div
+            className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_250px] gap-3 overflow-hidden"
+            onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}
+            onPointerDown={(event) => { if (event.button === 2) event.stopPropagation(); }}
+        >
             <div
                 ref={viewportRef}
+                data-graph-unpin-area
+                onDragOver={removeDragOver}
+                onDragLeave={removeDragLeave}
+                onDrop={removeDrop}
                 className={`relative min-h-0 overflow-hidden rounded-xl border border-stone-200 bg-stone-50/60 dark:border-stone-700 dark:bg-stone-900/40 ${panning ? "cursor-grabbing" : "cursor-default"}`}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
@@ -304,6 +345,7 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                                                     return (
                                                         <div
                                                             key={input.name}
+                                                            data-graph-binding={`${node.id}:${input.name}`}
                                                             draggable={!pinnedAlready}
                                                             onDragStart={(event) => {
                                                                 event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ node: node.id, input: input.name }));
@@ -370,6 +412,14 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs opacity-55">{t("canvas.freeCard.graphEmpty")}</span>} />
                     </div>
                 )}
+                {draggingKey ? (
+                    <div className={`pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-xl border-2 border-dashed transition ${removeOver ? "border-red-500 bg-red-500/10" : "border-stone-400/60 bg-stone-100/40 dark:bg-stone-900/40"}`}>
+                        <div className="flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-xs text-stone-700 shadow-sm dark:bg-stone-800 dark:text-stone-100">
+                            <Trash2 className="size-4" />
+                            {t("canvas.freeCard.pinnedDropRemove")}
+                        </div>
+                    </div>
+                ) : null}
             </div>
 
             {/* 右：固定槽 */}
@@ -377,8 +427,9 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                 className={`flex min-h-0 flex-col rounded-xl border border-dashed p-2 transition ${dragOver ? "border-sky-500 bg-sky-500/5" : "border-stone-300 dark:border-stone-600"}`}
                 onDragOver={(event) => {
                     // 内部重排由卡片自己处理，这里只管从左边节点图拖进来的。
-                    if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+                    if (loading || !Array.from(event.dataTransfer.types).includes(DRAG_TYPE)) return;
                     event.preventDefault();
+                    event.stopPropagation();
                     setDragOver(true);
                 }}
                 onDragLeave={() => setDragOver(false)}
@@ -397,34 +448,38 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                             <div
                                 key={`${item.node}\u0000${item.input}`}
                                 // 整块可拖：把手只是视觉提示，抓着卡片任意空白处都能拖。
-                                draggable
+                                draggable={!loading}
+                                data-graph-pinned-item={`${item.node}:${item.input}`}
                                 onDragStart={(event) => {
-                                    event.dataTransfer.setData(REORDER_TYPE, String(index));
+                                    if (loading) { event.preventDefault(); return; }
+                                    event.stopPropagation();
+                                    const key = customKey(item);
+                                    event.dataTransfer.setData(REORDER_TYPE, JSON.stringify({ node: item.node, input: item.input }));
                                     event.dataTransfer.effectAllowed = "move";
-                                    setDraggingIndex(index);
+                                    draggingKeyRef.current = key;
+                                    setDraggingKey(key);
+                                    setRemoveOver(false);
                                 }}
-                                onDragEnd={() => {
-                                    setDraggingIndex(null);
-                                    setDropIndex(null);
-                                }}
+                                onDragEnd={endDrag}
                                 onDragOver={(event) => {
-                                    // 只有内部重排才接管，从节点图拖进来的交给外层槽位处理。
-                                    if (!event.dataTransfer.types.includes(REORDER_TYPE)) return;
+                                    // 只有本面板内部拖拽才接管，从节点图拖进来的交给外层处理。
+                                    if (!hasLocalDrag(event)) return;
                                     event.preventDefault();
                                     event.stopPropagation();
+                                    event.dataTransfer.dropEffect = "move";
+                                    setRemoveOver(false);
                                     setDropIndex(index);
                                 }}
                                 onDragLeave={() => setDropIndex((current) => (current === index ? null : current))}
                                 onDrop={(event) => {
-                                    const raw = event.dataTransfer.getData(REORDER_TYPE);
-                                    if (!raw) return;
+                                    if (!hasLocalDrag(event)) return;
                                     event.preventDefault();
                                     event.stopPropagation();
-                                    reorder(Number(raw), index);
-                                    setDraggingIndex(null);
-                                    setDropIndex(null);
+                                    const source = resolvePinnedDrag(pinned, event.dataTransfer.getData(REORDER_TYPE), draggingKeyRef.current);
+                                    endDrag();
+                                    if (source) reorder(pinned.indexOf(source), index);
                                 }}
-                                className={`group rounded-md border bg-white px-1.5 py-1 transition dark:bg-stone-900 ${dropIndex === index && draggingIndex !== index ? "border-sky-500 ring-1 ring-sky-500/40" : "border-stone-200 dark:border-stone-700"} ${draggingIndex === index ? "opacity-40" : ""}`}
+                                className={`group rounded-md border bg-white px-1.5 py-1 transition dark:bg-stone-900 ${dropIndex === index && draggingKey !== customKey(item) ? "border-sky-500 ring-1 ring-sky-500/40" : "border-stone-200 dark:border-stone-700"} ${draggingKey === customKey(item) ? "opacity-40" : ""} ${loading ? "pointer-events-none opacity-60" : ""}`}
                             >
                                 <div className="flex items-center gap-1">
                                     <GripVertical className="size-3 shrink-0 cursor-grab opacity-35" />
@@ -437,9 +492,6 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                                         // 输入框里拖动会选中文字，不要触发整块重排。
                                         onDragStart={(event) => event.stopPropagation()}
                                     />
-                                    <button type="button" className="grid size-5 shrink-0 place-items-center rounded opacity-35 hover:opacity-100" title={t("canvas.freeCard.pinnedRemove")} onClick={() => unpin(index)}>
-                                        <Trash2 className="size-2.5" />
-                                    </button>
                                 </div>
                                 <div className="mt-0.5 flex items-center gap-1 pl-1 text-[10px] opacity-45">
                                     <span>{item.input}</span>
@@ -468,6 +520,18 @@ export function FreeCardGraphPanel({ graph, loading, error, pinned, onPinnedChan
                         <div className="grid h-24 place-items-center px-2 text-center text-[11px] leading-4 opacity-40">{t("canvas.freeCard.pinnedEmpty")}</div>
                     )}
                 </div>
+                {pinned.length ? (
+                    <div
+                        data-graph-unpin-zone
+                        onDragOver={removeDragOver}
+                        onDragLeave={removeDragLeave}
+                        onDrop={removeDrop}
+                        className={`mt-2 flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-dashed px-2 py-2 text-[11px] transition ${removeOver ? "border-red-500 bg-red-500/10 text-red-600 dark:text-red-400" : draggingKey ? "border-red-400/60 bg-red-500/5 text-red-600 dark:text-red-400" : "border-stone-300 text-stone-500 dark:border-stone-600 dark:text-stone-400"}`}
+                    >
+                        <Trash2 className="size-3.5 shrink-0" />
+                        {t(removeOver ? "canvas.freeCard.pinnedDropRemove" : "canvas.freeCard.pinnedDragRemove")}
+                    </div>
+                ) : null}
                 {pinned.length ? (
                     <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-emerald-600 dark:text-emerald-400">
                         <Check className="size-2.5" />

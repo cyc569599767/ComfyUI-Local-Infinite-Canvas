@@ -219,6 +219,7 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
         <div
             ref={containerRef}
             data-canvas-drop-target
+            data-canvas-root
             className="relative h-full w-full select-none overflow-hidden"
             style={{ background: theme.canvas.background, cursor }}
             onPointerDown={handlePointerDown}
@@ -242,10 +243,29 @@ export function InfiniteCanvas({ containerRef, viewport, tool, backgroundMode = 
                 className="absolute origin-top-left"
                 style={{
                     transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.k})`,
+                    // 浮层里的尺寸约束（限高、限宽）是按屏幕像素想的，但这一层会再乘一次
+                    // scale，所以它们要乘上 --canvas-inverse-scale 除回来，否则放大后必然溢出视口。
+                    // 用乘法而不是除法：calc 里乘一个数各浏览器都支持。
+                    ["--canvas-inverse-scale" as string]: 1 / (viewport.k || 1),
                 }}
             >
                 {children}
             </div>
+            {/* 浮层单独一层，和节点内容平级但层级更高。
+                弹窗原本挂在上面那层里，而 transform 会形成层叠上下文——弹窗自己的
+                z-index:1030 只在层内有效，对外等价于 0；节点工具栏是 z-70、又在更外层，
+                于是「信息 / 删除」那条压在了设置弹窗上面。把浮层挪到独立的一层，
+                它的 z-index 才真正参与和工具栏的比较。
+                变换与上面那层完全一致，两层的坐标原点重合，所以定位结果不变。
+                零尺寸：子节点都是 absolute，靠溢出显示，不会挡住画布上的点击。 */}
+            <div
+                data-canvas-popup-layer
+                className="absolute left-0 top-0 z-[100] origin-top-left"
+                style={{
+                    transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.k})`,
+                    ["--canvas-inverse-scale" as string]: 1 / (viewport.k || 1),
+                }}
+            />
         </div>
     );
 }

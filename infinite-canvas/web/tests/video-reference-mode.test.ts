@@ -6,10 +6,11 @@ Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getIte
 const {defaultConfig}=await import('../src/stores/use-config-store');
 const {buildGenerationConfig}=await import('../src/lib/canvas/canvas-generation-helpers');
 const {resolveVideoWorkflowMode}=await import('../src/lib/canvas/video-model-mode');
-const {createVideoGenerationTask}=await import('../src/services/api/video');
+const {createVideoGenerationTask,createVideoUpscaleTask}=await import('../src/services/api/video');
 const {buildNodeGenerationContext}=await import('../src/components/canvas/canvas-node-generation');
 const requests:FormData[]=[];
-const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:async req=>{requests.push(await req.formData());return Response.json({id:'fixture-task',status:'queued'});}});
+const requestPaths:string[]=[];
+const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:async req=>{requestPaths.push(new URL(req.url).pathname);requests.push(await req.formData());return Response.json({id:'fixture-task',status:'queued'});}});
 afterAll(()=>{server.stop(true);if(original)Object.defineProperty(globalThis,'localStorage',original);else Reflect.deleteProperty(globalThis,'localStorage');});
 const workflowIds=['video-h3-ref2va','video-h3-ref2va-novdn','video-h3-frames','video-h3-frames-novdn','video-h3-t2v','video-h3-t2v-novdn','video-h3-fast','video-h3-character-swap'];
 const models:ChannelModel[]=workflowIds.map(id=>({name:id,workflowId:id,capability:'video'}));models.push({name:'custom-base',workflowId:'video-h3-ref2va-novdn',baseModel:'custom.safetensors',capability:'video'},{name:'other-provider',capability:'video'});
@@ -18,6 +19,52 @@ const pic={id:'ref',name:'ref.png',type:'image/png',dataUrl:'data:image/png;base
 const vid={id:'v',name:'video.mp4',type:'video/mp4',url:'data:video/mp4;base64,AAAAHGZ0eXBpc29t',durationMs:1000};
 const aud={id:'a',name:'audio.wav',type:'audio/wav',url:'data:audio/wav;base64,UklGRiQAAABXQVZF'};
 const selected=(name:string)=>({...config,model:`fixture::${name}`,videoModel:`fixture::${name}`});
+test('SeedVR2 method preserves its dedicated endpoint, source video and selected scale',async()=>{
+ for(const scale of [1.5,2]){
+  const resolution=Math.round(720*scale),before=requests.length;
+  const task=await createVideoUpscaleTask(selected('video-h3-ref2va'),{name:'source.mp4',type:'video/mp4',url:vid.url},{scale,resolution,fps:24});
+  expect(requests.length).toBe(before+1);expect(requestPaths.at(-1)).toBe('/v1/videos/upscale');
+  const body=requests.at(-1)!;const source=body.get('video');expect(source).toBeInstanceOf(File);expect((source as File).name).toBe('source.mp4');expect((source as File).type).toBe('video/mp4');
+  expect(JSON.parse(String(body.get('params')))).toEqual({scale,resolution,fps:24,batch_size:5,color_correction:'wavelet'});
+  expect(task).toEqual({id:'fixture-task',provider:'openai',model:'video-seedvr2-upscale'});
+ }
+});
+
+test('RelayVSR method targets its own workflow and sends only its own params',async()=>{
+ const before=requests.length;
+ const task=await createVideoUpscaleTask(selected('video-h3-ref2va'),{name:'source.mp4',type:'video/mp4',url:vid.url},{scale:2,resolution:2880,fps:24,seed:7,factor:4,detail:0.5},{method:'relayvsr'});
+ expect(requests.length).toBe(before+1);expect(requestPaths.at(-1)).toBe('/v1/videos/upscale');
+ const body=requests.at(-1)!;
+ expect(body.get('model')).toBe('video-relayvsr-upscale');
+ expect(task).toEqual({id:'fixture-task',provider:'openai',model:'video-relayvsr-upscale'});
+ const params=JSON.parse(String(body.get('params')));
+ expect(params).toEqual({scale:2,resolution:2880,fps:24,seed:7,factor:4,detail:0.5});
+ // SeedVR2 专属字段不能一起发过去，否则后端会拿默认值覆盖权重档位。
+ expect(params.batch_size).toBeUndefined();expect(params.color_correction).toBeUndefined();
+});
+
+test('DLSS5 method targets its own workflow and sends only its own params',async()=>{
+ const before=requests.length;
+ const task=await createVideoUpscaleTask(selected('video-h3-ref2va'),{name:'source.mp4',type:'video/mp4',url:vid.url},{scale:1.5,resolution:1024,fps:24,factor:2,detail:0.5,color:0.25,style:'default',motion:'auto'},{method:'dlss5'});
+ expect(requests.length).toBe(before+1);expect(requestPaths.at(-1)).toBe('/v1/videos/upscale');
+ const body=requests.at(-1)!;
+ expect(body.get('model')).toBe('video-dlss5-upscale');
+ expect(task).toEqual({id:'fixture-task',provider:'openai',model:'video-dlss5-upscale'});
+ const params=JSON.parse(String(body.get('params')));
+ expect(params).toEqual({scale:1.5,resolution:1024,fps:24,factor:2,detail:0.5,color:0.25,style:'default',motion:'auto'});
+ // DLSS5 没有 batch/color_correction，也不发 SeedVR2 的种子语义字段。
+ expect(params.batch_size).toBeUndefined();expect(params.color_correction).toBeUndefined();
+});
+
+test('upscale method defaults to SeedVR2 so old call sites keep the previous model',async()=>{
+ await createVideoUpscaleTask(selected('video-h3-ref2va'),{name:'source.mp4',type:'video/mp4',url:vid.url},{scale:1.5,resolution:1080,fps:24});
+ const body=requests.at(-1)!;
+ expect(body.get('model')).toBe('video-seedvr2-upscale');
+ const params=JSON.parse(String(body.get('params')));
+ expect(params).toEqual({scale:1.5,resolution:1080,fps:24,batch_size:5,color_correction:'wavelet'});
+ expect(params.factor).toBeUndefined();expect(params.detail).toBeUndefined();
+});
+
 test('fixed H3 modes override stale node settings for VDN and no-VDN, not fast or external models',()=>{
  for(const id of workflowIds){const expected=id.includes('ref2va')||id.includes('character-swap')?'reference':id.includes('t2v')?'text':id.includes('frames')?'frames':'text';expect(resolveVideoWorkflowMode(config,`fixture::${id}`,'text')).toBe(expected);}
  for(const mode of ['text','frames','reference'])for(const id of ['video-h3-fast','other-provider'])expect(resolveVideoWorkflowMode(config,`fixture::${id}`,mode)).toBe(mode);

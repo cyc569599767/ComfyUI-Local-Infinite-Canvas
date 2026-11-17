@@ -650,29 +650,48 @@ export const CanvasNode = React.memo(function CanvasNode({
 });
 
 /**
+ * 面板在屏幕上至少保留的高度。窗口再矮也留这么多，其余内容靠内层滚动。
+ * 按屏幕像素定义，用的时候要除以画布缩放换算成 CSS 尺寸。
+ */
+const MIN_PANEL_SCREEN_HEIGHT = 220;
+
+/**
  * 节点下方展开的面板层。
  *
  * 面板从节点底部往下长，但节点可能在画布靠下的位置：固定 72vh 会让面板底部跑到视口外，
  * 用户既看不到底部的按钮（归档、生成设置、生成），也够不到滚动条。这里量一次节点到窗口
  * 底部的距离当上限，超出的内容在面板内部滚动。
  *
- * 面板有 scale(1/scale) 的反向缩放，所以量到的屏幕距离就是面板的 CSS 尺寸。
+ * 面板跟着画布缩放（和卡片本身同一个比例），不做反向补偿：早先用 scale(1/scale) 让面板
+ * 始终保持屏幕尺寸，结果画布缩到 30% 时卡片只剩 108px、面板却还是 560px，像一块贴在图上
+ * 的板子。既然卡片的文字都跟着缩小，面板也应当一起缩。
+ *
+ * 因为 CSS 尺寸会被外层再乘一次 scale，可用高度要先除以 scale 换算回画布的坐标单位。
  */
 function NodePanelLayer({ nodeId, scale, children }: { nodeId: string; scale: number; children: ReactNode }) {
     const ref = useRef<HTMLDivElement | null>(null);
-    const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined);
+    const [box, setBox] = useState<{ maxHeight: number; maxWidth: number } | undefined>(undefined);
 
     useEffect(() => {
         const element = ref.current;
         if (!element) return;
         const margin = 16;
+        const ratio = scale || 1;
         // 量节点的位置而不是面板自己：面板高度会随内容变，用它自己算会形成回馈。
         const nodeElement = element.parentElement;
         const measure = () => {
             const nodeRect = (nodeElement ?? element).getBoundingClientRect();
-            const available = window.innerHeight - nodeRect.bottom - margin;
-            // 极矮的窗口下也别把面板压没：至少留 220px，超出部分由内层滚动。
-            setMaxHeight(Math.max(220, available));
+            // 先在屏幕坐标里算可用高度：不用管缩放，量到的就是用户在屏幕上看到的距离。
+            const availableOnScreen = window.innerHeight - nodeRect.bottom - margin;
+            // 放大画布时节点自己也变高，它下方剩下的空间会被挤到几十像素——那样面板只剩
+            // 一条线，按钮一个都点不到。宁可让它超出视口底部一截（内容仍可在内部滚动），
+            // 也要保住 MIN_PANEL_SCREEN_HEIGHT。缩小时 available 很大，用不到这个保底。
+            const heightOnScreen = Math.max(availableOnScreen, MIN_PANEL_SCREEN_HEIGHT);
+            // 换成画布坐标：这一层会被外层再乘一次 scale。
+            const height = heightOnScreen / ratio;
+            // 宽度上限一直是「屏幕 920px 且不超出视口」，换算成画布坐标同样要除以 scale。
+            const width = Math.min(920, window.innerWidth - margin * 2) / ratio;
+            setBox({ maxHeight: height, maxWidth: Math.max(560, width) });
         };
         measure();
         // 窗口尺寸变化、画布缩放都会改变可用高度。
@@ -688,8 +707,8 @@ function NodePanelLayer({ nodeId, scale, children }: { nodeId: string; scale: nu
     return (
         <div
             ref={ref}
-            className="absolute left-1/2 top-full z-[70] w-max min-w-[560px] max-w-[min(920px,calc(100vw-32px))] pt-4"
-            style={{ transform: `translateX(-50%) scale(${1 / scale})`, transformOrigin: "top center", maxHeight, display: "flex", flexDirection: "column" }}
+            className="absolute left-1/2 top-full z-[70] w-max min-w-[560px] pt-4"
+            style={{ transform: "translateX(-50%)", transformOrigin: "top center", maxHeight: box?.maxHeight, maxWidth: box?.maxWidth, display: "flex", flexDirection: "column" }}
             data-node-panel={nodeId}
         >
             {children}

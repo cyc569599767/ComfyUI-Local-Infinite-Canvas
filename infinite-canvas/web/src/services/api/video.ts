@@ -14,7 +14,9 @@ import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
-type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null; preview?: { url?: string; mime?: string; step?: number; total?: number }; steps?: { step?: number; total?: number }; created_at?: string; completed_at?: string };
+/** 后端在「生成成功但取回文件失败」时会带上它：视频其实躺在 ComfyUI 的 output 目录里，别让用户以为白跑了。 */
+type VideoPartialOutput = { promptId?: string | null; filename?: string | null; subfolder?: string | null; type?: string | null };
+type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null; preview?: { url?: string; mime?: string; step?: number; total?: number }; steps?: { step?: number; total?: number }; created_at?: string; completed_at?: string; partial_output?: VideoPartialOutput | null; partialOutput?: VideoPartialOutput | null };
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal; params?: Record<string, unknown> };
@@ -24,7 +26,15 @@ const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiE
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
 export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin"; model: string };
 export type VideoUpscaleSource = { name: string; type?: string; url?: string; storageKey?: string };
-export type VideoUpscaleParams = { scale: number; resolution: number; fps?: number; seed?: number; batchSize?: number; colorCorrection?: string };
+export type VideoUpscaleParams = { scale: number; resolution: number; fps?: number; seed?: number; batchSize?: number; colorCorrection?: string; factor?: number; detail?: number; color?: number; style?: string; motion?: string };
+
+/** 视频超分方式 → 网关工作流模型。默认 SeedVR2，未传时保持旧行为。 */
+export type VideoUpscaleMethod = "seedvr2" | "relayvsr" | "dlss5";
+const VIDEO_UPSCALE_MODELS: Record<VideoUpscaleMethod, string> = {
+    seedvr2: "video-seedvr2-upscale",
+    relayvsr: "video-relayvsr-upscale",
+    dlss5: "video-dlss5-upscale",
+};
 export type VideoInterpolateSource = VideoUpscaleSource;
 export type VideoInterpolateParams = { multiplier: 2 | 3 };
 export type VideoPreview = { url: string; mime?: string; step?: number; total?: number };
@@ -112,22 +122,39 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
-export async function createVideoUpscaleTask(config: AiConfig, source: VideoUpscaleSource, params: VideoUpscaleParams, options?: RequestOptions): Promise<VideoGenerationTask> {
+export async function createVideoUpscaleTask(config: AiConfig, source: VideoUpscaleSource, params: VideoUpscaleParams, options?: RequestOptions & { method?: VideoUpscaleMethod }): Promise<VideoGenerationTask> {
     const file = await referenceMediaToFile(source, "source.mp4", "invalidReferenceVideo", options);
+    const method = options?.method === "relayvsr" ? "relayvsr" : options?.method === "dlss5" ? "dlss5" : "seedvr2";
+    const model = VIDEO_UPSCALE_MODELS[method];
     const formData = new FormData();
     formData.append("video", file, file.name);
-    formData.append(
-        "params",
-        JSON.stringify({
-            scale: params.scale,
-            resolution: params.resolution,
-            fps: params.fps ?? 24,
-            seed: params.seed,
-            batch_size: params.batchSize ?? 5,
-            color_correction: params.colorCorrection || "wavelet",
-        }),
-    );
-    const requestConfig = resolveModelRequestConfig(config, "video-seedvr2-upscale");
+    formData.append("model", model);
+    // 三种方法的参数互斥，只发本方法真正用到的字段，避免后端误用默认值。
+    const payload =
+        method === "relayvsr"
+            ? { scale: params.scale, resolution: params.resolution, fps: params.fps ?? 24, seed: params.seed, factor: params.factor ?? 2, detail: params.detail ?? 1 }
+            : method === "dlss5"
+              ? {
+                    // DLSS5 的倍率由 upscaling_mode 决定（1.5/1.724/2/3），不传 batch/color_correction。
+                    scale: params.scale,
+                    resolution: params.resolution,
+                    fps: params.fps ?? 24,
+                    factor: params.factor ?? 1.5,
+                    detail: params.detail ?? 1,
+                    color: params.color ?? 1,
+                    style: params.style || "default",
+                    motion: params.motion || "auto",
+                }
+              : {
+                    scale: params.scale,
+                    resolution: params.resolution,
+                    fps: params.fps ?? 24,
+                    seed: params.seed,
+                    batch_size: params.batchSize ?? 5,
+                    color_correction: params.colorCorrection || "wavelet",
+                };
+    formData.append("params", JSON.stringify(payload));
+    const requestConfig = resolveModelRequestConfig(config, model);
     try {
         const created = unwrapVideoResponse(
             (await axios.post<ApiVideoResponse>(aiApiUrl(requestConfig, "/videos/upscale"), formData, {
@@ -136,7 +163,7 @@ export async function createVideoUpscaleTask(config: AiConfig, source: VideoUpsc
             })).data,
         );
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
-        return { id: created.id, provider: "openai", model: "video-seedvr2-upscale" };
+        return { id: created.id, provider: "openai", model };
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
     }
@@ -360,7 +387,16 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
             await assertVideoBlob(content.data);
             return { status: "completed", result: { blob: content.data } };
         }
-        if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+        if (video.status === "failed" || video.status === "cancelled") {
+            const partial = video.partialOutput || video.partial_output || null;
+            const reason = readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed");
+            // 视频已经渲染好了，只是网关没能把它取回来。这条线索比"失败"本身有用得多。
+            if (partial?.filename) {
+                const where = [partial.subfolder, partial.filename].filter(Boolean).join("/");
+                return { status: "failed", error: apiText("videoOutputPartial", { reason, file: where }) };
+            }
+            return { status: "failed", error: reason };
+        }
         const preview = video.preview?.url
             ? {
                   url: resolvePreviewUrl(config, video.preview.url),

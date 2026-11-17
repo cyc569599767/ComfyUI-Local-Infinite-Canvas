@@ -3,7 +3,7 @@ import { Button, Empty, Input, Modal, Select } from "antd";
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { readWorkflowApps, writeWorkflowApps, type WorkflowApp, type WorkflowAppStep } from "@/lib/canvas/workflow-apps";
+import { saveWorkflowApp, type WorkflowApp, type WorkflowAppStep } from "@/lib/canvas/workflow-apps";
 import type { FreeWorkflowSummary } from "@/services/api/free-workflow";
 
 type DraftStep = { workflowId: string; label: string };
@@ -16,6 +16,8 @@ type Props = {
     /** 编辑已有应用时传入；不传表示新建。 */
     editing?: WorkflowApp | null;
     onSaved?: (app: WorkflowApp) => void;
+    /** 网关根地址；为空时只写本地缓存。 */
+    root: string;
 };
 
 function emptyStep(): DraftStep {
@@ -32,7 +34,7 @@ function emptyStep(): DraftStep {
  * 「哪几步、什么顺序」，而不是再画一遍图。要自由编排可以直接在画布上拖卡片。
  * 数字人这种「语音克隆 → 视频生成」正是两段线性链。
  */
-export function WorkflowAppEditorModal({ open, onClose, workflows, editing, onSaved }: Props) {
+export function WorkflowAppEditorModal({ open, onClose, workflows, editing, onSaved, root }: Props) {
     const { t } = useTranslation();
     const [name, setName] = useState("");
     const [description, setDescription] = useState("");
@@ -101,16 +103,17 @@ export function WorkflowAppEditorModal({ open, onClose, workflows, editing, onSa
             updatedAt: now,
             steps: nextSteps,
         };
-        const apps = readWorkflowApps();
-        const next = editing ? apps.map((item) => (item.id === app.id ? app : item)) : [...apps, app];
-        if (!writeWorkflowApps(next)) {
-            setSaving(false);
-            setError(t("canvas.sidePanel.workflowAppSaveFailed"));
-            return;
-        }
-        setSaving(false);
-        onSaved?.(app);
-        onClose();
+        // 存到网关：换浏览器、清缓存后应用还在。网关不可用时会退回本地缓存。
+        void saveWorkflowApp(root, app)
+            .then((saved) => {
+                setSaving(false);
+                onSaved?.(saved);
+                onClose();
+            })
+            .catch(() => {
+                setSaving(false);
+                setError(t("canvas.sidePanel.workflowAppSaveFailed"));
+            });
     };
 
     return (

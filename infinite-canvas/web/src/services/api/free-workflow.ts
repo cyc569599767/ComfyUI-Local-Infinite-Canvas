@@ -73,6 +73,8 @@ export type FreeWorkflowCustomBinding = {
     label: string;
     /** 缺省（旧数据）按 card 处理。 */
     surface?: FreeWorkflowBindingSurface;
+    /** 自动文本被主动取消固定，避免下次探测时又追加到列表；不删除工作流输入。 */
+    unpinned?: boolean;
 };
 
 /** 简化节点图：只保留可绑定的输入，供画布内的可视化用。 */
@@ -169,11 +171,50 @@ export async function syncFreeWorkflow(config: AiConfig, id: string): Promise<{ 
     }
 }
 
-export async function archiveFreeWorkflow(config: AiConfig, id: string, archived = true, preset?: FreeWorkflowPreset): Promise<FreeWorkflowSummary> {
+export type FreeWorkflowSnapshot = {
+    texts?: Array<{ node: string; input: string; value: string }>;
+    values?: Array<{ node: string; input: string; value: string | number | boolean }>;
+};
+
+export async function archiveFreeWorkflow(config: AiConfig, id: string, archived = true, preset?: FreeWorkflowPreset, snapshot?: FreeWorkflowSnapshot): Promise<FreeWorkflowSummary> {
     const root = gatewayRoot(config);
-    const response = await axios.patch<{ workflow?: FreeWorkflowSummary }>(`${root}/api/free-workflows/${encodeURIComponent(id)}`, { archived, preset }, { timeout: 30000 });
-    if (!response.data?.workflow) throw new Error("归档自由卡片失败");
-    return response.data.workflow;
+    try {
+        const response = await axios.patch<{ workflow?: FreeWorkflowSummary }>(
+            `${root}/api/free-workflows/${encodeURIComponent(id)}`,
+            { archived, preset, texts: snapshot?.texts || [], values: snapshot?.values || [] },
+            { timeout: 30000 },
+        );
+        if (!response.data?.workflow) throw new Error("归档自由卡片失败");
+        return response.data.workflow;
+    } catch (error) {
+        throw new Error(readError(error, "归档自由卡片失败"));
+    }
+}
+
+/**
+ * 「新增归档」：把当前卡片复制成一条新条目。
+ *
+ * 和 archiveFreeWorkflow 的区别是它不覆盖原条目——用户想保留两套参数时用这个。
+ * 除尺寸/种子外还带上当前提示词和固定项取值，新条目打开时就是用户此刻看到的样子。
+ */
+export async function duplicateFreeWorkflow(
+    config: AiConfig,
+    id: string,
+    preset?: FreeWorkflowPreset,
+    snapshot?: { texts?: Array<{ node: string; input: string; value: string }>; values?: Array<{ node: string; input: string; value: string | number | boolean }> },
+): Promise<FreeWorkflowSummary> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.post<{ workflow?: FreeWorkflowSummary }>(
+            `${root}/api/free-workflows/${encodeURIComponent(id)}/duplicate`,
+            { preset, texts: snapshot?.texts || [], values: snapshot?.values || [] },
+            { timeout: 30000 },
+        );
+        if (!response.data?.workflow) throw new Error("新增归档失败");
+        return response.data.workflow;
+    } catch (error) {
+        throw new Error(readError(error, "新增归档失败"));
+    }
 }
 
 export async function deleteFreeWorkflow(config: AiConfig, id: string): Promise<void> {
@@ -216,7 +257,7 @@ export async function saveFreeWorkflowBindings(config: AiConfig, id: string, bin
     try {
         const response = await axios.patch<{ workflow?: FreeWorkflowSummary }>(
             `${root}/api/free-workflows/${encodeURIComponent(id)}/bindings`,
-            { bindings: bindings.map((item) => ({ node: item.node, input: item.input, label: item.label, surface: item.surface === "settings" ? "settings" : "card" })) },
+            { bindings: bindings.map((item) => ({ node: item.node, input: item.input, label: item.label, surface: item.surface === "settings" ? "settings" : "card", ...(item.unpinned === true ? { unpinned: true } : {}) })) },
             { timeout: 30000 },
         );
         if (!response.data?.workflow) throw new Error("保存固定配置失败");

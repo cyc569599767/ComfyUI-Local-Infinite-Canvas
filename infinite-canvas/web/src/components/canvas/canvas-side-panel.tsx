@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Dropdown, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, ListChecks, Mic, Music2, Pencil, Plus, RefreshCw, Rows3, Search, Settings2, Sparkles, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, ListChecks, Mic, Music2, Pencil, Plus, RefreshCw, Rows3, Search, Settings2, Sparkles, Square, Trash2, Type, Upload, Video } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -17,9 +17,10 @@ import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
-import { readWorkflowApps, writeWorkflowApps, type WorkflowApp } from "@/lib/canvas/workflow-apps";
+import { fetchWorkflowApps, deleteWorkflowApp, type WorkflowApp } from "@/lib/canvas/workflow-apps";
 import { WorkflowAppEditorModal } from "./workflow-app-editor-modal";
 import { useEffectiveConfig } from "@/stores/use-config-store";
+import { localGatewayRoot } from "@/services/api/image";
 import { fetchFreeWorkflows, deleteFreeWorkflow, renameFreeWorkflow, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
@@ -30,6 +31,8 @@ import type { StyleRecipe } from "@/stores/use-style-recipe-store";
 import type { InsertAssetPayload } from "./asset-picker-modal";
 import { freeCardOutputLabelKey } from "./canvas-free-card-panel";
 import { CanvasStyleRecipesTab } from "./canvas-style-recipes-tab";
+import { useBundleTransfer } from "./use-bundle-transfer";
+import { WorkflowBundleImportModal } from "./workflow-bundle-import-modal";
 
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
@@ -85,29 +88,53 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
     // 自由卡片与「应用」共用同一份工作流列表：「应用」要靠它判断步骤指向的工作流是否还在，
     // 两个 tab 各拉一遍既浪费请求，也会出现一边有一边没有的错位。
     const effectiveConfig = useEffectiveConfig();
+    // 「应用」存到网关，这里把网关根地址解析一次给子标签用；
+    // 不是本地网关时为空串，子标签会自动退回本地缓存。
+    const appsRoot = useMemo(() => localGatewayRoot(effectiveConfig.baseUrl), [effectiveConfig.baseUrl]);
     const [workflowList, setWorkflowList] = useState<FreeWorkflowSummary[]>([]);
     const [workflowListLoading, setWorkflowListLoading] = useState(false);
     const [workflowListError, setWorkflowListError] = useState("");
     const workflowListLoadedRef = useRef(false);
+    const workflowListRequestRef = useRef(0);
 
     const reloadWorkflows = useCallback(async () => {
+        const request = ++workflowListRequestRef.current;
+        // 失败时保留重试按钮，不因 loading 变回 false 而无限自动重试。
+        workflowListLoadedRef.current = true;
         setWorkflowListLoading(true);
         setWorkflowListError("");
         try {
-            setWorkflowList(await fetchFreeWorkflows(effectiveConfig, true));
-            workflowListLoadedRef.current = true;
+            const next = await fetchFreeWorkflows(effectiveConfig, true);
+            if (request === workflowListRequestRef.current) setWorkflowList(next);
         } catch (reason) {
-            setWorkflowListError(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardsLoadFailed"));
+            if (request === workflowListRequestRef.current) setWorkflowListError(reason instanceof Error ? reason.message : t("canvas.sidePanel.freeCardsLoadFailed"));
         } finally {
-            setWorkflowListLoading(false);
+            if (request === workflowListRequestRef.current) setWorkflowListLoading(false);
         }
     }, [effectiveConfig, t]);
 
-    // 只有切到「工作流」tab 时才拉：画布其它 tab 不需要这份数据。
     useEffect(() => {
-        if (tab !== "workflow" || workflowListLoadedRef.current || workflowListLoading) return;
+        workflowListLoadedRef.current = false;
+        setWorkflowList([]);
+        setWorkflowListLoading(false);
+        return () => { workflowListRequestRef.current += 1; };
+    }, [reloadWorkflows]);
+
+    // 只有打开「工作流」tab 时才拉；收起期间的变更留到下次打开。
+    useEffect(() => {
+        if (!panelMounted || tab !== "workflow" || workflowListLoadedRef.current) return;
         void reloadWorkflows();
-    }, [reloadWorkflows, tab, workflowListLoading]);
+    }, [reloadWorkflows, tab, panelMounted]);
+
+    useEffect(() => {
+        const refresh = () => {
+            workflowListLoadedRef.current = false;
+            workflowListRequestRef.current += 1;
+            if (panelMounted && tab === "workflow") void reloadWorkflows();
+        };
+        window.addEventListener("local-gateway-free-cards-changed", refresh);
+        return () => window.removeEventListener("local-gateway-free-cards-changed", refresh);
+    }, [panelMounted, reloadWorkflows, tab]);
 
     const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
         event.preventDefault();
@@ -178,7 +205,13 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                                         onChange={setWorkflowList}
                                     />
                                 ) : (
-                                    <CanvasWorkflowAppsTab theme={theme} workflows={workflowList} onApply={onApplyWorkflowApp} />
+                                    <CanvasWorkflowAppsTab
+                                        theme={theme}
+                                        workflows={workflowList}
+                                        onApply={onApplyWorkflowApp}
+                                        appsRoot={appsRoot}
+                                        onWorkflowsChanged={() => void reloadWorkflows()}
+                                    />
                                 )}
                             </div>
                         </div>
@@ -961,6 +994,9 @@ function CanvasFreeCardsTab({
     const [nameDraft, setNameDraft] = useState("");
     const [renamingId, setRenamingId] = useState("");
     const renameInFlight = useRef(new Set<string>());
+    // 勾选的卡片用于批量导出；没勾就导出全部。
+    const [checkedIds, setCheckedIds] = useState<string[]>([]);
+    const transfer = useBundleTransfer({ config, onChanged: onReload });
 
     const startRename = (item: FreeWorkflowSummary) => {
         setEditingId(item.id);
@@ -1015,10 +1051,34 @@ function CanvasFreeCardsTab({
         <div className="flex h-full flex-col">
             <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
                 {/* 子标签已经写了「自由卡片」，这里只留数量，不再重复标题。 */}
-                {items.length ? <span className="min-w-0 truncate text-xs opacity-40">{items.length}</span> : <span className="min-w-0 flex-1" />}
+                {items.length ? <span className="min-w-0 truncate text-xs opacity-40">{items.length}{checkedIds.length ? ` / ${checkedIds.length}` : ""}</span> : <span className="min-w-0 flex-1" />}
                 <button
                     type="button"
-                    className="ml-auto grid size-6 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    className="ml-auto grid size-6 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 disabled:opacity-25 dark:hover:bg-white/10"
+                    title={t("canvas.bundle.import")}
+                    aria-label={t("canvas.bundle.import")}
+                    onClick={transfer.pickFile}
+                >
+                    <Download className="size-3.5" />
+                </button>
+                <button
+                    type="button"
+                    className="grid size-6 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 disabled:opacity-25 dark:hover:bg-white/10"
+                    title={checkedIds.length ? t("canvas.bundle.exportSelected", { count: checkedIds.length }) : t("canvas.bundle.exportAll")}
+                    aria-label={checkedIds.length ? t("canvas.bundle.exportSelected", { count: checkedIds.length }) : t("canvas.bundle.exportAll")}
+                    disabled={!items.length || transfer.exporting}
+                    onClick={() =>
+                        void transfer.exportNow({
+                            cardIds: checkedIds.length ? checkedIds : undefined,
+                            name: checkedIds.length === 1 ? items.find((item) => item.id === checkedIds[0])?.name || "自由卡片" : "自由卡片",
+                        })
+                    }
+                >
+                    <Upload className={`size-3.5 ${transfer.exporting ? "animate-pulse" : ""}`} />
+                </button>
+                <button
+                    type="button"
+                    className="grid size-6 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
                     title={t("canvas.sidePanel.freeCardsRefresh")}
                     aria-label={t("canvas.sidePanel.freeCardsRefresh")}
                     onClick={onReload}
@@ -1037,6 +1097,16 @@ function CanvasFreeCardsTab({
                             const editing = editingId === item.id;
                             return (
                                 <div key={item.id} className="group flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
+                                    <input
+                                        type="checkbox"
+                                        className="size-3.5 shrink-0 cursor-pointer opacity-45 transition group-hover:opacity-80"
+                                        checked={checkedIds.includes(item.id)}
+                                        title={t("canvas.bundle.selectForExport")}
+                                        aria-label={t("canvas.bundle.selectForExport")}
+                                        onChange={(event) =>
+                                            setCheckedIds((prev) => (event.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)))
+                                        }
+                                    />
                                     <span className="grid size-9 shrink-0 place-items-center rounded-lg" style={{ background: theme.node.panel }}>
                                         <Sparkles className="size-4 opacity-60" />
                                     </span>
@@ -1133,6 +1203,16 @@ function CanvasFreeCardsTab({
                     </Empty>
                 )}
             </div>
+            <input ref={transfer.fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={transfer.onFileChange} />
+            <WorkflowBundleImportModal
+                open={transfer.importOpen}
+                onClose={transfer.closeImport}
+                config={config}
+                bundle={transfer.bundle}
+                bundleName={transfer.bundleName}
+                onImported={transfer.onImported}
+                onInstall={(ids) => void transfer.install(ids)}
+            />
         </div>
     );
 }
@@ -1144,16 +1224,48 @@ function CanvasFreeCardsTab({
  * 指向已删除工作流的步骤不会静默消失——列表上会标出缺失，点击时也会提示，
  * 否则用户会得到一个少了一环的残缺链却不知道原因。
  */
-function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasTheme; workflows: FreeWorkflowSummary[]; onApply?: (app: WorkflowApp) => void }) {
+function CanvasWorkflowAppsTab({
+    theme,
+    workflows,
+    onApply,
+    appsRoot,
+    onWorkflowsChanged,
+}: {
+    theme: CanvasTheme;
+    workflows: FreeWorkflowSummary[];
+    onApply?: (app: WorkflowApp) => void;
+    appsRoot: string;
+    onWorkflowsChanged?: () => void;
+}) {
     const { t } = useTranslation();
+    const config = useEffectiveConfig();
     const [apps, setApps] = useState<WorkflowApp[]>([]);
     const [error, setError] = useState("");
+    const [loading, setLoading] = useState(false);
     const [editorOpen, setEditorOpen] = useState(false);
     const [editingApp, setEditingApp] = useState<WorkflowApp | null>(null);
+    // 与自由卡片页同一套规则：勾了就导勾中的，没勾就导全部。
+    const [checkedIds, setCheckedIds] = useState<string[]>([]);
+
+    const reload = useCallback(async () => {
+        setLoading(true);
+        try {
+            setApps(await fetchWorkflowApps(appsRoot));
+            setError("");
+        } catch (reason) {
+            // 读取失败不能只留一个空列表：那和应用被删光了没法区分。
+            setError(reason instanceof Error ? reason.message : t("canvas.sidePanel.appsLoadFailed"));
+        } finally {
+            setLoading(false);
+        }
+    }, [appsRoot, t]);
+
+    // 导入一个含应用的包，里面通常也带卡片；只刷应用列表会让「卡片」页少几条。
+    const transfer = useBundleTransfer({ config, onChanged: () => { void reload(); onWorkflowsChanged?.(); } });
 
     useEffect(() => {
-        setApps(readWorkflowApps());
-    }, []);
+        void reload();
+    }, [reload]);
 
     const openCreate = () => {
         setEditingApp(null);
@@ -1167,21 +1279,61 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
     const availableIds = useMemo(() => new Set(workflows.map((item) => item.id)), [workflows]);
     const nameOf = useMemo(() => new Map(workflows.map((item) => [item.id, item.name])), [workflows]);
 
-    const remove = (app: WorkflowApp) => {
-        const next = apps.filter((item) => item.id !== app.id);
-        if (!writeWorkflowApps(next)) {
+    const remove = async (app: WorkflowApp) => {
+        try {
+            await deleteWorkflowApp(appsRoot, app.id);
+            setError("");
+            await reload();
+        } catch {
             setError(t("canvas.sidePanel.workflowAppSaveFailed"));
-            return;
         }
-        setError("");
-        setApps(next);
     };
 
     return (
         <div className="flex h-full min-h-0 flex-col">
             {/* 子标签已经写了「应用」，这里不再重复标题，只留数量与新建入口。 */}
             <div className="flex items-center gap-2 px-4 pb-2">
-                {apps.length ? <span className="min-w-0 flex-1 truncate text-xs opacity-40">{apps.length}</span> : <span className="min-w-0 flex-1" />}
+                {apps.length ? (
+                    <span className="min-w-0 flex-1 truncate text-xs opacity-40">
+                        {apps.length}
+                        {checkedIds.length ? ` / ${checkedIds.length}` : ""}
+                    </span>
+                ) : (
+                    <span className="min-w-0 flex-1" />
+                )}
+                <button
+                    type="button"
+                    className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    title={t("canvas.bundle.import")}
+                    aria-label={t("canvas.bundle.import")}
+                    onClick={transfer.pickFile}
+                >
+                    <Download className="size-3.5" />
+                </button>
+                <button
+                    type="button"
+                    className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 disabled:opacity-25 dark:hover:bg-white/10"
+                    title={checkedIds.length ? t("canvas.bundle.exportSelected", { count: checkedIds.length }) : t("canvas.bundle.exportAll")}
+                    aria-label={checkedIds.length ? t("canvas.bundle.exportSelected", { count: checkedIds.length }) : t("canvas.bundle.exportAll")}
+                    disabled={!apps.length || transfer.exporting}
+                    onClick={() =>
+                        void transfer.exportNow({
+                            appIds: checkedIds.length ? checkedIds : undefined,
+                            name: checkedIds.length === 1 ? apps.find((item) => item.id === checkedIds[0])?.name || "应用" : "应用",
+                        })
+                    }
+                >
+                    <Upload className={`size-3.5 ${transfer.exporting ? "animate-pulse" : ""}`} />
+                </button>
+                <button
+                    type="button"
+                    className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    title={t("canvas.sidePanel.appsRefresh")}
+                    aria-label={t("canvas.sidePanel.appsRefresh")}
+                    onClick={() => void reload()}
+                >
+                    <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+                </button>
                 <button
                     type="button"
                     className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
@@ -1202,6 +1354,16 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
                             const missing = app.steps.filter((step) => !availableIds.has(step.workflowId));
                             return (
                                 <div key={app.id} className="group flex items-start gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
+                                    <input
+                                        type="checkbox"
+                                        className="mt-1 size-3.5 shrink-0 cursor-pointer opacity-45 transition group-hover:opacity-80"
+                                        checked={checkedIds.includes(app.id)}
+                                        title={t("canvas.bundle.selectForExport")}
+                                        aria-label={t("canvas.bundle.selectForExport")}
+                                        onChange={(event) =>
+                                            setCheckedIds((prev) => (event.target.checked ? [...prev, app.id] : prev.filter((id) => id !== app.id)))
+                                        }
+                                    />
                                     <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg" style={{ background: theme.node.panel }}>
                                         <LayoutGrid className="size-4 opacity-60" />
                                     </span>
@@ -1255,7 +1417,18 @@ function CanvasWorkflowAppsTab({ theme, workflows, onApply }: { theme: CanvasThe
                 onClose={() => setEditorOpen(false)}
                 workflows={workflows}
                 editing={editingApp}
-                onSaved={() => setApps(readWorkflowApps())}
+                onSaved={() => void reload()}
+                root={appsRoot}
+            />
+            <input ref={transfer.fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={transfer.onFileChange} />
+            <WorkflowBundleImportModal
+                open={transfer.importOpen}
+                onClose={transfer.closeImport}
+                config={config}
+                bundle={transfer.bundle}
+                bundleName={transfer.bundleName}
+                onImported={transfer.onImported}
+                onInstall={(ids) => void transfer.install(ids)}
             />
         </div>
     );

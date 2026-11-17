@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { App, Modal, Segmented, Tooltip } from "antd";
-import { Clapperboard, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Maximize2, MessageSquare, Minus, Music2, Palette, Plus, RefreshCw, Settings2, Trash2, Ungroup, Upload, Video, Zap } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { App, Dropdown, Modal, Segmented, Tooltip } from "antd";
+import { ChevronDown, Clapperboard, Cpu, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Maximize2, MessageSquare, Minus, Music2, Palette, Plus, RefreshCw, Settings2, Sparkles, Trash2, Ungroup, Upload, Video, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 
@@ -11,6 +11,7 @@ import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform, isAudioNodeType } from "@/types/canvas";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
+import type { CanvasVideoUpscaleMethod } from "./canvas-node-video-upscale-dialog";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
 import { IMAGE_QUICK_TOOLS_STORAGE_KEY, LEGACY_IMAGE_QUICK_TOOLS_STORAGE_KEY, LEGACY_IMAGE_QUICK_TOOLS_STORAGE_KEY_V10, LEGACY_IMAGE_QUICK_TOOLS_STORAGE_KEY_V9, buildImageToolbarTools, defaultImageQuickToolIds, readImageQuickToolsConfig, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
@@ -25,7 +26,7 @@ type CanvasNodeHoverToolbarProps = {
     onToggleDialog: (node: CanvasNodeData) => void;
     onGenerateImage: (node: CanvasNodeData) => void;
     onUpload: (node: CanvasNodeData) => void;
-    onVideoUpscale: (node: CanvasNodeData) => void;
+    onVideoUpscale: (node: CanvasNodeData, method: CanvasVideoUpscaleMethod) => void;
     onInterpolateVideo: (node: CanvasNodeData) => void;
     onDraftVideo: (node: CanvasNodeData) => void;
     onDownload: (node: CanvasNodeData) => void;
@@ -56,6 +57,7 @@ type ToolbarTool = {
     onClick: () => void;
     active?: boolean;
     danger?: boolean;
+    children?: ToolbarTool[];
 };
 
 export function CanvasNodeHoverToolbar({
@@ -96,6 +98,7 @@ export function CanvasNodeHoverToolbar({
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(false);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
+    const [openSubmenuId, setOpenSubmenuId] = useState<string | null>(null);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
@@ -124,6 +127,7 @@ export function CanvasNodeHoverToolbar({
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
+        setOpenSubmenuId(null);
     }, [node?.id]);
 
     if (!node) return null;
@@ -174,7 +178,33 @@ export function CanvasNodeHoverToolbar({
         ...(isAudio ? [{ id: "audioEdit", title: t("canvas.nodeToolbar.audioEditTitle"), label: t("canvas.nodeToolbar.audioEdit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isVideo ? [{ id: "videoDraft", title: t("canvas.nodeToolbar.draftTitle"), label: t("canvas.nodeToolbar.draft"), icon: <Zap className="size-4" />, onClick: () => onDraftVideo(node) }] : []),
         ...(hasVideo ? [{ id: "videoInterpolate", title: t("canvas.nodeToolbar.interpolateTitle"), label: t("canvas.nodeToolbar.interpolate"), icon: <Clapperboard className="size-4" />, onClick: () => onInterpolateVideo(node) }] : []),
-        ...(hasVideo ? [{ id: "videoUpscale", title: "SeedVR2 视频超分", label: "超分", icon: <Maximize2 className="size-4" />, onClick: () => onVideoUpscale(node) }] : []),
+        ...(hasVideo ? [{
+            id: "videoUpscale",
+            title: t("canvas.videoTools.chooseUpscale"),
+            label: t("canvas.videoTools.upscale"),
+            icon: <Maximize2 className="size-4" />,
+            // 主入口只展开子菜单；计算任务只能由明确选中的方式触发。
+            onClick: () => setOpenSubmenuId("videoUpscale"),
+            children: [{
+                id: "seedvr2",
+                title: t("canvas.videoTools.seedvr2Upscale"),
+                label: t("canvas.videoTools.seedvr2Upscale"),
+                icon: <Maximize2 className="size-4" />,
+                onClick: () => onVideoUpscale(node, "seedvr2"),
+            }, {
+                id: "relayvsr",
+                title: t("canvas.videoTools.relayvsrUpscale"),
+                label: t("canvas.videoTools.relayvsrUpscale"),
+                icon: <Sparkles className="size-4" />,
+                onClick: () => onVideoUpscale(node, "relayvsr"),
+            }, {
+                id: "dlss5",
+                title: t("canvas.videoTools.dlss5Upscale"),
+                label: t("canvas.videoTools.dlss5Upscale"),
+                icon: <Cpu className="size-4" />,
+                onClick: () => onVideoUpscale(node, "dlss5"),
+            }],
+        }] : []),
         ...(isText ? [{ id: "generateImage", title: t("canvas.node.generateImage"), label: t("canvas.node.generate"), icon: <ImageIcon className="size-4" />, onClick: () => onGenerateImage(node) }] : []),
         ...(isConfig && CONFIG_COMPOSER_ENABLED ? [{ id: "config", title: t("canvas.configNode.title"), label: t("canvas.configNode.title"), icon: <Settings2 className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText ? [{ id: "decreaseFont", title: t("canvas.nodeToolbar.decreaseFont"), label: t("canvas.nodeToolbar.zoomOut"), icon: <Minus className="size-4" />, onClick: () => onDecreaseFont(node) }] : []),
@@ -184,7 +214,7 @@ export function CanvasNodeHoverToolbar({
         ...(isAudio ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
-    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools];
+    const toolbarTools: ToolbarTool[] = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools];
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {
@@ -217,12 +247,24 @@ export function CanvasNodeHoverToolbar({
                 style={{ left, top }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
-                    if (!imageToolSettingsOpen) onLeave();
+                    if (!imageToolSettingsOpen && !openSubmenuId) onLeave();
                 }}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
             >
-                {toolbarTools.map((tool) => (
+                {toolbarTools.map((tool) => tool.children?.length ? (
+                    <ToolbarSubmenu
+                        key={`${node.id}:${tool.id}`}
+                        tool={tool}
+                        open={openSubmenuId === tool.id}
+                        onOpenChange={(open) => {
+                            setOpenSubmenuId((current) => open ? tool.id : current === tool.id ? null : current);
+                            if (open) onKeep(node.id);
+                            else if (!imageToolSettingsOpen) onLeave();
+                        }}
+                        onKeep={() => onKeep(node.id)}
+                    />
+                ) : (
                     <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
                 ))}
                 {hasImage ? <ToolbarAction id="more" title={t("canvas.imageTools.configure")} label={t("canvas.imageTools.more")} icon={<Ellipsis className="size-4" />} active={imageToolSettingsOpen} onClick={openImageToolSettings} showLabel={showImageToolLabels} /> : null}
@@ -317,6 +359,119 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
                 </div>
             ) : null}
         </Modal>
+    );
+}
+
+function ToolbarSubmenu({ tool, open, onOpenChange, onKeep }: { tool: ToolbarTool; open: boolean; onOpenChange: (open: boolean) => void; onKeep: () => void }) {
+    const menuId = useId();
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    const theme = useCanvasTheme();
+    const focusFirstRef = useRef(false);
+    const requestClose = (restoreFocus = false) => {
+        focusFirstRef.current = false;
+        onOpenChange(false);
+        if (restoreFocus) triggerRef.current?.focus();
+    };
+    useEffect(() => {
+        if (!open || !focusFirstRef.current) return;
+        const frame = requestAnimationFrame(() => {
+            const item = document.getElementById(menuId)?.querySelector<HTMLElement>('[role="menuitem"]');
+            if (item) {
+                item.focus();
+                focusFirstRef.current = false;
+            }
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [menuId, open]);
+    useEffect(() => {
+        if (!open) return;
+        const dismiss = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            requestClose(true);
+        };
+        document.addEventListener("keydown", dismiss, true);
+        return () => document.removeEventListener("keydown", dismiss, true);
+    }, [open]);
+
+    return (
+        <Dropdown
+            trigger={["hover"]}
+            placement="bottomLeft"
+            open={open}
+            onOpenChange={onOpenChange}
+            mouseEnterDelay={0.1}
+            mouseLeaveDelay={0.2}
+            destroyOnHidden
+            // 工具栏使用屏幕坐标，不能挂进有缩放变换的画布层。
+            getPopupContainer={() => document.body}
+            popupRender={(menu) => (
+                <div
+                    data-canvas-no-zoom
+                    data-canvas-shortcuts-ignore
+                    data-video-upscale-menu
+                    onMouseEnter={onKeep}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
+                    onWheel={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                        if (event.key === "Tab") requestClose();
+                        event.stopPropagation();
+                    }}
+                >
+                    {menu}
+                </div>
+            )}
+            menu={{
+                id: menuId,
+                selectable: false,
+                style: { minWidth: 220, background: theme.node.fill, color: theme.node.text, border: `1px solid ${theme.node.stroke}` },
+                items: tool.children?.map((item) => ({ key: item.id, label: item.label, icon: item.icon, title: item.title })),
+                onClick: ({ key, domEvent }) => {
+                    // Enter 选中后会打开参数弹窗；阻止同一按键继续激活弹窗里获得焦点的按钮。
+                    domEvent.preventDefault();
+                    domEvent.stopPropagation();
+                    const selected = tool.children?.find((item) => item.id === key);
+                    if (!selected) return;
+                    requestClose();
+                    selected.onClick();
+                },
+            }}
+        >
+            <button
+                ref={triggerRef}
+                type="button"
+                className="group relative flex h-12 items-center whitespace-nowrap px-1.5"
+                aria-label={tool.title}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                aria-controls={open ? menuId : undefined}
+                data-video-upscale-trigger
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onKeep();
+                    // 点击只展开，绝不调用任何超分执行回调。
+                    onOpenChange(true);
+                }}
+                onKeyDown={(event) => {
+                    if (event.key !== "ArrowDown" && event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    focusFirstRef.current = true;
+                    onKeep();
+                    onOpenChange(true);
+                    if (open) document.getElementById(menuId)?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+                }}
+            >
+                <span className={`flex h-9 items-center gap-2 rounded-lg px-2.5 transition group-hover:bg-[#f0f0f1] ${open ? "bg-[#eeeeef]" : ""}`}>
+                    {tool.icon}
+                    <span>{tool.label}</span>
+                    <ChevronDown className="size-3 opacity-60" />
+                </span>
+            </button>
+        </Dropdown>
     );
 }
 

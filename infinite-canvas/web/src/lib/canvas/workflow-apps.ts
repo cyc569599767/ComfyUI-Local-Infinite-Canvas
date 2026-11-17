@@ -5,10 +5,12 @@
  * 每次都要用户给；应用是一条预先排好的链——按顺序放好几张工作流卡片并用连线
  * 串起来，用户只需要在最上游填一次输入。
  *
- * 存储放 localStorage 而不是网关：应用只是「哪些工作流、按什么顺序、怎么连」
- * 的编排描述，不含模型文件也不含执行状态，放在前端即可，改完立刻生效，
- * 不必等网关重启或触发工作流扫描。
+ * 存到网关（`/api/workflow-apps`），跟着数据目录走：换浏览器、清缓存、换设备都还在。
+ * 早先只放 localStorage，编排好的流程等于一次性消耗品。
+ * 网关不可用时退回 localStorage，至少当前会话还能编辑；恢复后以网关为准。
  */
+import axios from "axios";
+
 export type WorkflowAppStep = {
     /** 工作流 id（对应 FreeWorkflowSummary.id）。 */
     workflowId: string;
@@ -76,9 +78,41 @@ function normalizeApp(raw: unknown): WorkflowApp | null {
 }
 
 /**
- * 读取全部应用。坏数据不能拖垮整个列表：逐个校验，跳过不合法项。
- * 存储不可用或 JSON 损坏时返回空数组——侧栏显示「还没有应用」，不是报错。
+ * 读取全部应用。
+ *
+ * 网关是权威来源；网关不可用（离线、旧版本）时退回 localStorage，
+ * 保证已编排的流程还能看到、能编辑。两边都为空就返回空数组——
+ * 侧栏显示「还没有应用」，不当作错误。
  */
+export async function fetchWorkflowApps(root: string): Promise<WorkflowApp[]> {
+    if (!root) return readWorkflowApps();
+    try {
+        const response = await axios.get<{ apps?: unknown[] }>(`${root}/api/workflow-apps`, { timeout: 15000 });
+        const apps = (response.data?.apps || []).map(normalizeApp).filter((app): app is WorkflowApp => Boolean(app));
+        // 顺手把网关结果写进本地，断网时至少有一份可读的。
+        writeLocalWorkflowApps(apps);
+        return apps;
+    } catch {
+        return readWorkflowApps();
+    }
+}
+
+/** 保存一个应用：先写网关，成功后同步本地副本。*/
+export async function saveWorkflowApp(root: string, app: WorkflowApp): Promise<WorkflowApp> {
+    const response = await axios.post<{ app?: unknown }>(`${root}/api/workflow-apps`, { app }, { timeout: 15000 });
+    const saved = normalizeApp(response.data?.app) || app;
+    const others = readWorkflowApps().filter((item) => item.id !== saved.id);
+    writeLocalWorkflowApps([...others, saved]);
+    return saved;
+}
+
+/** 删除一个应用。*/
+export async function deleteWorkflowApp(root: string, id: string): Promise<void> {
+    await axios.delete(`${root}/api/workflow-apps/${encodeURIComponent(id)}`, { timeout: 15000 });
+    writeLocalWorkflowApps(readWorkflowApps().filter((item) => item.id !== id));
+}
+
+/** 供离线兜底与旧代码路径使用：只读本地副本。 */
 export function readWorkflowApps(): WorkflowApp[] {
     const storage = safeStorage();
     if (!storage) return [];
@@ -93,7 +127,7 @@ export function readWorkflowApps(): WorkflowApp[] {
     }
 }
 
-export function writeWorkflowApps(apps: WorkflowApp[]): boolean {
+function writeLocalWorkflowApps(apps: WorkflowApp[]): boolean {
     const storage = safeStorage();
     if (!storage) return false;
     try {
@@ -103,6 +137,11 @@ export function writeWorkflowApps(apps: WorkflowApp[]): boolean {
         // 配额满或被拒绝时返回 false，调用方据此提示用户，而不是静默丢数据。
         return false;
     }
+}
+
+/** 已不推荐：请用 saveWorkflowApp，它同时会写网关。保留给测试与离线场景。 */
+export function writeWorkflowApps(apps: WorkflowApp[]): boolean {
+    return writeLocalWorkflowApps(apps);
 }
 
 /**
