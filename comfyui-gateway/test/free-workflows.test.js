@@ -528,6 +528,81 @@ test("a linked input cannot be pinned: setCustomBindings drops it", async () => 
   }
 });
 
+test("用户固定的配置项经 setCustomBindings 保存后，执行时真的会写进工作流", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-pin-e2e-"));
+  try {
+    const entry = {
+      id: "fc-e2e",
+      name: "PinE2E",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      customBindings: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+
+    // 用户在画布上把「步数」固定到卡片，并填成 8。
+    await store.setCustomBindings("fc-e2e", [{ node: "2", input: "steps", label: "步数" }]);
+
+    // 关键：必须按 server.js 的真实调用方式走 executionBindings，
+    // 不能拿 publicEntry 的结果冒充（它顶层带 customBindings，会掩盖断裂）。
+    const entryAfter = store.get("fc-e2e");
+    const applied = applyFreeInputs(entryAfter.workflow, store.executionBindings(entryAfter), {
+      prompt: "a dog",
+      values: [{ node: "2", input: "steps", value: "8" }],
+    });
+    // 修复前这条会失败：applyFreeInputs 读 bindings.customBindings，
+    // 而 setCustomBindings 写的是 entry.customBindings，两个字段从未打通，
+    // 于是用户填的 8 被静默丢弃，执行用的还是工作流里的 20。
+    assert.equal(applied["2"].inputs.steps, 8, "固定的步数必须生效，否则用户改了配置等于没改");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("固定配置后再读摘要，配置项也要跟着回来（新拖一张卡片才不会是旧配置）", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-pin-sum-"));
+  try {
+    const entry = {
+      id: "fc-sum",
+      name: "Sum",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      customBindings: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+
+    const before = await store.publicEntry(store.get("fc-sum"));
+    await store.setCustomBindings("fc-sum", [{ node: "2", input: "steps", label: "步数", surface: "settings" }]);
+    const after = await store.publicEntry(store.get("fc-sum"));
+
+    // 固定项是「这张卡片的配置」的一部分。摘要里读不到它，从库里再拖一张卡片
+    // 得到的 freeCard 快照就缺这一项，用户会以为配置没保存。
+    assert.deepEqual(
+      after.customBindings.map((item) => `${item.node}.${item.input}`),
+      ["2.steps"],
+      "摘要必须带上固定项",
+    );
+    assert.equal(before.customBindings.length, 0, "固定前的摘要应为空");
+    assert.equal(after.customBindings[0].surface, "settings", "surface 要原样带回，否则控件会被挪到卡片上");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("describeWorkflowGraph lists bindable inputs and skips linked ones", async () => {
   const { describeWorkflowGraph } = await import("../src/ui-workflow.js");
   // objectInfo 里的 combo 必须带 options，前端才能给出下拉而不是自由输入。
@@ -660,4 +735,424 @@ test("a combo with no local files stays a dropdown instead of becoming a text bo
   const ckpt = graph.nodes.find((node) => node.classType === "CheckpointLoaderSimple").inputs.find((input) => input.name === "ckpt_name");
   assert.equal(ckpt.kind, "combo", "an empty combo is still a combo");
   assert.deepEqual(ckpt.options, []);
+});
+
+// 「新增归档」= 复制成新条目，原条目不动。共用一条数据会让改一个动两个。
+test("duplicate copies a free workflow without touching the original", async () => {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-dup-"));
+  try {
+    const entry = {
+      id: "fc-orig",
+      name: "Original",
+      sourceRel: "test.json",
+      sourceFormat: "api",
+      workflow: apiWorkflow(),
+      bindings: { outputType: "image", prompt: { node: "3", input: "text" }, textInputs: [{ node: "3", input: "text" }] },
+      warnings: [],
+      customBindings: [{ node: "2", input: "steps", label: "steps", surface: "card" }],
+      preset: { count: 2 },
+      archivedAt: "2026-01-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+    const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await store.load();
+
+    const copy = await store.duplicate("fc-orig", { preset: { count: 3 } });
+    assert.notEqual(copy.id, "fc-orig", "the copy gets its own id");
+    assert.equal(copy.name, "Original 副本", "name is suffixed so the library has no duplicates");
+    assert.equal(copy.preset.count, 3, "the given preset is used");
+    assert.ok(copy.archivedAt, "the new archive is immediately archived");
+    assert.deepEqual(copy.customBindings, entry.customBindings, "pinned settings carry over");
+
+    // 原条目必须原封不动。
+    const original = store.get("fc-orig");
+    assert.equal(original.name, "Original");
+    assert.equal(original.preset.count, 2);
+    assert.ok(original.archivedAt, "the original keeps its archived state");
+
+    // 深拷贝：改副本的工作流不能影响原条目。
+    copy.workflow["2"].inputs.steps = 99;
+    assert.notEqual(store.get("fc-orig").workflow["2"].inputs.steps, 99);
+
+    // 再复制一次不能撞名。
+    const copy2 = await store.duplicate("fc-orig");
+    assert.equal(copy2.name, "Original 副本 2");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+async function duplicateFixture() {
+  const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "free-dup-snapshot-"));
+  const workflow = apiWorkflow();
+  workflow["2"].inputs.enabled = true;
+  const entry = {
+    id: "fc-snapshot", name: "Snapshot", sourceRel: "test.json", sourceFormat: "api", sourceSignature: "123:456",
+    workflow,
+    bindings: {
+      outputType: "image", prompt: { node: "3", input: "text" },
+      textInputs: [{ node: "3", input: "text", default: "a cat" }, { node: "4", input: "text", default: "ugly" }],
+    },
+    customBindings: [
+      { node: "2", input: "steps", label: "步数", surface: "settings" },
+      { node: "3", input: "text", label: "提示词", surface: "card" },
+      { node: "2", input: "cfg", label: "CFG", surface: "settings" },
+      { node: "2", input: "enabled", label: "开关", surface: "settings" },
+      { node: "2", input: "sampler_name", label: "采样器", surface: "settings" },
+    ],
+    preset: { size: "512x512", count: 2, seed: "42", seedFixed: "true" }, warnings: [],
+    archivedAt: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  await fsp.writeFile(path.join(dataDir, "free-workflows.json"), JSON.stringify({ version: 1, workflows: [entry] }));
+  const store = createFreeWorkflowStore({ dataDir, comfy: {} });
+  await store.load();
+  return { dataDir, store, entry };
+}
+
+test("自动文本取消固定可持久化，取消项不能经 values 改写工作流且可重新固定", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const marked = await store.setCustomBindings(entry.id, [
+      { node: "3", input: "text", label: "主文本", unpinned: true },
+      { node: "2", input: "steps", label: "步数", surface: "settings" },
+    ]);
+    assert.equal((await store.publicEntry(marked)).customBindings[0].unpinned, true);
+    const reloaded = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await reloaded.load();
+    const saved = reloaded.get(entry.id);
+    assert.equal(saved.customBindings[0].unpinned, true);
+    const applied = applyFreeInputs(saved.workflow, reloaded.executionBindings(saved), {
+      prompt: "prompt", texts: [{ node: "3", input: "text", value: "当前文本" }],
+      values: [{ node: "3", input: "text", value: "旧值不能覆盖" }, { node: "2", input: "steps", value: 8 }],
+    });
+    assert.equal(applied["3"].inputs.text, "当前文本");
+    assert.equal(applied["2"].inputs.steps, 8);
+    const archived = await reloaded.setArchived(entry.id, true, undefined, { values: [{ node: "3", input: "text", value: "不得写入" }] });
+    assert.equal(archived.workflow["3"].inputs.text, "a cat");
+    const copy = await reloaded.duplicate(entry.id);
+    assert.equal(copy.customBindings[0].unpinned, true);
+    const restored = await reloaded.setCustomBindings(entry.id, [{ node: "3", input: "text", label: "重新固定" }]);
+    assert.equal(restored.customBindings[0].unpinned, undefined);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("setArchived 保存当前文本和固定参数快照，重载后可执行且不修改原对象或源文件", async () => {
+  const { dataDir, entry } = await duplicateFixture();
+  try {
+    const sourceFile = path.join(dataDir, entry.sourceRel);
+    const source = JSON.stringify(entry.workflow);
+    await fsp.writeFile(sourceFile, source);
+    const store = createFreeWorkflowStore({
+      dataDir,
+      comfyWorkflowsDir: dataDir,
+      comfy: { objectInfo: () => { throw new Error("归档不应访问 ComfyUI"); } },
+    });
+    await store.load();
+    const original = store.get(entry.id);
+    original.bindings = detectFreeBindings(original.workflow, objectInfo);
+    const before = structuredClone(original);
+    const preset = { size: "768x1024", aspectRatio: "3:4", count: 3, seed: "777", seedFixed: "true" };
+    const snapshot = {
+      texts: [{ node: "3", input: "text", value: "新的正向提示词" }, { node: "4", input: "text", value: "新的负向提示词" }],
+      values: [
+        { node: "2", input: "steps", value: "8" },
+        { node: "2", input: "cfg", value: "4.25" },
+        { node: "2", input: "enabled", value: false },
+        { node: "2", input: "sampler_name", value: "dpmpp_2m" },
+        { node: "3", input: "text", value: "固定提示词优先" },
+      ],
+    };
+    const requestBefore = structuredClone(snapshot);
+    const archived = await store.setArchived(entry.id, true, preset, snapshot);
+    assert.equal(archived.workflow["3"].inputs.text, "固定提示词优先");
+    assert.equal(archived.workflow["4"].inputs.text, "新的负向提示词");
+    assert.equal(archived.workflow["2"].inputs.steps, 8);
+    assert.equal(archived.workflow["2"].inputs.cfg, 4.25);
+    assert.equal(archived.workflow["2"].inputs.enabled, false);
+    assert.equal(archived.workflow["2"].inputs.sampler_name, "dpmpp_2m");
+    assert.equal(archived.workflow["2"].inputs.seed, 42, "未明确快照的种子不能被预设或随机数重置");
+    assert.deepEqual(archived.workflow["1"], before.workflow["1"], "不能把归档当作生成而重置尺寸或批量数");
+    assert.deepEqual(archived.preset, preset);
+    assert.deepEqual(archived.customBindings, before.customBindings);
+    assert.equal(archived.id, entry.id);
+    assert.equal(archived.createdAt, before.createdAt);
+    assert.equal(archived.sourceSignature, before.sourceSignature);
+    assert.ok(archived.archivedAt);
+    assert.notEqual(archived.updatedAt, before.updatedAt);
+    assert.equal(store.get(entry.id), archived);
+    assert.notEqual(archived, original);
+    assert.deepEqual(original, before, "候选快照不能原地修改旧条目");
+    assert.deepEqual(snapshot, requestBefore, "不能修改调用方输入");
+    assert.equal(await fsp.readFile(sourceFile, "utf8"), source);
+
+    const reloaded = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await reloaded.load();
+    const saved = reloaded.get(entry.id);
+    assert.deepEqual(saved, archived);
+    assert.deepEqual(saved.bindings.textInputs.map((item) => item.default), ["固定提示词优先", "新的负向提示词"]);
+    const applied = applyFreeInputs(saved.workflow, reloaded.executionBindings(saved), {
+      prompt: saved.workflow["3"].inputs.text,
+      seed: "42", seedFixed: true,
+    });
+    assert.equal(applied["2"].inputs.steps, 8);
+    assert.equal(applied["4"].inputs.text, "新的负向提示词");
+    const overridden = applyFreeInputs(saved.workflow, reloaded.executionBindings(saved), {
+      prompt: "执行提示词", values: [{ node: "2", input: "steps", value: "11" }],
+    });
+    assert.equal(overridden["2"].inputs.steps, 11, "执行必须合并真实 customBindings");
+    assert.equal(saved.workflow["2"].inputs.steps, 8);
+
+    await fsp.unlink(sourceFile);
+    const updated = await store.setArchived(entry.id, true, undefined, { texts: [{ node: "4", input: "text", value: "" }] });
+    assert.equal(updated.workflow["4"].inputs.text, "", "源文件缺失也能更新归档，空串表示明确清空");
+    assert.equal(updated.archivedAt, archived.archivedAt, "更新已有归档不重置首次归档时间");
+    assert.deepEqual(updated.preset, preset, "省略预设时保留已有预设");
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("setArchived 忽略未登记、连线、缺失及类型无效的输入", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const original = store.get(entry.id);
+    original.customBindings.push({ node: "2", input: "positive" }, { node: "2", input: "missing" });
+    original.bindings.textInputs.push({ node: "2", input: "negative" });
+    const before = structuredClone(original);
+    const archived = await store.setArchived(entry.id, true, undefined, {
+      texts: [
+        { node: "4", input: "text", value: "保留的合法文本" },
+        { node: "4", input: "text", value: { invalid: true } },
+        { node: "4", input: "text", value: NaN },
+        { node: "9", input: "ckpt_name", value: "other.safetensors" },
+        { node: "2", input: "negative", value: "不能覆盖连线" },
+        null,
+      ],
+      values: [
+        { node: "2", input: "steps", value: "9" },
+        { node: "2", input: "steps", value: NaN },
+        { node: "2", input: "steps", value: Infinity },
+        { node: "2", input: "steps", value: [] },
+        { node: "2", input: "cfg", value: "NaN" },
+        { node: "2", input: "enabled", value: null },
+        { node: "2", input: "positive", value: "不能覆盖连线" },
+        { node: "2", input: "missing", value: 1 },
+        { node: "999", input: "steps", value: 1 },
+        { node: "9", input: "ckpt_name", value: "other.safetensors" },
+        { node: "4", input: "text", value: "只登记为文本，不能从固定参数写入" },
+        null,
+      ],
+    });
+    const expected = structuredClone(before.workflow);
+    expected["2"].inputs.steps = 9;
+    expected["4"].inputs.text = "保留的合法文本";
+    assert.deepEqual(archived.workflow, expected);
+    assert.deepEqual(original, before);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("setArchived 拒绝无效数组且不更改已有归档、预设或持久化文件", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const file = path.join(dataDir, "free-workflows.json");
+    await assert.rejects(store.setArchived("missing", true), /自由卡片不存在/);
+    for (const initial of [false, true]) {
+      await store.setArchived(entry.id, initial);
+      const original = store.get(entry.id);
+      const before = structuredClone(original);
+      const persisted = await fsp.readFile(file, "utf8");
+      for (const archived of [true, false]) {
+        for (const snapshot of [{ texts: null }, { texts: {} }, { texts: "[]" }, { values: null }, { values: {} }, { values: "bad" }]) {
+          await assert.rejects(store.setArchived(entry.id, archived, { count: 9 }, snapshot), /配置值必须是数组/);
+          assert.equal(store.get(entry.id), original);
+          assert.deepEqual(original, before);
+          assert.equal(await fsp.readFile(file, "utf8"), persisted);
+        }
+      }
+    }
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("setArchived 保持旧调用兼容且取消归档不会覆盖工作流快照", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const archived = await store.setArchived(entry.id, true);
+    assert.ok(archived.archivedAt);
+    assert.deepEqual(archived.workflow, entry.workflow);
+    assert.deepEqual(archived.preset, entry.preset);
+    const updated = await store.setArchived(entry.id, true, { count: 3 });
+    assert.equal(updated.archivedAt, archived.archivedAt);
+    assert.equal(updated.preset.count, 3);
+    const unarchived = await store.setArchived(entry.id, false, undefined, {
+      texts: [{ node: "3", input: "text", value: "不应写入" }],
+      values: [{ node: "2", input: "steps", value: "99" }],
+    });
+    assert.equal(unarchived.archivedAt, null);
+    assert.deepEqual(unarchived.workflow, entry.workflow);
+    assert.deepEqual(unarchived.preset, updated.preset);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("setArchived 持久化失败回滚原条目，恢复后仍可保存", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  const file = path.join(dataDir, "free-workflows.json");
+  const backup = path.join(dataDir, "original.json");
+  try {
+    await store.setArchived(entry.id, true);
+    const original = store.get(entry.id);
+    const before = structuredClone(original);
+    const persisted = await fsp.readFile(file, "utf8");
+    await fsp.rename(file, backup);
+    await fsp.mkdir(file);
+    for (const archived of [true, false]) {
+      await assert.rejects(store.setArchived(entry.id, archived, { count: 9 }, {
+        texts: [{ node: "3", input: "text", value: "未保存文本" }],
+        values: [{ node: "2", input: "steps", value: "99" }],
+      }));
+      assert.equal(store.get(entry.id), original);
+      assert.deepEqual(original, before);
+      assert.equal(await fsp.readFile(backup, "utf8"), persisted);
+    }
+    await fsp.rmdir(file);
+    await fsp.rename(backup, file);
+    const saved = await store.setArchived(entry.id, true, undefined, { values: [{ node: "2", input: "steps", value: "8" }] });
+    const reloaded = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await reloaded.load();
+    assert.equal(saved.workflow["2"].inputs.steps, 8);
+    assert.deepEqual(reloaded.get(entry.id), saved);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate snapshots current texts and pinned values, preserves the original and survives reload", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const preset = { size: "768x1024", aspectRatio: "3:4", count: 3, seed: "777", seedFixed: "false" };
+    const copy = await store.duplicate(entry.id, {
+      preset,
+      texts: [{ node: "3", input: "text", value: "a dog" }, { node: "4", input: "text", value: "bad lighting" }],
+      values: [
+        { node: "2", input: "steps", value: "8" },
+        { node: "2", input: "cfg", value: "4.25" },
+        { node: "2", input: "enabled", value: false },
+        { node: "2", input: "sampler_name", value: "dpmpp_2m" },
+        // 和生成请求一致：固定项优先，而且空文本就是明确清空。
+        { node: "3", input: "text", value: "" },
+      ],
+    });
+    assert.deepEqual(store.get(entry.id), entry, "source workflow, bindings, preset and timestamps stay untouched");
+    assert.deepEqual(copy.preset, preset);
+    assert.deepEqual(copy.customBindings, entry.customBindings, "labels, order and display surfaces carry over");
+    assert.equal(copy.workflow["2"].inputs.steps, 8);
+    assert.equal(copy.workflow["2"].inputs.cfg, 4.25);
+    assert.equal(copy.workflow["2"].inputs.enabled, false);
+    assert.equal(copy.workflow["2"].inputs.sampler_name, "dpmpp_2m");
+    assert.equal(copy.workflow["3"].inputs.text, "");
+    assert.equal(copy.workflow["4"].inputs.text, "bad lighting");
+    assert.equal(copy.workflow["2"].inputs.seed, 42, "archiving is not a generation and must not randomize seed");
+    assert.equal(copy.sourceSignature, entry.sourceSignature);
+
+    const reloaded = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await reloaded.load();
+    assert.deepEqual(reloaded.get(entry.id), entry);
+    assert.deepEqual(reloaded.get(copy.id), JSON.parse(JSON.stringify(copy)));
+    const summary = await reloaded.publicEntry(reloaded.get(copy.id));
+    assert.equal(summary.archived, true);
+    assert.deepEqual(summary.textInputs.map((item) => item.default), ["", "bad lighting"]);
+    assert.deepEqual(summary.customBindings, entry.customBindings);
+    assert.deepEqual((await reloaded.list({ archived: true })).map((item) => item.id), [copy.id]);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate ignores unregistered, stale linked, missing and malformed snapshot inputs", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    // 模拟同步后的旧绑定：即使仍登记着，也不能用标量覆盖连线或新增输入。
+    store.get(entry.id).customBindings.push({ node: "2", input: "positive" }, { node: "2", input: "missing" });
+    const original = structuredClone(store.get(entry.id));
+    const copy = await store.duplicate(entry.id, {
+      texts: [{ node: "9", input: "ckpt_name", value: "evil.safetensors" }, null],
+      values: [
+        { node: "9", input: "ckpt_name", value: "evil.safetensors" },
+        { node: "2", input: "positive", value: "not a link" },
+        { node: "2", input: "missing", value: 1 },
+        { node: "999", input: "steps", value: 1 },
+        { node: "2", input: "steps", value: { invalid: true } },
+        { node: "2", input: "steps", value: Infinity },
+        { node: "2", input: "cfg", value: "not a number" },
+        { node: "2", input: "enabled", value: null },
+        null,
+      ],
+    });
+    assert.deepEqual(copy.workflow, original.workflow);
+    assert.deepEqual(store.get(entry.id), original);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate rejects invalid requests without creating an archive", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    await assert.rejects(store.duplicate("missing"), /自由卡片不存在/);
+    for (const preset of [null, [], "bad"]) await assert.rejects(store.duplicate(entry.id, { preset }), /参数预设格式不正确/);
+    for (const args of [{ texts: {} }, { texts: null }, { values: "bad" }, { values: null }]) {
+      await assert.rejects(store.duplicate(entry.id, args), /配置值必须是数组/);
+    }
+    assert.deepEqual((await store.list()).map((item) => item.id), [entry.id]);
+    assert.deepEqual(store.get(entry.id), entry);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate inherits the preset by value when no override is supplied", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  try {
+    const copy = await store.duplicate(entry.id);
+    assert.deepEqual(copy.preset, entry.preset);
+    copy.preset.count = 10;
+    copy.customBindings[0].label = "changed";
+    copy.bindings.textInputs[0].default = "changed";
+    assert.deepEqual(store.get(entry.id), entry);
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate reports persistence failure, removes the failed copy and can save again", async () => {
+  const { dataDir, store, entry } = await duplicateFixture();
+  const file = path.join(dataDir, "free-workflows.json");
+  const backup = path.join(dataDir, "original.json");
+  try {
+    // 仅操作本测试创建的临时文件：用同名目录稳定触发写入失败，不依赖 chmod。
+    await fsp.rename(file, backup);
+    await fsp.mkdir(file);
+    await assert.rejects(store.duplicate(entry.id));
+    assert.deepEqual((await store.list()).map((item) => item.id), [entry.id]);
+    assert.deepEqual(store.get(entry.id), entry);
+    await fsp.rmdir(file);
+    await fsp.rename(backup, file);
+
+    const copy = await store.duplicate(entry.id);
+    assert.equal(copy.name, "Snapshot 副本", "failed copies do not reserve a name");
+    const reloaded = createFreeWorkflowStore({ dataDir, comfy: {} });
+    await reloaded.load();
+    assert.deepEqual((await reloaded.list()).map((item) => item.id).sort(), [entry.id, copy.id].sort());
+  } finally {
+    await fsp.rm(dataDir, { recursive: true, force: true });
+  }
 });

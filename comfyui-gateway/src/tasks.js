@@ -26,6 +26,7 @@ function publicTask(task) {
     mimeType: task.mimeType || null,
     bytes: task.bytes || 0,
     error: task.error || null,
+    partialOutput: task.partialOutput || null,
   };
 }
 
@@ -226,6 +227,17 @@ export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks =
     } catch (error) {
       task.status = !task._cancelFailed && (task._cancelled || error?.code === "cancelled") ? "cancelled" : "failed";
       if (!task._cancelFailed) task.error = error?.message || String(error);
+      // 生成其实成功了、只是文件没取回来时，把线索留下：
+      // 用户能凭 promptId 去 ComfyUI 的 output 目录自己取，不必重跑一遍。
+      // 只写一句「失败」会让人以为视频没了，然后重新生成——白烧一次算力。
+      if (error?.code === "output_download_failed" && error.details) {
+        task.partialOutput = {
+          promptId: error.details.promptId || task.promptId || null,
+          filename: error.details.filename || null,
+          subfolder: error.details.subfolder || "",
+          type: error.details.type || "output",
+        };
+      }
       task.completedAt = nowIso();
       logger?.warn?.(`任务 ${task.id} 失败：${task.error}`);
     } finally {

@@ -45,7 +45,20 @@ export function publicBinding(item) {
     input: String(item?.input ?? ""),
     label: String(item?.label || item?.input || ""),
     surface: BINDING_SURFACES.has(item?.surface) ? item.surface : "card",
+    ...(item?.unpinned === true ? { unpinned: true } : {}),
   };
+}
+
+function normalizePreset(preset) {
+  if (!preset || typeof preset !== "object" || Array.isArray(preset)) return null;
+  const normalized = {
+    size: typeof preset.size === "string" && preset.size.trim() ? preset.size.trim() : undefined,
+    aspectRatio: canonicalAspectRatio(preset.aspectRatio) || undefined,
+    count: Number.isFinite(Number(preset.count)) && Number(preset.count) >= 1 ? Math.floor(Number(preset.count)) : undefined,
+    seed: preset.seed !== undefined && preset.seed !== null && String(preset.seed).trim() ? String(preset.seed).trim() : undefined,
+    seedFixed: String(preset.seedFixed || "") === "true" ? "true" : "false",
+  };
+  return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined));
 }
 
 function coerceCustomValue(original, incoming) {
@@ -62,7 +75,7 @@ export function applyFreeInputs(workflow, bindings, { prompt, texts = [], values
   // 只允许写回已明确登记的位置：扫描出的文本输入，或用户主动固定到卡片上的配置项。
   // 不做「任意输入可写」，否则前端能改到模型文件名、图片路径这类字段。
   const allowed = new Set((bindings.textInputs || []).map((item) => `${item.node}\u0000${item.input}`));
-  const customAllowed = new Set((bindings.customBindings || []).map((item) => `${item.node}\u0000${item.input}`));
+  const customAllowed = new Set((bindings.customBindings || []).filter((item) => !item.unpinned).map((item) => `${item.node}\u0000${item.input}`));
   const textWrites = new Map();
   for (const item of Array.isArray(texts) ? texts : []) {
     const key = `${item?.node}\u0000${item?.input}`;
@@ -155,8 +168,10 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
 
   function persist() {
     const payload = { version: 1, updatedAt: nowIso(), workflows: [...entries.values()] };
-    persistQueue = persistQueue.then(() => writeJsonAtomic(file, payload)).catch((error) => logger?.warn?.(`保存自由卡片失败：${error.message}`));
-    return persistQueue;
+    // 请求必须收到落盘错误；队列本身捕获错误，保证后续保存仍可继续。
+    const write = persistQueue.then(() => writeJsonAtomic(file, payload));
+    persistQueue = write.catch((error) => logger?.warn?.(`保存自由卡片失败：${error.message}`));
+    return write;
   }
 
   function rootDir() {
@@ -357,6 +372,7 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
         label: String(raw.label || "").trim().slice(0, 60) || input,
         // 没带 surface 的旧数据默认放卡片上，和加这个字段之前的表现一致。
         surface: BINDING_SURFACES.has(raw.surface) ? raw.surface : "card",
+        ...(raw.unpinned === true ? { unpinned: true } : {}),
       });
     }
     entry.customBindings = next;
@@ -365,22 +381,95 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return entry;
   }
 
-  async function setArchived(id, archived, preset) {
+  async function setArchived(id, archived, preset, { texts = [], values = [] } = {}) {
     const entry = entries.get(id);
     if (!entry) throw new Error("自由卡片不存在");
-    entry.archivedAt = archived ? entry.archivedAt || nowIso() : null;
-    if (preset && typeof preset === "object") {
-      entry.preset = {
-        size: typeof preset.size === "string" && preset.size.trim() ? preset.size.trim() : undefined,
-        aspectRatio: canonicalAspectRatio(preset.aspectRatio) || undefined,
-        count: Number.isFinite(Number(preset.count)) && Number(preset.count) >= 1 ? Math.floor(Number(preset.count)) : undefined,
-        seed: preset.seed !== undefined && preset.seed !== null && String(preset.seed).trim() ? String(preset.seed).trim() : undefined,
-        seedFixed: String(preset.seedFixed || "") === "true" ? "true" : "false",
-      };
+    if (!Array.isArray(texts) || !Array.isArray(values)) throw new Error("配置值必须是数组");
+    const next = structuredClone(entry);
+    next.archivedAt = archived ? entry.archivedAt || nowIso() : null;
+    if (preset && typeof preset === "object" && !Array.isArray(preset)) next.preset = normalizePreset(preset);
+    if (archived) snapshotInputs(next, texts, values);
+    next.updatedAt = nowIso();
+    entries.set(id, next);
+    try {
+      await persist();
+    } catch (error) {
+      entries.set(id, entry);
+      throw error;
     }
-    entry.updatedAt = nowIso();
-    await persist();
-    return entry;
+    return next;
+  }
+
+  // 归档与另存共用白名单写入，不调用执行阶段的尺寸/种子随机化，也不写源文件。
+  function snapshotInputs(target, texts, values) {
+    const write = (writes, allowedBindings) => {
+      const allowed = new Set((allowedBindings || []).map((item) => `${item.node}\u0000${item.input}`));
+      for (const item of writes) {
+        if (!allowed.has(`${item?.node}\u0000${item?.input}`)) continue;
+        const inputs = target.workflow[String(item.node)]?.inputs;
+        if (!inputs || !Object.hasOwn(inputs, String(item.input))) continue;
+        const original = inputs[String(item.input)];
+        if (original === null || !["string", "number", "boolean"].includes(typeof original)) continue;
+        if (!["string", "number", "boolean"].includes(typeof item.value)) continue;
+        if (typeof item.value === "number" && !Number.isFinite(item.value)) continue;
+        inputs[String(item.input)] = coerceCustomValue(original, item.value);
+      }
+    };
+    write(texts, target.bindings?.textInputs);
+    write(values, (target.customBindings || []).filter((item) => !item.unpinned));
+    for (const input of target.bindings?.textInputs || []) {
+      const value = target.workflow[input.node]?.inputs?.[input.input];
+      if (typeof value === "string") input.default = value;
+    }
+  }
+
+  /**
+   * 把一条自由卡片复制成新条目。
+   *
+   * 「新增归档」用它：用户的意图是「这个工作流我想另存一套参数」，而不是覆盖原来那条。
+   * 复制带上工作流快照、绑定关系、参数预设和固定配置，同时立刻标记为已归档——
+   * 这个接口就是「新增归档」，不是普通的草稿复制。
+   *
+   * 名字加后缀避免在库里出现两条一模一样的标题。
+   */
+  async function duplicate(id, { preset, name, texts = [], values = [] } = {}) {
+    const entry = entries.get(id);
+    if (!entry) throw new Error("自由卡片不存在");
+    if (preset !== undefined && (!preset || typeof preset !== "object" || Array.isArray(preset))) throw new Error("参数预设格式不正确");
+    if (!Array.isArray(texts) || !Array.isArray(values)) throw new Error("配置值必须是数组");
+    const baseName = String(name || entry.name || "自由卡片").replace(/\s+/g, " ").trim().slice(0, 70) || "自由卡片";
+    const timestamp = nowIso();
+    const copy = {
+      ...structuredClone(entry),
+      id: randomId("free_"),
+      name: nextCopyName(baseName),
+      preset: normalizePreset(preset === undefined ? entry.preset : preset),
+      archivedAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    snapshotInputs(copy, texts, values);
+    entries.set(copy.id, copy);
+    try {
+      await persist();
+    } catch (error) {
+      entries.delete(copy.id);
+      throw error;
+    }
+    logger?.info?.(`duplicated free workflow ${entry.name} → ${copy.name} ${copy.id}`);
+    return copy;
+  }
+
+  /** 「副本」「副本 2」……按现有名字往后排，避免重名。 */
+  function nextCopyName(baseName) {
+    const taken = new Set([...entries.values()].map((item) => String(item.name)));
+    let candidate = `${baseName} 副本`;
+    let index = 2;
+    while (taken.has(candidate)) {
+      candidate = `${baseName} 副本 ${index}`;
+      index += 1;
+    }
+    return candidate;
   }
 
   function get(id) {
@@ -435,6 +524,22 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return entry;
   }
 
+  /**
+   * 执行时用的 bindings：把用户固定的配置项合并进来。
+   *
+   * 固定项存在 `entry.customBindings`，而扫描结果存在 `entry.bindings`；`applyFreeInputs`
+   * 只认后者身上的 `customBindings`。这两处以前从没接上，后果是**用户在卡片上填的配置
+   * 在执行时被静默丢弃**——界面能改、能保存、也能读回，但生成用的还是工作流原值，
+   * 表现就是「改了配置，生成结果和没改一样」。
+   *
+   * 保留 `entry.customBindings` 作为唯一存储，这里只做合并，避免两份真相各自漂移。
+   */
+  function executionBindings(entry) {
+    const bindings = entry?.bindings || {};
+    const custom = (Array.isArray(entry?.customBindings) ? entry.customBindings : []).filter((item) => !item.unpinned);
+    return { ...bindings, customBindings: custom };
+  }
+
   async function publicEntry(entry) {
     if (!entry) return null;
     await ensureBindings(entry);
@@ -468,5 +573,5 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return result;
   }
 
-  return { load, listSources, importSource, sync, setArchived, setCustomBindings, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings };
+  return { load, listSources, importSource, sync, setArchived, duplicate, setCustomBindings, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings, executionBindings };
 }
