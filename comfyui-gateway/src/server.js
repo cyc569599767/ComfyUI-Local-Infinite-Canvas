@@ -28,11 +28,14 @@ import { createPromptOptimizer } from "./prompt-optimizer.js";
 import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } from "./qwen-edit.js";
 import { createVideoInterpolator } from "./video-interpolation.js";
 import { createPreviewHub } from "./preview-hub.js";
+import { createLocalOutputReader } from "./local-output.js";
 import { absoluteTaskUrl } from "./public-url.js";
 import { createFreeWorkflowStore, applyFreeInputs, publicBinding } from "./free-workflows.js";
+import { createWorkflowAppStore } from "./workflow-apps.js";
+import { createBundleManager } from "./workflow-bundle-manager.js";
 import { describeWorkflowGraph } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
-import { runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
+import { collectOutputFiles, runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
 import { createSkinUnlockStore } from "./skin-unlocks.js";
 import { readSystemStats } from "./system-stats.js";
 import { createTaskStore } from "./tasks.js";
@@ -40,7 +43,7 @@ import { applyUpdate, checkForUpdate, detectInterruptedUpdate, getUpdateProgress
 import { uploadImages } from "./uploads.js";
 import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
 import { createWorkflowLabelStore } from "./workflow-labels.js";
-import { workflowAvailabilityProblem } from "./workflow-availability.js";
+import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep } from "./util.js";
 
 class HttpError extends Error {
@@ -501,6 +504,7 @@ export async function createGatewayApp(overrides = {}) {
     baseUrl: config.comfyUrl,
     autoDiscover: !config.desktopDistribution,
     timeoutMs: config.requestTimeoutMs,
+    downloadTimeoutMs: config.comfyDownloadTimeoutMs,
     retryAttempts: config.comfyRetryAttempts,
     retryDelayMs: config.comfyRetryDelayMs,
     logger,
@@ -508,6 +512,9 @@ export async function createGatewayApp(overrides = {}) {
   });
   const mainModels = createMainModelStore({ dataDir: config.dataDir, logger });
   await mainModels.load();
+  // ComfyUI 的 /view 偶发返回 200 却不发 body（HEAD 正常、文件已完整落盘）。
+  // 本机部署知道 comfyDir，就直接从 output 目录兜底，避免「已生成但画布收不到」。
+  const readLocalOutput = createLocalOutputReader({ comfyDir: config.comfyDir });
   // label 覆盖必须早于 registry 加载，registry 构建 entry 时会同步读取。
   const workflowLabels = createWorkflowLabelStore({ dataDir: config.dataDir, logger });
   await workflowLabels.load();
@@ -539,6 +546,8 @@ export async function createGatewayApp(overrides = {}) {
     maxWorkflowBytes: config.maxWorkflowBytes,
   });
   await freeWorkflows.load();
+  const workflowApps = createWorkflowAppStore({ dataDir: config.dataDir, logger });
+  await workflowApps.load();
   const skinUnlocks = createSkinUnlockStore({ dataDir: config.dataDir, logger });
   await skinUnlocks.load();
   const workflowVisibility = createWorkflowVisibilityStore({ dataDir: config.dataDir, logger });
@@ -589,6 +598,15 @@ export async function createGatewayApp(overrides = {}) {
   const resources = createResourceManager({ config, setup, registry, logger, workflowVisibility, mainModels });
   await resources.init();
   setup.setRuntimeProblemProvider?.((workflowId) => resources.runtimeProblemsFor(workflowId));
+  const bundles = createBundleManager({
+    freeWorkflows,
+    workflowApps,
+    setup,
+    resources,
+    comfy,
+    resolveWorkflowsDir: async () => (await resolveFreeWorkflowsDir()).dir,
+    logger,
+  });
   // 启动器只靠端口接管 ComfyUI 时可能拿不到安装目录；自由卡片仍应能工作。
   async function resolveFreeWorkflowsDir() {
     const collect = (folderPaths) =>
@@ -701,7 +719,7 @@ export async function createGatewayApp(overrides = {}) {
     res.setHeader("X-Request-Id", req.id);
     const started = Date.now();
     res.on("finish", () => {
-      if (shouldLogRequest(req.path, res.statusCode)) logger.info(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - started}ms ${req.id}`);
+      if (shouldLogRequest(req.path, res.statusCode, req.method)) logger.info(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - started}ms ${req.id}`);
     });
     next();
   });
@@ -951,6 +969,56 @@ export async function createGatewayApp(overrides = {}) {
 
   app.get("/api/skin-unlocks", (_req, res) => {
     res.json({ ok: true, unlocked: skinUnlocks.list(), entries: skinUnlocks.entries() });
+  });
+
+  // 「应用」原先只存在浏览器 localStorage，换浏览器或清缓存就没了。
+  // 落到网关后跟着数据目录走，多端和重装都能拿回来。
+  app.get("/api/workflow-apps", (_req, res) => {
+    res.json({ apps: workflowApps.list() });
+  });
+
+  app.post("/api/workflow-apps", async (req, res) => {
+    const app = await workflowApps.save(req.body?.app || req.body);
+    res.json({ app });
+  });
+
+  app.delete("/api/workflow-apps/:id", async (req, res) => {
+    const removed = await workflowApps.remove(req.params.id);
+    if (!removed) throw new HttpError("应用不存在", { status: 404, code: "workflow_app_not_found" });
+    res.json({ ok: true });
+  });
+
+  // 搬家包：把自由卡片和应用连同工作流本体、依赖清单打成一个 JSON。
+  // 导出即下载，导入前先预检——用户要知道会装什么、缺什么，再决定点不点。
+  app.get("/api/bundles/export", async (req, res) => {
+    const listParam = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    try {
+      const bundle = await bundles.buildBundleFor({
+        cardIds: listParam(req.query.cards),
+        appIds: listParam(req.query.apps),
+        exportedBy: req.query.as,
+      });
+      res.json({ ok: true, bundle });
+    } catch (error) {
+      throw new HttpError(error.message, { status: error.status || 400, code: error.code || "bundle_export_failed" });
+    }
+  });
+
+  app.post("/api/bundles/preview", async (req, res) => {
+    try {
+      res.json({ ok: true, preview: await bundles.previewBundle(req.body?.bundle ?? req.body) });
+    } catch (error) {
+      throw new HttpError(error.message, { status: error.status || 400, code: error.code || "bundle_preview_failed", details: error.details });
+    }
+  });
+
+  app.post("/api/bundles/import", async (req, res) => {
+    try {
+      const result = await bundles.importBundle(req.body?.bundle ?? req.body, { skipDuplicates: req.body?.skipDuplicates !== false });
+      res.status(201).json({ ok: true, result });
+    } catch (error) {
+      throw new HttpError(error.message, { status: error.status || 400, code: error.code || "bundle_import_failed", details: error.details });
+    }
   });
 
   app.post("/api/skin-unlocks", async (req, res) => {
@@ -1547,12 +1615,32 @@ export async function createGatewayApp(overrides = {}) {
     }
   });
 
+  // 「新增归档」：把这条卡片连同当前参数快照复制成一条新的，原卡片不受影响。
+  app.post("/api/free-workflows/:id/duplicate", async (req, res) => {
+    const body = req.body || {};
+    try {
+      const copy = await freeWorkflows.duplicate(req.params.id, { preset: body.preset, name: body.name, texts: body.texts, values: body.values });
+      res.json({ workflow: await freeWorkflows.publicEntry(copy) });
+    } catch (error) {
+      throw new HttpError(`新增归档失败：${error.message}`, { status: 400, code: "free_workflow_duplicate_failed" });
+    }
+  });
+
   app.patch("/api/free-workflows/:id", async (req, res) => {
     const body = req.body || {};
-    const entry =
-      body.name !== undefined
-        ? await freeWorkflows.rename(req.params.id, body.name)
-        : await freeWorkflows.setArchived(req.params.id, Boolean(body.archived), body.preset);
+    if ((body.texts !== undefined && !Array.isArray(body.texts)) || (body.values !== undefined && !Array.isArray(body.values))) {
+      throw new HttpError("配置值必须是数组", { status: 400, code: "free_workflow_archive_failed" });
+    }
+    const current = requireFreeWorkflow(req.params.id);
+    const archiveRequest = ["archived", "preset", "texts", "values"].some((key) => Object.hasOwn(body, key));
+    let entry;
+    if (body.name !== undefined && !archiveRequest) {
+      entry = await freeWorkflows.rename(current.id, body.name);
+    } else {
+      const archived = body.archived === undefined ? Boolean(current.archivedAt) : Boolean(body.archived);
+      if (archived && body.texts?.length) await freeWorkflows.ensureBindings(current);
+      entry = await freeWorkflows.setArchived(current.id, archived, body.preset, { texts: body.texts, values: body.values });
+    }
     res.json({ workflow: await freeWorkflows.publicEntry(entry) });
   });
 
@@ -1577,7 +1665,7 @@ export async function createGatewayApp(overrides = {}) {
     }
     const uploadedImages = await uploadImages(comfy, orderedPromptImages(req.files || []));
     const parsedSize = parseSize(body.size);
-    const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
+    const workflow = applyFreeInputs(entry.workflow, freeWorkflows.executionBindings(entry), {
       prompt: effectivePrompt,
       texts,
       values: parseFreeValues(body.values),
@@ -1601,6 +1689,7 @@ export async function createGatewayApp(overrides = {}) {
         requestId: req.id,
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
         includePreviewOutputs: true,
         logger,
       });
@@ -1642,13 +1731,18 @@ export async function createGatewayApp(overrides = {}) {
     if (entry.bindings?.prompt && !effectivePrompt.trim()) {
       throw new HttpError("这个工作流需要正向提示词", { status: 400, code: "missing_prompt" });
     }
+    // 视频工作流也可能吃音频：数字人、音频驱动这类靠一段驱动音频决定口型和台词。
+    // 前端把参考音频放在 audios 字段，这里必须和图片一起收——否则 applyFreeInputs
+    // 拿不到音频，ComfyUI 会去读工作流里写死的旧文件名，报 "Invalid audio file"。
     const uploadedImages = await uploadImages(comfy, orderedPromptImages(req.files || []));
+    const uploadedAudios = await uploadImages(comfy, orderedAudioRefFiles(req.files || []));
     const parsedSize = parseSize(body.size);
-    const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
+    const workflow = applyFreeInputs(entry.workflow, freeWorkflows.executionBindings(entry), {
       prompt: effectivePrompt,
       texts,
       values: parseFreeValues(body.values),
       uploadedImages,
+      uploadedAudios,
       size: parsedSize ? { width: parsedSize.width, height: parsedSize.height } : undefined,
       count: body.n ?? body.count,
       seed: body.seed,
@@ -1661,6 +1755,7 @@ export async function createGatewayApp(overrides = {}) {
         prompt: effectivePrompt,
         size: body.size,
         images: uploadedImages.map((image) => image.name),
+        audios: uploadedAudios.map((audio) => audio.name),
       },
     });
     tasks.enqueue(task, async (_task, progress, signal) => {
@@ -1674,6 +1769,7 @@ export async function createGatewayApp(overrides = {}) {
         requestId: req.id,
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
         includePreviewOutputs: true,
         onProgress: progress,
         logger,
@@ -1706,7 +1802,7 @@ export async function createGatewayApp(overrides = {}) {
       throw new HttpError("这个工作流需要正向提示词", { status: 400, code: "missing_prompt" });
     }
     const uploadedAudios = await uploadImages(comfy, orderedAudioRefFiles(req.files || []));
-    const workflow = applyFreeInputs(entry.workflow, entry.bindings, {
+    const workflow = applyFreeInputs(entry.workflow, freeWorkflows.executionBindings(entry), {
       prompt: effectivePrompt,
       texts,
       values: parseFreeValues(body.values),
@@ -1727,6 +1823,7 @@ export async function createGatewayApp(overrides = {}) {
         requestId: req.id,
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
         includePreviewOutputs: true,
         logger,
       });
@@ -1819,6 +1916,7 @@ export async function createGatewayApp(overrides = {}) {
         requestId: req.id,
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
         logger,
       });
     } catch (error) {
@@ -1882,6 +1980,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
     } catch (error) {
       if (abort.signal.aborted) {
@@ -1939,6 +2038,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
     } catch (error) {
       if (abort.signal.aborted) {
@@ -1994,6 +2094,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
     } catch (error) {
       if (abort.signal.aborted) {
@@ -2056,6 +2157,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
     } catch (error) {
       if (abort.signal.aborted) {
@@ -2159,6 +2261,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
     } catch (error) {
       if (abort.signal.aborted) {
@@ -2292,12 +2395,23 @@ export async function createGatewayApp(overrides = {}) {
     if (entry.category !== "upscale") {
       throw new HttpError(`模型 ${entry.name} 不是视频超分工作流`, { status: 400, code: "not_upscale_workflow" });
     }
+    // 超分端点允许 allowUnavailable（权重下载是按需的），但节点缺失必须在这里拦住：
+    // 否则 RelayVSR 这类依赖新版核心节点的工作流只会把 ComfyUI 的原始校验错误抛给用户。
+    const missingClasses = missingNodeClasses(entry.workflow, setup.hasNodeClass?.bind(setup));
+    if (missingClasses.length) {
+      throw new HttpError(
+        `模型 ${entry.name} 需要当前 ComfyUI 尚未提供的节点：${missingClasses.join("、")}。请升级 ComfyUI 后重启再试。`,
+        { status: 409, code: "workflow_nodes_missing", details: { workflowId: entry.id, nodes: missingClasses } },
+      );
+    }
     const videoFiles = orderedVideoRefFiles(req.files || []);
     if (!videoFiles.length) throw new HttpError("视频超分请求缺少输入视频", { status: 400, code: "missing_input_video" });
     const uploadedVideos = await uploadImages(comfy, videoFiles);
     const params = parseParams(body.params);
     // SeedVR2 的「最高画质」默认值在 16GB 卡上必 OOM；按实际显存分档收敛。
-    const vramGb = gpuVramTotalGb(await readSystemStats({ cacheMs: 30000 }));
+    // RelayVSR 没有 batch/目标分辨率这两个可调项（倍率由权重决定），不能套用这套分档。
+    const isRelayVsr = /relayvsr/i.test(String(entry.id || entry.name || ""));
+    const vramGb = isRelayVsr ? 0 : gpuVramTotalGb(await readSystemStats({ cacheMs: 30000 }));
     const tier = vramGb > 0 && vramGb <= 18 ? { resolution: 1024, batch: 1 } : vramGb > 0 && vramGb <= 26 ? { resolution: 1280, batch: 2 } : null;
     if (tier) {
       const requestedResolution = Number(params.resolution) || 0;
@@ -2336,6 +2450,7 @@ export async function createGatewayApp(overrides = {}) {
         requestId: req.id,
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
         onProgress: progress,
         logger,
       });
@@ -2528,6 +2643,7 @@ export async function createGatewayApp(overrides = {}) {
         loraCatalog: setup.loraNames(),
         modelAliasFor: setup.modelAliasFor,
         loaderSpecs: setup.modelLoaderSpecs?.(),
+        readLocalOutput,
       });
       let file = result.files[0];
       if (interpolation !== "off") {
@@ -2610,6 +2726,59 @@ export async function createGatewayApp(overrides = {}) {
     const file = tasks.contentPath(req.params.id);
     if (!file) throw new HttpError("视频文件还没有生成完成", { status: 409, code: "video_not_ready" });
     res.sendFile(path.basename(file), { root: path.dirname(file), dotfiles: "deny" });
+  });
+
+  // 「已经生成、但文件没取回来」的恢复入口。
+  // 这类任务不该重跑：ComfyUI 那边可能是几十秒甚至几十分钟的采样，重来一次白烧算力。
+  // 这里只按记录的 promptId 查 history、再从本地输出目录把它取回来。
+  app.post("/v1/videos/:id/recover", async (req, res) => {
+    const task = tasks.get(req.params.id);
+    if (!task) throw new HttpError("视频任务不存在", { status: 404, code: "video_not_found" });
+    if (task.status === "completed") {
+      res.json({ ...taskResponse(req, task), recovered: false });
+      return;
+    }
+    if (task.status === "running" || task.status === "queued" || task.status === "cancelling") {
+      throw new HttpError("任务还在执行中，无需恢复", { status: 409, code: "video_still_running" });
+    }
+    // 只有「生成成功但取回失败」的任务才能这样救：它的 promptId 指向真实产物。
+    if (task.error !== "output_download_failed" && !(task.error && /取回文件失败|output_download_failed/.test(String(task.error)))) {
+      throw new HttpError("这个任务不是「文件未取回」导致的失败，请重新生成", { status: 409, code: "video_not_recoverable" });
+    }
+    if (!readLocalOutput) {
+      throw new HttpError("没有配置 ComfyUI 目录，无法从本地取回文件；请重新生成", { status: 409, code: "local_output_unavailable" });
+    }
+    const promptId = task.promptId || task.partialOutput?.promptId;
+    if (!promptId) throw new HttpError("任务缺少 promptId，无法恢复", { status: 409, code: "video_recover_no_prompt" });
+    let recovered = null;
+    try {
+      const history = await comfy.history(promptId);
+      const files = collectOutputFiles(history, {});
+      for (const file of files) {
+        const local = await readLocalOutput(file);
+        if (!local) continue;
+        recovered = { file, buffer: local.buffer, mimeType: local.contentType };
+        break;
+      }
+    } catch (error) {
+      throw new HttpError(`读取 ComfyUI 输出失败：${error?.message || error}`, { status: 502, code: "video_recover_failed" });
+    }
+    if (!recovered) {
+      throw new HttpError("在 ComfyUI 输出目录里没有找到这个任务的产物", { status: 404, code: "video_recover_file_missing" });
+    }
+    const saved = await tasks.saveOutput(task.id, recovered.buffer, extFromMime(recovered.mimeType, recovered.file.filename, "mp4"));
+    task.status = "completed";
+    task.progress = 1;
+    task.url = saved.url;
+    task.file = saved.file;
+    task.mimeType = recovered.mimeType;
+    task.bytes = recovered.buffer.length;
+    task.error = null;
+    task.completedAt = nowIso();
+    task.partialOutput = null;
+    await tasks.persistNow();
+    logger.info(`视频任务 ${task.id} 已从本地输出恢复（${recovered.file.filename}）${req.id}`);
+    res.json({ ...taskResponse(req, task), recovered: true });
   });
 
   app.post("/v1/videos/:id/cancel", async (req, res) => {

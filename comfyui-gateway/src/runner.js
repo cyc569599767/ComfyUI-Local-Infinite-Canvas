@@ -98,7 +98,7 @@ function isOutOfMemoryError(error) {
   return OUT_OF_MEMORY_PATTERN.test(`${error?.message || ""} ${details}`);
 }
 
-function collectOutputFiles(history, { includePreview = false } = {}) {
+export function collectOutputFiles(history, { includePreview = false } = {}) {
   const files = [];
   const seen = new Set();
   // ComfyUI 的 SaveAudio / SaveAudioAdvanced 把结果放在 outputs[node].audio 里
@@ -118,7 +118,7 @@ function collectOutputFiles(history, { includePreview = false } = {}) {
   return files;
 }
 
-export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 * 1000, pollIntervalMs = 750, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
+export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 * 1000, pollIntervalMs = 750, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false, readLocalOutput = null }) {
   if (signal?.aborted) throw new GenerationError("生成已取消", { status: 400, code: "cancelled" });
   const resolved = resolveForMode(entry, context.mode);
   const params = resolved.baseModelParams ? { ...resolved.baseModelParams, ...(context.params || {}) } : context.params;
@@ -161,12 +161,32 @@ export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 *
       const timeout = Number(timeoutMs);
       const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
       let history = null;
+      // 轮询期间只上报三个固定点，画布会一直停在 5%，用户以为卡死。
+      // 这里按"已经等了多久"折算一个 0.05→0.60 的渐进值，让界面能看出还在走。
+      const startedAt = Date.now();
+      let lastReported = 0.05;
+      let consecutivePollErrors = 0;
+      let polls = 0;
       while (Date.now() < deadline) {
         if (signal?.aborted) {
           await cancel();
           throw new GenerationError("生成已取消", { status: 400, code: "cancelled" });
         }
-        history = await comfy.history(promptId, { signal });
+        try {
+          polls += 1;
+          history = await comfy.history(promptId, { signal });
+          consecutivePollErrors = 0;
+        } catch (error) {
+          if (error?.code === "cancelled" || signal?.aborted) throw error;
+          // 轮询偶尔会被对端掐断（"terminated"、ComfyUI 重启、代理抖动）。
+          // 任务可能已经跑完了，绝不能因为一次查询失败就判整个生成失败。
+          consecutivePollErrors += 1;
+          const retryable = error?.code === "comfy_unreachable" || error?.code === "comfy_timeout" || error?.code === "comfy_aborted";
+          if (!retryable || consecutivePollErrors > 12) throw error;
+          logger?.warn?.(`查询任务 ${promptId} 失败（第 ${consecutivePollErrors} 次），继续等待：${error.message}`);
+          await sleep(Math.min(pollIntervalMs * consecutivePollErrors, 5000));
+          continue;
+        }
         const failure = historyError(history);
         if (failure) {
           running = false;
@@ -175,6 +195,18 @@ export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 *
         if (historyCompleted(history)) {
           running = false;
           break;
+        }
+        // 没有真实步数可读时，用一个"渐近"进度：既看已经等了多久，也看轮询了多少次。
+        // 只看时长的话，短任务（或测试里 5ms 一轮）永远涨不到 1%，用户看到的还是死进度条。
+        const elapsed = Date.now() - startedAt;
+        const ratio = Number.isFinite(deadline) ? Math.min(1, elapsed / Math.max(1, deadline - startedAt)) : 0;
+        const byTime = Number.isFinite(deadline) ? 0.05 + ratio * 0.55 : Math.min(0.6, 0.05 + (elapsed / 600000) * 0.55);
+        // 轮询次数给一个缓慢逼近 0.6 的下界，保证「有动静」，但不超过按时的上限太多。
+        const byPolls = 0.05 + 0.55 * (1 - Math.exp(-polls / 40));
+        const estimate = Math.min(0.6, Math.max(byTime, byPolls));
+        if (estimate > lastReported + 0.01) {
+          lastReported = estimate;
+          onProgress?.({ phase: "running", promptId, progress: Number(estimate.toFixed(3)) });
         }
         await sleep(pollIntervalMs);
       }
@@ -203,7 +235,40 @@ export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 *
 
       const outputs = [];
       for (const file of files) {
-        const viewed = await comfy.view(file, { signal });
+        // 用户已经点停止时不要再读盘：几十 MB 的视频读完也没人要，纯属拖慢取消。
+        if (signal?.aborted) throw new GenerationError("生成已取消", { status: 400, code: "cancelled" });
+        // 本机部署优先读磁盘：history 已经报完成，文件必然落盘，读盘零延迟且不受
+        // /view 偶发「200 但不发 body」的影响。远端 ComfyUI（无 comfyDir）仍走 HTTP。
+        let viewed = (await readLocalOutput?.(file)) || null;
+        if (viewed) {
+          logger?.info?.(`${file.filename} 直接从本地输出目录读取（跳过 /view）`);
+        } else {
+          try {
+            viewed = await comfy.view(file, { signal });
+          } catch (error) {
+            // 下载途中文件才写完、或路径与预期不同，再补一次本地读取。
+            const retryLocal = (await readLocalOutput?.(file)) || null;
+            if (retryLocal) {
+              logger?.warn?.(`取回 ${file.filename} 失败（${error?.message || error}），已改为从本地输出目录读取`);
+              viewed = retryLocal;
+            } else {
+              // 走到这里说明 ComfyUI 已经跑完、文件就在它那边。
+              // 把 promptId 和文件名带出去，用户至少能自己从 ComfyUI 输出目录取回，
+              // 而不是得到一个「生成失败」后连去哪个文件都不知道。
+              throw new GenerationError(`视频已生成，但取回文件失败：${error?.message || error}`, {
+                status: 502,
+                code: "output_download_failed",
+                details: {
+                  promptId,
+                  filename: file.filename,
+                  subfolder: file.subfolder || "",
+                  type: file.type || "output",
+                  cause: error?.message || String(error),
+                },
+              });
+            }
+          }
+        }
         const mimeType = /^application\/octet-stream$/i.test(viewed.contentType) ? mimeFromFilename(file.filename) : viewed.contentType;
         outputs.push({
           buffer: viewed.buffer,
@@ -257,7 +322,7 @@ export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 *
   });
 }
 
-export async function runImage({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
+export async function runImage({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false, readLocalOutput = null }) {
   const count = context.count || 1;
   const all = [];
   let lastPromptId;
@@ -277,6 +342,7 @@ export async function runImage({ entry, context, comfy, timeoutMs, pollIntervalM
       modelAliasFor,
       loaderSpecs,
       includePreviewOutputs,
+      readLocalOutput,
       onProgress: (event) => onProgress?.({ ...event, attempt, attempts: count }),
     });
     lastPromptId = result.promptId;
@@ -286,8 +352,8 @@ export async function runImage({ entry, context, comfy, timeoutMs, pollIntervalM
   return { promptId: lastPromptId, files: all.slice(0, count), usedSeed: lastUsedSeed };
 }
 
-export async function runVideo({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
-  const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, loraCatalog, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress });
+export async function runVideo({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, loraCatalog, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false, readLocalOutput = null }) {
+  const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, loraCatalog, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress, readLocalOutput });
   const video = result.files.find((file) => {
     const bytes = file.buffer;
     const imageBytes = bytes?.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) ||
@@ -303,8 +369,8 @@ export async function runVideo({ entry, context, comfy, timeoutMs, pollIntervalM
 }
 
 // 音频（音色设计 / 音色克隆 / 音乐生成）产物：按 mime 或扩展名挑一条，优先非 temp。
-export async function runAudio({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false }) {
-  const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress });
+export async function runAudio({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, onProgress, logger, modelAliasFor = null, loaderSpecs = MODEL_LOADER_SPECS, includePreviewOutputs = false, readLocalOutput = null }) {
+  const result = await runWorkflow({ entry, context, comfy, timeoutMs, pollIntervalMs, signal, requestId, logger, modelAliasFor, loaderSpecs, includePreviewOutputs, onProgress, readLocalOutput });
   const audio = result.files.find((file) => {
     if (file.type === "temp") return false;
     return /^audio\//i.test(file.mimeType) || /\.(flac|mp3|opus|wav|ogg|m4a)$/i.test(file.filename);
