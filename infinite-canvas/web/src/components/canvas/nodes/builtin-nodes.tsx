@@ -1,4 +1,4 @@
-import { Box, Download, FileText, Group, Image as ImageIcon, Layers3, Mic, Music2, Settings2, Sparkles, Video } from "lucide-react";
+import { Box, Clapperboard, Download, FileText, Group, Image as ImageIcon, Layers3, Mic, Music2, Settings2, Sparkles, Video } from "lucide-react";
 import { message } from "antd";
 import { saveAs } from "file-saver";
 
@@ -9,8 +9,9 @@ import { registerNodeDefinitions } from "@/lib/canvas/node-registry";
 import { MODEL3D_DEFAULT_SIZE, MODEL3D_NODE_TYPE, STAGE3D_DEFAULT_SIZE, STAGE3D_NODE_TYPE } from "@/lib/canvas/model3d";
 import { Model3DNodeContent } from "@/components/canvas/model3d-node-content";
 import { Stage3DNodeContent } from "@/components/canvas/stage-3d-node-content";
+import { WorkbenchNodeContent, WorkbenchPanelHost } from "@/components/canvas/workbench-node-content";
 import { CanvasNodeType, isAudioNodeType, type CanvasNodeData } from "@/types/canvas";
-import type { CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-plugin";
+import type { CanvasNodeContext, CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-plugin";
 
 // Extensible metadata for built-in nodes, reusing NODE_SPECS for size and initial metadata.
 // Rendering remains in canvas-node's internal renderer, so no Content component is provided.
@@ -88,6 +89,33 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.VoiceDesign, title: i18n.t("canvas.nodeTypes.voiceDesign"), icon: <Mic className={iconClass} />, minimapColor: "#c084fc", showInCreateMenu: false, resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.FreeCard, title: i18n.t("canvas.freeCard.title"), icon: <Sparkles className={iconClass} />, minimapColor: "#eab308", hasSourceHandle: false },
+    // 工作台从双击菜单的「工作台」子菜单进入，不出现在普通节点列表里；
+    // 它承载完整编辑面板，本身不产出媒体，所以没有输出连接点。
+    {
+        type: CanvasNodeType.Workbench,
+        title: i18n.t("canvas.workbench.title"),
+        icon: <Clapperboard className={iconClass} />,
+        minimapColor: "#f472b6",
+        // 保留在菜单数据里，由 NodeCreateMenu 单独挑出来放进「工作台」子菜单；
+        // 它不会和普通节点混排，因为主列表显式排除了这个类型。
+        hasSourceHandle: false,
+        hasTargetHandle: false,
+        description: i18n.t("canvas.workbench.storyboardDescription"),
+        defaultMetadata: { status: "idle", workbenchKind: "storyboard" },
+        Content: WorkbenchNodeContent,
+        // 面板按 workbenchKind 分发，三种工作台共用这一个入口。
+        Panel: WorkbenchPanelHost,
+        // 单击只选中，双击才打开：编辑器面板占满屏幕，误触就弹出来很烦，
+        // 而且单击开面板会让双击立刻把自己关掉。
+        clickOpensPanel: false,
+        autoOpenPanel: false,
+        // 双击是进入工作台的唯一入口；单击标题会进重命名，两者不能抢同一个手势。
+        // 参数类型必须写明：这个数组经过 .map() 后失去上下文推断。
+        onDoubleClick: (ctx: CanvasNodeContext) => {
+            ctx.openPanel();
+            return true;
+        },
+    },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
     MODEL3D_DEFINITION,
     STAGE3D_DEFINITION,

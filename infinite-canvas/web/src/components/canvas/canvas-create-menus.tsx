@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
-import { ImageIcon, List, Mic, Music2, Settings2, Video, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Clapperboard, ImageIcon, List, Mic, Music2, Scissors, Settings2, User, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -116,19 +117,31 @@ export function ConnectionCreateOption({ theme, icon, title, description, onClic
     );
 }
 
-export function NodeCreateMenu({ position, scale = 1, onCreate, onClose }: { position: Position; scale?: number; onCreate: (type: string) => void; onClose: () => void }) {
+export function NodeCreateMenu({ position, scale = 1, onCreate, onClose }: { position: Position; scale?: number; onCreate: (type: string, metadata?: Record<string, unknown>) => void; onClose: () => void }) {
     const theme = useCanvasTheme();
     const { t } = useTranslation();
     useNodeRegistryVersion();
     const menuRef = useRef<HTMLDivElement>(null);
-    const definitions = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false);
+    // 工作台走自己的子菜单入口，所以不能被 showInCreateMenu 这个「普通节点列表」开关筛掉，
+    // 否则先过滤再挑 type 会永远得到空数组，子菜单点了没反应。
+    const allDefinitions = listNodeDefinitions();
+    const workbenches = allDefinitions.filter((def) => def.type === CanvasNodeType.Workbench && def.showInCreateMenu !== false);
+    const plainDefinitions = allDefinitions.filter((def) => def.type !== CanvasNodeType.Workbench && def.showInCreateMenu !== false);
+    const [workbenchOpen, setWorkbenchOpen] = useState(false);
     // Close automatically when clicking outside the menu.
     useEffect(() => {
         const handlePointerDown = (event: PointerEvent) => {
             if (menuRef.current && !menuRef.current.contains(event.target as Node)) onClose();
         };
-        document.addEventListener("pointerdown", handlePointerDown, true);
-        return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+        // 子菜单被 Portal 到 body，已不在 menuRef 的 DOM 子树里。
+        // 不排除它的话，点一下子菜单就会先被判定为「点了外面」而整个关掉。
+        const handlePointerDownWithPortal = (event: PointerEvent) => {
+            const target = event.target as Element | null;
+            if (target?.closest?.("[data-workbench-menu]")) return;
+            handlePointerDown(event);
+        };
+        document.addEventListener("pointerdown", handlePointerDownWithPortal, true);
+        return () => document.removeEventListener("pointerdown", handlePointerDownWithPortal, true);
     }, [onClose]);
     return (
         <div
@@ -147,10 +160,150 @@ export function NodeCreateMenu({ position, scale = 1, onCreate, onClose }: { pos
                 </button>
             </div>
             <div className="grid gap-0.5">
-                {definitions.map((def) => (
+                {plainDefinitions.map((def) => (
                     <ConnectionCreateOption key={def.type} theme={theme} icon={def.icon} title={getNodeSpec(def.type).title} description={def.description} onClick={() => onCreate(def.type)} />
                 ))}
+                {workbenches.length ? (
+                    <WorkbenchSubmenu
+                        theme={theme}
+                        open={workbenchOpen}
+                        onOpenChange={setWorkbenchOpen}
+                        onCreate={(kind) => {
+                            setWorkbenchOpen(false);
+                            // 三种工作台是同一个节点类型，靠 metadata.workbenchKind 区分。
+                            onCreate(CanvasNodeType.Workbench, { workbenchKind: kind });
+                        }}
+                    />
+                ) : null}
             </div>
+        </div>
+    );
+}
+
+/**
+ * 工作台清单。
+ *
+ * 三种工作台共用一个节点类型，子菜单里必须按 kind 各列一项并写具体名字：
+ * 都叫「工作台」的话，用户点进去之前根本不知道里面是什么。
+ */
+const WORKBENCH_ITEMS = [
+    { kind: "storyboard" as const, icon: <Clapperboard className="size-4" />, titleKey: "canvas.workbench.storyboard", descriptionKey: "canvas.workbench.storyboardDescription" },
+    { kind: "digital-human" as const, icon: <User className="size-4" />, titleKey: "canvas.workbench.digitalHuman", descriptionKey: "canvas.workbench.digitalHumanDescription" },
+    { kind: "video-editor" as const, icon: <Scissors className="size-4" />, titleKey: "canvas.workbench.videoEditor", descriptionKey: "canvas.workbench.videoEditorDescription" },
+];
+
+/**
+ * 「工作台」hover 子菜单。
+ *
+ * 工作台承载的是完整编辑面板（故事分镜导演台、数字人、视频编辑），和普通节点不是一类东西，
+ * 所以单独分组；主项本身不创建任何东西，必须选到具体工作台才建卡片，
+ * 避免用户点一下就得到一个不知道是什么的空节点。
+ */
+function WorkbenchSubmenu({
+    theme,
+    open,
+    onOpenChange,
+    onCreate,
+}: {
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    onCreate: (kind: (typeof WORKBENCH_ITEMS)[number]["kind"]) => void;
+}) {
+    const { t } = useTranslation();
+    const closeTimer = useRef<number | null>(null);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    // 子菜单必须 Portal 到 body：主菜单是 overflow-y-auto，子菜单留在里面会被裁掉，
+    // 用户只能看到一条横向滚动条、菜单不出现（实测就是这样）。
+    const [anchor, setAnchor] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
+    const cancelClose = () => {
+        if (closeTimer.current !== null) {
+            window.clearTimeout(closeTimer.current);
+            closeTimer.current = null;
+        }
+    };
+    // 鼠标从主项移到子菜单要穿过几像素空隙，立刻关闭会让子菜单点不到。
+    const scheduleClose = () => {
+        cancelClose();
+        closeTimer.current = window.setTimeout(() => onOpenChange(false), 180);
+    };
+    // 用视口坐标：主菜单有 transform: scale()，getBoundingClientRect 拿到的已经是缩放后的真实位置。
+    const place = useCallback(() => {
+        const rect = triggerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const gap = 4;
+        // 要放得下「故事分镜导演台」和完整的一行说明：230 会把说明截成「…」。
+        const width = 320;
+        // 右侧放不下就翻到左边，避免贴边时整个子菜单跑出屏幕。
+        const flip = rect.right + gap + width > window.innerWidth - 8;
+        const left = flip ? Math.max(8, rect.left - gap - width) : rect.right + gap;
+        // 高度受视口剩余空间约束，超长时自身滚动而不是被裁。
+        setAnchor({ left, top: Math.max(8, Math.min(rect.top, window.innerHeight - 120)), maxHeight: Math.max(160, window.innerHeight - rect.top - 16) });
+    }, []);
+    useEffect(() => {
+        if (!open) return;
+        place();
+        // 滚动或改变窗口大小时主菜单可能移动，子菜单要跟着重算，否则会飘在错误位置。
+        const onMove = () => place();
+        window.addEventListener("scroll", onMove, true);
+        window.addEventListener("resize", onMove);
+        return () => {
+            window.removeEventListener("scroll", onMove, true);
+            window.removeEventListener("resize", onMove);
+        };
+    }, [open, place]);
+    useEffect(() => cancelClose, []);
+    return (
+        <div className="relative" onMouseEnter={() => { cancelClose(); onOpenChange(true); }} onMouseLeave={scheduleClose}>
+            <button
+                ref={triggerRef}
+                type="button"
+                className="flex h-11 w-full items-center gap-2.5 rounded-xl px-2 text-left"
+                style={{ color: theme.node.text }}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                data-workbench-trigger
+                onMouseEnter={(event) => (event.currentTarget.style.background = theme.node.fill)}
+                onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}
+                onClick={() => onOpenChange(!open)}
+            >
+                <span className="grid size-9 shrink-0 place-items-center rounded-lg" style={{ background: theme.node.fill, color: theme.node.muted }}>
+                    <Clapperboard className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                    {/* 主项只留标题：副标题在这里没有信息量（子菜单项自己会说明），
+                        多一行只会让菜单更长、更花。 */}
+                    <span className="flex items-center gap-2 text-sm font-medium leading-5">
+                        {t("canvas.createMenu.workbench")}
+                        <span className="text-xs" style={{ color: theme.node.muted }}>▸</span>
+                    </span>
+                </span>
+            </button>
+            {open && anchor
+                ? createPortal(
+                      <div
+                          className="fixed z-[140] w-[320px] overflow-y-auto rounded-xl border p-1 shadow-2xl backdrop-blur thin-scrollbar"
+                          style={{ left: anchor.left, top: anchor.top, maxHeight: anchor.maxHeight, background: theme.node.panel, borderColor: theme.node.stroke }}
+                          role="menu"
+                          data-workbench-menu
+                          onMouseEnter={cancelClose}
+                          onMouseLeave={scheduleClose}
+                          onPointerDown={(event) => event.stopPropagation()}
+                      >
+                          {WORKBENCH_ITEMS.map((item) => (
+                              <ConnectionCreateOption
+                                  key={item.kind}
+                                  theme={theme}
+                                  icon={item.icon}
+                                  title={t(item.titleKey)}
+                                  description={t(item.descriptionKey)}
+                                  onClick={() => onCreate(item.kind)}
+                              />
+                          ))}
+                      </div>,
+                      document.body,
+                  )
+                : null}
         </div>
     );
 }

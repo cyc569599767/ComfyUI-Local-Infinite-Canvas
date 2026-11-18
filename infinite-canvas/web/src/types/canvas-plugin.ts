@@ -130,6 +130,9 @@ export type CanvasNodeDefinition = {
     bare?: boolean; // Renders only the content on the canvas: no title, card surface, border or connection handles.
     dragHeader?: boolean; // Persistent card header for moving nodes whose content consumes drag gestures.
     autoOpenPanel?: boolean; // Opens a custom Panel on click; automatic opening otherwise applies only to built-ins.
+    // 明确要求「只有双击才打开面板」。用于编辑器类节点：单击摊开面板会让双击的第二下
+    // 落到遮罩上，把刚打开的面板关掉。
+    clickOpensPanel?: boolean;
     useBuiltinPanel?: CanvasBuiltinPanelConfig; // Reuses the built-in generation panel instead of a custom Panel.
     // Lets the host provide an Interaction/Move toolbar toggle and control pointer events through metadata.interactive.
     interactionToggle?: boolean;

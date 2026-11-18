@@ -18,6 +18,8 @@ export enum CanvasNodeType {
     /** 音色设计：与空音频节点完全同构，仅默认 audioMode 为 voice-design。 */
     VoiceDesign = "voice-design",
     FreeCard = "free-card",
+    /** 工作台：承载独立的专业编辑面板（故事分镜导演台等），本身不产出媒体。 */
+    Workbench = "workbench",
     Group = "group",
 }
 
@@ -173,6 +175,14 @@ export type CanvasNodeMetadata = {
     seedFixed?: string;
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
+    /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台。 */
+    workbenchKind?: "storyboard" | "digital-human" | "video-editor";
+    /** 该工作台绑定的故事分镜项目 id（存在网关）。 */
+    storyboardProjectId?: string;
+    /** 数字人镜头的音频区间与运镜，导出时要用，必须跟着卡片一起存。 */
+    digitalHumanSegment?: { start: number; end: number; camera: string; reference?: string };
+    /** 视频编辑工作台导出的片段在时间线上的位置与裁剪信息。 */
+    editTimeline?: { start: number; inPoint: number; outPoint: number; track: number; volume: number; totalSeconds: number };
     freeCardTextValues?: Record<string, string>;
     /** 固定配置项在当前节点上的取值，键为 `节点id\u0000输入名`。 */
     freeCardValues?: Record<string, string | number | boolean>;

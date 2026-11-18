@@ -20,6 +20,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
     [CanvasNodeType.VoiceDesign]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.voiceDesign"); } },
     [CanvasNodeType.FreeCard]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.freeCard"); } },
+    [CanvasNodeType.Workbench]: { width: 360, height: 220, get title() { return i18n.t("canvas.nodeTypes.workbench"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
@@ -52,6 +53,11 @@ export const NODE_SPECS = {
     [CanvasNodeType.FreeCard]: {
         width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.FreeCard].title; },
         metadata: { status: "idle", prompt: "", generationMode: "image" },
+    },
+    // 工作台不产出媒体，metadata 只存它承载的是哪个工具、以及绑定哪份数据。
+    [CanvasNodeType.Workbench]: {
+        width: 360, height: 220, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Workbench].title; },
+        metadata: { status: "idle", workbenchKind: "storyboard" },
     },
     [CanvasNodeType.Group]: {
         width: 760, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Group].title; },

@@ -32,6 +32,8 @@ import { createLocalOutputReader } from "./local-output.js";
 import { absoluteTaskUrl } from "./public-url.js";
 import { createFreeWorkflowStore, applyFreeInputs, publicBinding } from "./free-workflows.js";
 import { createWorkflowAppStore } from "./workflow-apps.js";
+import { createStoryboardStore } from "./storyboard-projects.js";
+import { createStoryboardAi } from "./storyboard-ai.js";
 import { createBundleManager } from "./workflow-bundle-manager.js";
 import { describeWorkflowGraph } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
@@ -548,6 +550,9 @@ export async function createGatewayApp(overrides = {}) {
   await freeWorkflows.load();
   const workflowApps = createWorkflowAppStore({ dataDir: config.dataDir, logger });
   await workflowApps.load();
+  const storyboards = createStoryboardStore({ dataDir: config.dataDir, logger });
+  await storyboards.load();
+  const storyboardAi = createStoryboardAi({ logger, comfy });
   const skinUnlocks = createSkinUnlockStore({ dataDir: config.dataDir, logger });
   await skinUnlocks.load();
   const workflowVisibility = createWorkflowVisibilityStore({ dataDir: config.dataDir, logger });
@@ -986,6 +991,61 @@ export async function createGatewayApp(overrides = {}) {
     const removed = await workflowApps.remove(req.params.id);
     if (!removed) throw new HttpError("应用不存在", { status: 404, code: "workflow_app_not_found" });
     res.json({ ok: true });
+  });
+
+  // ---- 故事分镜导演台 ----
+  // 数据落在网关而不是浏览器：分镜表是长周期编辑的产物，
+  // 换浏览器或清缓存就没了等于白做。
+  app.get("/api/storyboards", (_req, res) => {
+    res.json({ projects: storyboards.list() });
+  });
+
+  app.get("/api/storyboards/:id", (req, res) => {
+    const project = storyboards.get(req.params.id);
+    if (!project) throw new HttpError("分镜项目不存在", { status: 404, code: "storyboard_not_found" });
+    res.json({ project });
+  });
+
+  app.post("/api/storyboards", async (req, res) => {
+    const project = await storyboards.save(req.body?.project || req.body);
+    res.status(201).json({ project });
+  });
+
+  app.put("/api/storyboards/:id", async (req, res) => {
+    const project = await storyboards.save({ ...(req.body?.project || req.body), id: req.params.id });
+    res.json({ project });
+  });
+
+  app.delete("/api/storyboards/:id", async (req, res) => {
+    const removed = await storyboards.remove(req.params.id);
+    if (!removed) throw new HttpError("分镜项目不存在", { status: 404, code: "storyboard_not_found" });
+    res.json({ ok: true });
+  });
+
+  // 导出成 ComfyUI 原生导演台能吃的 storyboard_json，方便把整份项目搬回去跑批量队列。
+  app.get("/api/storyboards/:id/comfy-json", (req, res) => {
+    const board = storyboards.toComfyStoryboard(req.params.id);
+    if (!board) throw new HttpError("分镜项目不存在", { status: 404, code: "storyboard_not_found" });
+    res.json({ storyboardJson: JSON.stringify(board) });
+  });
+
+  app.post("/api/storyboards/breakdown", async (req, res) => {
+    const body = req.body || {};
+    try {
+      const board = await storyboardAi.breakdown({
+        story: body.story,
+        style: body.style,
+        maxShotSeconds: body.maxShotSeconds,
+        targetShotCount: body.targetShotCount,
+        // 默认走本机 llama.cpp：本地 ComfyUI 渠道没有 chat 接口，
+        // 要求云端 key 会让这个功能在默认配置下永远不可用。
+        engine: body.engine === "cloud" ? "cloud" : "local",
+        cloud: body.cloud,
+      });
+      res.json({ board });
+    } catch (error) {
+      throw new HttpError(error?.message || "AI 拆解失败", { status: error?.status || 502, code: error?.code || "storyboard_ai_failed", details: error?.details });
+    }
   });
 
   // 搬家包：把自由卡片和应用连同工作流本体、依赖清单打成一个 JSON。

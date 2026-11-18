@@ -756,7 +756,9 @@ function NodeContent(props: NodeContentRendererProps) {
     return content;
 }
 
-const nodeContentRenderers = {
+// 只登记有专属渲染器的内置类型：没有登记的类型走 definition.Content（插件节点、工作台）。
+// 必须显式标注为 Partial，否则索引访问会被推成「字面量键的精确对象」，新增类型就报错。
+const nodeContentRenderers: Partial<Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>> = {
     [CanvasNodeType.Text]: TextContent,
     [CanvasNodeType.Image]: ImageNodeContent,
     [CanvasNodeType.Config]: EmptyImageContent,
@@ -766,7 +768,7 @@ const nodeContentRenderers = {
     [CanvasNodeType.VoiceDesign]: AudioNodeContent,
     [CanvasNodeType.FreeCard]: FreeCardNodeContent,
     [CanvasNodeType.Group]: GroupNodeContent,
-} satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
+};
 
 function FreeCardNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();

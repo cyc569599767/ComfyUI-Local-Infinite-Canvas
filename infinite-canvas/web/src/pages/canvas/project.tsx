@@ -1247,7 +1247,7 @@ function InfiniteCanvasPage() {
         applyAgentOps,
     });
     const createNode = useCallback(
-        (type: CanvasNodeTypeId, position?: Position) => {
+        (type: CanvasNodeTypeId, position?: Position, extraMetadata?: Record<string, unknown>) => {
             const targetPosition = position || getCanvasCenter();
             const configMetadata =
                 type === CanvasNodeType.Config
@@ -1258,7 +1258,8 @@ function InfiniteCanvasPage() {
                           ...(recallNodeSettings(type) || {}),
                       }
                     : undefined;
-            const newNode = createCanvasNode(type, targetPosition, configMetadata);
+            // 工作台靠 workbenchKind 区分具体工具，所以创建时要能把 kind 带进 metadata。
+            const newNode = createCanvasNode(type, targetPosition, { ...(configMetadata || {}), ...(extraMetadata || {}) } as CanvasNodeMetadata);
 
             setNodes((prev) => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
@@ -1768,6 +1769,11 @@ function InfiniteCanvasPage() {
             const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
             if (clickedDefinition?.hidePanel) {
                 // Clicking a display-only plugin node selects it without opening a lower panel.
+                setDialogNodeId((current) => (current === clickedNodeId ? current : null));
+            } else if (clickedDefinition?.clickOpensPanel === false) {
+                // 工作台这类「双击才打开」的节点：单击只选中。
+                // 否则单击先摊开面板，双击的第二下正好落在遮罩上把面板关掉，
+                // 用户看到的是「双击打不开」。
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
             } else if (clickedNode?.type !== CanvasNodeType.Group) {
                 setDialogNodeId(clickedNodeId);
@@ -5167,8 +5173,8 @@ function InfiniteCanvasPage() {
                         <NodeCreateMenu
                             position={nodeCreatePosition}
                             scale={viewport.k}
-                            onCreate={(type) => {
-                                createNode(type, nodeCreatePosition);
+                            onCreate={(type, metadata) => {
+                                createNode(type, nodeCreatePosition, metadata);
                                 setNodeCreatePosition(null);
                             }}
                             onClose={() => setNodeCreatePosition(null)}
