@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, ImageIcon, List, Mic, Music2, Scissors, Settings2, User, Video, X } from "lucide-react";
+import { Clapperboard, ImageIcon, List, Mic, Music2, Scissors, Scroll, Settings2, User, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -190,6 +190,7 @@ const WORKBENCH_ITEMS = [
     { kind: "storyboard" as const, icon: <Clapperboard className="size-4" />, titleKey: "canvas.workbench.storyboard", descriptionKey: "canvas.workbench.storyboardDescription" },
     { kind: "digital-human" as const, icon: <User className="size-4" />, titleKey: "canvas.workbench.digitalHuman", descriptionKey: "canvas.workbench.digitalHumanDescription" },
     { kind: "video-editor" as const, icon: <Scissors className="size-4" />, titleKey: "canvas.workbench.videoEditor", descriptionKey: "canvas.workbench.videoEditorDescription" },
+    { kind: "novel" as const, icon: <Scroll className="size-4" />, titleKey: "canvas.workbench.novel", descriptionKey: "canvas.workbench.novelDescription" },
 ];
 
 /**

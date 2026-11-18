@@ -176,9 +176,11 @@ export type CanvasNodeMetadata = {
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
     /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台。 */
-    workbenchKind?: "storyboard" | "digital-human" | "video-editor";
+    workbenchKind?: "storyboard" | "digital-human" | "video-editor" | "novel";
     /** 该工作台绑定的故事分镜项目 id（存在网关）。 */
     storyboardProjectId?: string;
+    /** 该工作台绑定的小说项目 id（存在网关）。 */
+    novelProjectId?: string;
     /** 数字人镜头的音频区间与运镜，导出时要用，必须跟着卡片一起存。 */
     digitalHumanSegment?: { start: number; end: number; camera: string; reference?: string };
     /** 视频编辑工作台导出的片段在时间线上的位置与裁剪信息。 */

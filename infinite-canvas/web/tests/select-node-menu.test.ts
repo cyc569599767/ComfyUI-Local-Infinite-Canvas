@@ -85,3 +85,16 @@ test('三种工作台共用节点类型，靠 workbenchKind 区分', () => {
         expect(menuSource).toContain(kind);
     }
 });
+
+test('卷轴工作台：列表加载与自动选中必须在同一个 effect 里', () => {
+    // 踩过：拆成两个 effect 时，「自动选中」依赖里没有 novels，
+    // 它在列表返回前就跑了，看到空数组，之后列表回来了也不会再触发，
+    // 面板永远停在「还没有作品」，但其实网关里有数据。
+    const source = require('node:fs').readFileSync('src/components/canvas/novel-workbench-panel.tsx', 'utf8');
+    expect(source).toContain('const list = await listNovels(config)');
+    expect(source).toContain('setNovels(list)');
+    // 选目标必须在同一个函数体内、用刚拿到的 list 判断。
+    expect(source).toMatch(/list\.some\(\(item\) => item\.id === projectId\)/);
+    // 表格输入必须显式染色，否则深色主题下值填了也看不见。
+    expect(source).toContain('novel-workbench-table');
+});

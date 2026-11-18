@@ -1,11 +1,12 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { Clapperboard, Film, Scissors, User } from "lucide-react";
+import { Clapperboard, Film, Scissors, Scroll, User } from "lucide-react";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
 import { StoryboardWorkbenchPanel } from "@/components/canvas/storyboard-workbench-panel";
 import { DigitalHumanWorkbenchPanel, type DigitalHumanSegment } from "@/components/canvas/digital-human-workbench-panel";
 import { VideoEditorWorkbenchPanel, type EditClip } from "@/components/canvas/video-editor-workbench-panel";
+import { NovelWorkbenchPanel } from "@/components/canvas/novel-workbench-panel";
 import type { StoryboardShot } from "@/services/api/storyboard";
 import { CanvasNodeType, type CanvasNodeMetadata } from "@/types/canvas";
 import type { CanvasNodeContext } from "@/types/canvas-plugin";
@@ -17,17 +18,18 @@ import type { CanvasNodeContext } from "@/types/canvas-plugin";
  * 区分。这样画布上只需要一个类型、一套尺寸/连接规则，新增工作台不用改节点体系；
  * 代价是面板分发必须显式做（见 WorkbenchPanelHost），漏了就会三个工作台共用同一个面板。
  */
-export type WorkbenchKind = "storyboard" | "digital-human" | "video-editor";
+export type WorkbenchKind = "storyboard" | "digital-human" | "video-editor" | "novel";
 
 const KIND_META: Record<WorkbenchKind, { icon: typeof Clapperboard; color: string; titleKey: string; hintKey: string }> = {
     storyboard: { icon: Clapperboard, color: "#f472b6", titleKey: "canvas.workbench.storyboard", hintKey: "canvas.workbench.hint" },
     "digital-human": { icon: User, color: "#e879f9", titleKey: "canvas.workbench.digitalHuman", hintKey: "canvas.digitalHuman.nodeHint" },
     "video-editor": { icon: Scissors, color: "#22d3ee", titleKey: "canvas.workbench.videoEditor", hintKey: "canvas.videoEditor.nodeHint" },
+    novel: { icon: Scroll, color: "#fbbf24", titleKey: "canvas.workbench.novel", hintKey: "canvas.novel.nodeHint" },
 };
 
 export function readWorkbenchKind(metadata: CanvasNodeContext["node"]["metadata"]): WorkbenchKind {
     const kind = metadata?.workbenchKind;
-    return kind === "digital-human" || kind === "video-editor" ? kind : "storyboard";
+    return kind === "digital-human" || kind === "video-editor" || kind === "novel" ? kind : "storyboard";
 }
 
 /**
@@ -84,6 +86,7 @@ export function WorkbenchPanelHost({ ctx, onClose }: { ctx: CanvasNodeContext; o
     const kind = readWorkbenchKind(ctx.node.metadata);
     if (kind === "digital-human") return <DigitalHumanPanelHost ctx={ctx} onClose={onClose} />;
     if (kind === "video-editor") return <VideoEditorPanelHost ctx={ctx} onClose={onClose} />;
+    if (kind === "novel") return <NovelPanelHost ctx={ctx} onClose={onClose} />;
     return <StoryboardPanelHost ctx={ctx} onClose={onClose} />;
 }
 
@@ -214,4 +217,31 @@ function VideoEditorPanelHost({ ctx, onClose }: { ctx: CanvasNodeContext; onClos
     );
 
     return <VideoEditorWorkbenchPanel open nodeTitle={ctx.node.title} onClose={onClose} onExportTimeline={handleExport} />;
+}
+/**
+ * 卷轴：小说工程本身不产出媒体，面板只负责写与存。
+ *
+ * 所以这里没有「生成到画布」的回调——作品是文字，用户要的是导出/复制，
+ * 不是把每章变成一张卡。需要转成视频时走分镜导演台那条路。
+ */
+function NovelPanelHost({ ctx, onClose }: { ctx: CanvasNodeContext; onClose: () => void }) {
+    const handleProjectChange = useCallback(
+        (id: string, name: string) => {
+            const patch: CanvasNodeMetadata = { workbenchKind: "novel", novelProjectId: id };
+            ctx.updateMetadata(patch);
+            // 节点标题跟着作品名走：画布上一眼能认出是哪本书，而不是一排「工作台」。
+            if (name && ctx.node.title !== name) ctx.updateNode({ title: name });
+        },
+        [ctx],
+    );
+
+    return (
+        <NovelWorkbenchPanel
+            open
+            projectId={ctx.node.metadata?.novelProjectId}
+            nodeTitle={ctx.node.title}
+            onClose={onClose}
+            onProjectChange={handleProjectChange}
+        />
+    );
 }

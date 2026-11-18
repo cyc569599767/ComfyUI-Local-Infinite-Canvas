@@ -4,7 +4,7 @@ import { Clapperboard, Download, Film, Image as ImageIcon, Loader2, Plus, Refres
 import { useTranslation } from "react-i18next";
 
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
-import { useEffectiveConfig } from "@/stores/use-config-store";
+import { activePromptCloudApi, useEffectiveConfig } from "@/stores/use-config-store";
 import {
     breakdownStoryboard,
     deleteStoryboardProject,
@@ -41,6 +41,10 @@ export function StoryboardWorkbenchPanel({ open, projectId, nodeTitle, onClose, 
     const [breaking, setBreaking] = useState(false);
     // 默认本地：本地渠道没有 chat 接口，走云端会直接 404。
     const [engine, setEngine] = useState<"local" | "cloud">("local");
+    // 选云端但还没配云端 API 时直接拦下：否则会发一个注定 502 的请求
+    // （config.baseUrl 指向本地网关，它没有 /v1/chat/completions）。
+    const cloudApi = activePromptCloudApi(config);
+    const cloudReady = engine !== "cloud" || Boolean(cloudApi?.baseUrl && cloudApi?.apiKey && cloudApi?.model);
     const [error, setError] = useState("");
     const [storyDraft, setStoryDraft] = useState("");
     const [styleDraft, setStyleDraft] = useState("");
@@ -155,6 +159,11 @@ export function StoryboardWorkbenchPanel({ open, projectId, nodeTitle, onClose, 
     const runBreakdown = async () => {
         if (!storyDraft.trim()) {
             message.warning(t("canvas.workbench.storyRequired"));
+            return;
+        }
+        // 前置拦截：云端没配就直接说清楚，别让用户等一次注定失败的请求。
+        if (!cloudReady) {
+            message.error(t("canvas.workbench.cloudNotConfigured"));
             return;
         }
         setBreaking(true);
@@ -341,7 +350,7 @@ export function StoryboardWorkbenchPanel({ open, projectId, nodeTitle, onClose, 
                             <InputNumber min={0} max={60} value={targetShotCount} onChange={(value) => setTargetShotCount(Number(value) || 0)} className="w-20" />
                         </div>
                         <div className="flex items-center gap-2">
-                            <Button type="primary" icon={breaking ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} loading={breaking} onClick={() => void runBreakdown()}>
+                            <Button type="primary" disabled={!cloudReady} icon={breaking ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} loading={breaking} onClick={() => void runBreakdown()}>
                                 {t("canvas.workbench.breakdown")}
                             </Button>
                             <Select
@@ -358,6 +367,11 @@ export function StoryboardWorkbenchPanel({ open, projectId, nodeTitle, onClose, 
                         <div className="text-[11px] leading-4" style={{ color: theme.node.muted }}>
                             {engine === "local" ? t("canvas.workbench.engineLocalHint") : t("canvas.workbench.engineCloudHint")}
                         </div>
+                        {!cloudReady ? (
+                            <div className="rounded bg-amber-500/10 px-1.5 py-1 text-[11px] leading-4 text-amber-500">
+                                {t("canvas.workbench.cloudNotConfigured")}
+                            </div>
+                        ) : null}
                         {project?.story_beats.length ? (
                             <div className="rounded-lg border p-2 text-xs" style={{ borderColor: theme.node.stroke }}>
                                 <div className="mb-1 font-medium" style={{ color: theme.node.muted }}>

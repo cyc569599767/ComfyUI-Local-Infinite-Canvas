@@ -34,6 +34,8 @@ import { createFreeWorkflowStore, applyFreeInputs, publicBinding } from "./free-
 import { createWorkflowAppStore } from "./workflow-apps.js";
 import { createStoryboardStore } from "./storyboard-projects.js";
 import { createStoryboardAi } from "./storyboard-ai.js";
+import { createNovelStore } from "./novel-projects.js";
+import { createNovelAi } from "./novel-ai.js";
 import { createBundleManager } from "./workflow-bundle-manager.js";
 import { describeWorkflowGraph } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
@@ -553,6 +555,9 @@ export async function createGatewayApp(overrides = {}) {
   const storyboards = createStoryboardStore({ dataDir: config.dataDir, logger });
   await storyboards.load();
   const storyboardAi = createStoryboardAi({ logger, comfy });
+  const novels = createNovelStore({ dataDir: config.dataDir, logger });
+  await novels.load();
+  const novelAi = createNovelAi({ logger, comfy });
   const skinUnlocks = createSkinUnlockStore({ dataDir: config.dataDir, logger });
   await skinUnlocks.load();
   const workflowVisibility = createWorkflowVisibilityStore({ dataDir: config.dataDir, logger });
@@ -1045,6 +1050,106 @@ export async function createGatewayApp(overrides = {}) {
       res.json({ board });
     } catch (error) {
       throw new HttpError(error?.message || "AI 拆解失败", { status: error?.status || 502, code: error?.code || "storyboard_ai_failed", details: error?.details });
+    }
+  });
+
+  // ---- 无限・卷轴（小说工程）----
+  // 四层结构：总纲 → 分卷 → 章纲 → 正文，加角色/记忆/分卷。
+  // 存网关的理由和分镜一样：几十万字正文清一次缓存就没了等于白做。
+  app.get("/api/novels", (_req, res) => {
+    res.json({ novels: novels.list() });
+  });
+
+  app.get("/api/novels/:id", (req, res) => {
+    const novel = novels.get(req.params.id);
+    if (!novel) throw new HttpError("小说项目不存在", { status: 404, code: "novel_not_found" });
+    res.json({ novel });
+  });
+
+  app.post("/api/novels", async (req, res) => {
+    const body = req.body || {};
+    const novel = await novels.create({ name: body.name, idea: body.idea });
+    res.status(201).json({ novel });
+  });
+
+  app.put("/api/novels/:id", async (req, res) => {
+    const novel = await novels.update(req.params.id, req.body || {});
+    if (!novel) throw new HttpError("小说项目不存在", { status: 404, code: "novel_not_found" });
+    res.json({ novel });
+  });
+
+  app.delete("/api/novels/:id", async (req, res) => {
+    const removed = await novels.remove(req.params.id);
+    if (!removed) throw new HttpError("小说项目不存在", { status: 404, code: "novel_not_found" });
+    res.json({ ok: true });
+  });
+
+  // 生成一层。step: outline | volumes | chapters | write | extend
+  // write 支持指定 chapterId，只写那一章（正文一次一章是硬约束，见 novel-ai.js）。
+  app.post("/api/novels/:id/generate", async (req, res) => {
+    const id = req.params.id;
+    const project = novels.get(id);
+    if (!project) throw new HttpError("小说项目不存在", { status: 404, code: "novel_not_found" });
+    const body = req.body || {};
+    const step = String(body.step || "outline").toLowerCase();
+    const engine = body.engine === "cloud" ? "cloud" : "local";
+    const cloud = body.cloud;
+    const idea = body.idea !== undefined ? String(body.idea) : project.idea;
+    try {
+      if (step === "outline") {
+        const data = await novelAi.outline({ idea, cloud, engine });
+        const novel = await novels.update(id, {
+          // 用户没填书名时用模型给的名字，省得还要手动改一次。
+          name: project.name === "未命名小说" && data.title ? data.title : project.name,
+          structure: { ...project.structure, outline: data.outline },
+        });
+        res.json({ novel, outline: data });
+        return;
+      }
+      if (step === "volumes") {
+        const list = await novelAi.volumes({ idea, structure: project.structure, volumeCount: body.volumeCount, cloud, engine });
+        const novel = await novels.update(id, {
+          volumes: list,
+          structure: { ...project.structure, volumes: list.map((v) => `第${v.seq}卷《${v.title}》：${v.outline}`).join("\n\n") },
+        });
+        res.json({ novel, volumes: list });
+        return;
+      }
+      if (step === "chapters") {
+        const list = await novelAi.chapters({ idea, structure: project.structure, volumes: project.volumes, chapterCount: body.chapterCount, cloud, engine });
+        // 合并而不是覆盖：已经写了正文的章节不能被一次重新生成抹掉。
+        const bySeq = new Map(project.chapters.map((c) => [c.seq, c]));
+        for (const item of list) {
+          const existing = bySeq.get(item.seq);
+          bySeq.set(item.seq, existing ? { ...item, id: existing.id, novel: existing.novel, status: existing.novel ? "done" : "outlined" } : item);
+        }
+        const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+        const novel = await novels.update(id, {
+          chapters: merged,
+          structure: { ...project.structure, chapters: merged.map((c) => `第${c.seq}章《${c.title}》：${c.outline}`).join("\n\n") },
+        });
+        res.json({ novel, chapters: merged });
+        return;
+      }
+      if (step === "write") {
+        const target = body.chapterId
+          ? project.chapters.find((c) => c.id === body.chapterId)
+          : project.chapters.filter((c) => c.outline).find((c) => !c.novel);
+        if (!target) throw new HttpError("没有待写的章节（都写完了，或章纲还空着）", { status: 400, code: "novel_no_pending_chapter" });
+        const volume = project.volumes.find((v) => v.seq === target.volume) || null;
+        const bodyText = await novelAi.chapterBody({
+          idea, structure: project.structure, volume, chapter: target,
+          context: novels.contextBlock(id), targetWords: body.targetWords, cloud, engine,
+        });
+        const chapters = project.chapters.map((c) => (c.id === target.id ? { ...c, novel: bodyText, status: "done" } : c));
+        const novel = await novels.update(id, { chapters });
+        res.json({ novel, chapter: chapters.find((c) => c.id === target.id) });
+        return;
+      }
+      throw new HttpError(`不支持的生成步骤：${step}`, { status: 400, code: "novel_bad_step" });
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(error?.message || "生成失败", { status: error?.status || 502, code: error?.code || "novel_ai_failed" });
     }
   });
 

@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import { localGatewayRoot } from "@/services/api/image";
-import type { AiConfig } from "@/stores/use-config-store";
+import { activePromptCloudApi, type AiConfig } from "@/stores/use-config-store";
 
 /**
  * 故事分镜导演台的数据接口。
@@ -172,7 +172,10 @@ export type StoryboardBreakdownResult = {
  * 让用户先配云端 key 才能拆解等于把功能锁死。只有显式 engine=cloud 才走云端。
  */
 export async function breakdownStoryboard(config: AiConfig, input: StoryboardBreakdownInput) {
-    const cloud = { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, apiFormat: config.apiFormat };
+    // 云端端点必须取「云端 API」那份配置：config.baseUrl 指向本地网关，
+    // 它没有 /v1/chat/completions，拿它当云端端点只会得到 Not found。
+    const api = activePromptCloudApi(config);
+    const cloud = api ? { baseUrl: api.baseUrl, apiKey: api.apiKey, model: api.model, apiFormat: api.apiFormat } : { baseUrl: "", apiKey: "", model: "", apiFormat: "openai" as const };
     // 本机首次要加载 GGUF（约 5.7GB），给足 10 分钟；云端拆几十镜给 3 分钟。
     const engine = input.engine === "cloud" ? "cloud" : "local";
     const timeout = engine === "cloud" ? 180000 : 600000;

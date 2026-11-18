@@ -280,6 +280,18 @@ const CLOUD_IMAGE_SYSTEM_PROMPT = `你是 AI 生图提示词专家。请把用�
 
 要求：主体明确，构图、镜头、光线、材质与风格具体；保留用户的主体和意图，不要编造品牌或画面文字；图生图时说明需要保留与需要改变的部分；输出语言与“输出语言”字段一致。`;
 
+/**
+ * 取出 finish_reason。
+ *
+ * 带推理的模型（reasoning_content）可能把全部 max_tokens 花在思考上，
+ * 正文一个字都没有就被截断，finish_reason 是 "length"。
+ * 不区分这种情况的话，调用方只能看到「内容是空的」，
+ * 会归因成「模型没给 JSON」，而真正的原因是预算不够。
+ */
+function cloudFinishReason(data) {
+  return String(data?.choices?.[0]?.finish_reason || "");
+}
+
 function cloudContent(data) {
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content === "string") return content;
@@ -344,7 +356,7 @@ export async function cloudChat({ system, userText, images = [], cloud = {}, sig
       const data = await requestAgentCloudJson({ baseUrl, apiKey, apiFormat: cloud.apiFormat, request: {
         model, messages: [{ role: "system", content: system }, { role: "user", content }], max_tokens: maxTokens,
       } }, { signal });
-      return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
+      return { content: cloudContent(data), finishReason: cloudFinishReason(data), model, elapsedMs: Date.now() - started };
     } catch (error) {
       throw new PromptOptimizeError("云端 API 请求失败，请检查所选协议、模型和服务配置", { status: error?.status || 502, code: error?.code || "cloud_api_failed" });
     }
@@ -416,7 +428,7 @@ export async function cloudChat({ system, userText, images = [], cloud = {}, sig
         : "";
       throw new PromptOptimizeError(`云端 API 失败：${truncate(String(message), 800)}${imageHint}`, { status: 502, code: "cloud_api_failed", details: data });
     }
-    return { content: cloudContent(data), model, elapsedMs: Date.now() - started };
+    return { content: cloudContent(data), finishReason: cloudFinishReason(data), model, elapsedMs: Date.now() - started };
   } catch (error) {
     if (error instanceof PromptOptimizeError) throw error;
     if (error?.name === "AbortError") {
