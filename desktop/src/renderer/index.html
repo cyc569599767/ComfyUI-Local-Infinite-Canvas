@@ -24,9 +24,21 @@
     <main>
       <header class="panel-heading"><div><h1>服务面板</h1><p>本地服务状态与运行日志</p></div><span id="status" role="status">正在读取运行环境…</span></header>
       <section class="services" aria-label="服务状态">
-        <article><h2>无限画布 <span id="canvas-status">待检测</span></h2><p id="canvas-url">—</p><small id="canvas-owner">等待连接</small></article>
-        <article><h2>本地网关 <span id="gateway-status">待检测</span></h2><p id="gateway-url">—</p><small id="gateway-owner">等待连接</small></article>
-        <article><h2>ComfyUI <span id="comfy-status">待检测</span></h2><p id="comfy-url">—</p><small id="comfy-owner">等待连接</small></article>
+        <article data-service-card="canvas">
+          <h2>无限画布 <span id="canvas-status">待检测</span></h2>
+          <div class="service-actions"><button id="canvas-start" type="button">启动</button><button id="canvas-stop" type="button">停止</button></div>
+          <p id="canvas-url">—</p><small id="canvas-owner">等待连接</small>
+        </article>
+        <article data-service-card="gateway">
+          <h2>本地网关 <span id="gateway-status">待检测</span></h2>
+          <div class="service-actions"><button id="gateway-start" type="button">启动</button><button id="gateway-stop" type="button">停止</button></div>
+          <p id="gateway-url">—</p><small id="gateway-owner">等待连接</small>
+        </article>
+        <article data-service-card="comfy">
+          <h2>ComfyUI <span id="comfy-status">待检测</span></h2>
+          <div class="service-actions"><button id="comfy-start" type="button">启动</button><button id="comfy-stop" type="button">停止</button></div>
+          <p id="comfy-url">—</p><small id="comfy-owner">等待连接</small>
+        </article>
       </section>
       <section class="actions"><p id="connection-message" aria-live="polite">准备连接…</p><button id="refresh">检查状态</button><button id="connect" class="primary">连接 / 启动缺失服务</button></section>
       <details id="settings-panel"><summary>桌面设置 <span>保存后重启生效</span></summary>

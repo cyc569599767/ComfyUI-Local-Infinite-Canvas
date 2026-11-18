@@ -266,6 +266,17 @@ function registerIPC() {
     'app:get-state': () => ({ ...manager.snapshot(), activePage }),
     'app:connect': () => connect(),
     'app:refresh': () => manager.connect({ existingOnly: true }),
+    // 服务启停：只允许改动受管启动器自己拉起的进程。
+    'service:start': async (_event, name) => {
+      await manager.startService(name);
+      await manager.connect({ existingOnly: true }).catch(() => {});
+      return { ...manager.snapshot(), activePage };
+    },
+    'service:stop': async (_event, name) => {
+      await manager.stopService(name);
+      await manager.connect({ existingOnly: true }).catch(() => {});
+      return { ...manager.snapshot(), activePage };
+    },
     'app:show-page': (_event, target) => showPage(target),
     'app:reload-page': () => {
       if (activePage !== 'dashboard') contentView?.webContents.reload();

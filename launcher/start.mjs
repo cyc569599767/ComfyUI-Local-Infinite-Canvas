@@ -1787,6 +1787,109 @@ async function restartComfy(cfg) {
   }
 }
 
+/**
+ * 单服务启停。
+ *
+ * 只有本启动器拉起的进程（state.comfyChild / state.gatewayChild）才可停止；
+ * 接管的（adopt）外部服务一律拒绝，由原启动器负责——否则会杀掉用户自己的进程。
+ * 这两个函数同时被 HTTP 控制接口和桌面 IPC 复用，避免两条路径行为不一致。
+ */
+async function stopComfyService() {
+  if (!state.comfyChild) {
+    const error = new Error("ComfyUI 不是本启动器启动的，无法停止");
+    error.status = 409;
+    throw error;
+  }
+  killOurChild(state.comfyChild, "ComfyUI");
+  state.comfyChild = null;
+  state.comfyUrl = null;
+  log("ComfyUI 已按请求停止");
+  return { ok: true };
+}
+
+async function startComfyService(cfg) {
+  if (state.comfyChild) return { ok: true, alreadyRunning: true };
+  const running = await probeAnyComfy(comfyPortCandidates(cfg), 900);
+  if (running) {
+    // 已有外部实例在跑：接管而不重复拉起，避免两个 ComfyUI 抢同一个端口。
+    state.comfyUrl = running.url;
+    state.adoptedComfyUrl = running.url;
+    log(`ComfyUI 已在运行（${running.url}），直接接管`);
+    return { ok: true, adopted: true, url: running.url };
+  }
+  const install = findComfyInstall(cfg);
+  const plan = resolveLaunchPlan(install);
+  if (!plan) throw new Error(`未找到 ComfyUI 启动方式（comfyDir=${cfg.comfyDir || "空"}）`);
+  // 与桌面启动主流程保持一致：从固定首端口开始找可用口。
+  state.comfyChild = spawnComfy(plan, COMFY_PORT_FIRST);
+  const ready = await waitFor(
+    "ComfyUI（启动）",
+    async () => probeAnyComfy(comfyPortCandidates(cfg), 900),
+    cfg.comfyStartTimeoutSec,
+    { intervalMs: 2000, progressEveryMs: 15000 },
+  );
+  if (!ready) {
+    // 起不来就别留一个僵尸子进程占着端口，否则下次点启动会一直撞「已在运行」。
+    killOurChild(state.comfyChild, "ComfyUI");
+    state.comfyChild = null;
+    throw new Error("ComfyUI 未在超时时间内就绪");
+  }
+  state.comfyUrl = ready.url;
+  state.adoptedComfyUrl = null;
+  log(`ComfyUI 已启动：${ready.url}`);
+  return { ok: true, url: ready.url };
+}
+
+async function stopGatewayService(cfg) {
+  if (!state.gatewayChild) {
+    const error = new Error("网关不是本启动器启动的，无法停止");
+    error.status = 409;
+    throw error;
+  }
+  const previous = state.gatewayChild;
+  state.gatewayChild = null;
+  await stopGatewayChild(previous, cfg);
+  log("网关已按请求停止");
+  return { ok: true };
+}
+
+async function startGatewayService(cfg) {
+  if (state.gatewayChild) return { ok: true, alreadyRunning: true };
+  await ensureGatewayDeps(cfg);
+  state.gatewayChild = spawnGateway(cfg, state.gatewayComfyUrl || cfg.comfyUrl, state.gatewayWorkflowsDir || "");
+  log(`网关已按请求启动（PID ${state.gatewayChild.pid}）`);
+  return { ok: true, pid: state.gatewayChild.pid };
+}
+
+/** 画布是 launcher 内的静态服务，不是子进程，直接关掉监听即可。 */
+async function stopCanvasService() {
+  if (!state.canvasServer) {
+    const error = new Error("画布不是本启动器启动的，无法停止");
+    error.status = 409;
+    throw error;
+  }
+  const server = state.canvasServer;
+  state.canvasServer = null;
+  await new Promise((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections?.();
+  });
+  log("画布已按请求停止");
+  return { ok: true };
+}
+
+async function startCanvasService(cfg) {
+  if (state.canvasServer) return { ok: true, alreadyRunning: true };
+  const listen = await listenCanvasServer(cfg, cfg.canvasPort);
+  state.canvasServer = listen.server;
+  if (listen.port !== cfg.canvasPort) {
+    cfg.canvasPort = listen.port;
+    cfg.canvasUrl = `http://127.0.0.1:${listen.port}`;
+  }
+  log(`画布已按请求启动：${cfg.canvasUrl}/`);
+  return { ok: true, url: cfg.canvasUrl };
+}
+
 function readJsonBody(req, limit = 8192) {
   return new Promise((resolve) => {
     let raw = "";
@@ -1862,6 +1965,29 @@ async function startControlServer(cfg) {
         res.setTimeout(360000);
         const report = await restartComfy(cfg);
         res.end(JSON.stringify(report));
+        return;
+      }
+      // ---- 单服务启停（桌面「服务面板」用）----
+      // 只动本启动器自己拉起的进程：接管的（adopt）外部服务一律不动，
+      // 否则用户自己开的 ComfyUI 会被我们杀掉。
+      if (req.method === "POST" && pathname === "/stop-comfy") {
+        res.setTimeout(60000);
+        res.end(JSON.stringify(await stopComfyService(cfg)));
+        return;
+      }
+      if (req.method === "POST" && pathname === "/start-comfy") {
+        res.setTimeout(360000);
+        res.end(JSON.stringify(await startComfyService(cfg)));
+        return;
+      }
+      if (req.method === "POST" && pathname === "/stop-gateway") {
+        res.setTimeout(60000);
+        res.end(JSON.stringify(await stopGatewayService(cfg)));
+        return;
+      }
+      if (req.method === "POST" && pathname === "/start-gateway") {
+        res.setTimeout(180000);
+        res.end(JSON.stringify(await startGatewayService(cfg)));
         return;
       }
       res.statusCode = 404;
@@ -2163,6 +2289,38 @@ async function desktopMain(session) {
   session.assertRunning();
   const cfg = loadConfig();
   cfg.comfyUrl = desktopLocalUrl(cfg.comfyUrl);
+  // 桌面模式 controlPort 是 0（随机口），HTTP 控制接口对桌面端不可达，
+  // 所以服务启停走 IPC。同一个处理函数也挂在 HTTP 路由上，供非桌面场景使用。
+  const serviceHandlers = {
+    "desktop:service-status": () => ({
+      canvas: { ready: Boolean(state.canvasServer), owned: Boolean(state.canvasServer) },
+      gateway: { ready: Boolean(state.gatewayChild || state.gatewayUrl), owned: Boolean(state.gatewayChild) },
+      comfy: { ready: Boolean(state.comfyChild || state.comfyUrl), owned: Boolean(state.comfyChild), adopted: Boolean(state.adoptedComfyUrl) },
+    }),
+    "desktop:start-service": async (name) => {
+      if (name === "comfy") return startComfyService(cfg);
+      if (name === "gateway") return startGatewayService(cfg);
+      if (name === "canvas") return startCanvasService(cfg);
+      throw new Error(`不支持单独启动的服务：${name}`);
+    },
+    "desktop:stop-service": async (name) => {
+      if (name === "comfy") return stopComfyService(cfg);
+      if (name === "gateway") return stopGatewayService(cfg);
+      if (name === "canvas") return stopCanvasService();
+      throw new Error(`不支持单独停止的服务：${name}`);
+    },
+  };
+  process.on("message", (message) => {
+    const handler = message?.type && serviceHandlers[message.type];
+    if (!handler) return;
+    // 统一回包，桌面端用 requestId 对应请求，避免并发点击串台。
+    void Promise.resolve()
+      .then(() => handler(message.name))
+      .then(
+        (result) => sendDesktop({ type: `${message.type}:result`, requestId: message.requestId, ok: true, result }),
+        (error) => sendDesktop({ type: `${message.type}:result`, requestId: message.requestId, ok: false, error: error?.message || String(error) }),
+      );
+  });
   const get = (url, timeoutMs = 2500) => desktopGet(url, { signal: session.signal, timeoutMs });
   const probeGateway = async () => {
     const response = await get(`${cfg.gatewayUrl}/health`);
@@ -2256,6 +2414,8 @@ async function desktopMain(session) {
       log(`Desktop 启动 ComfyUI（禁止自动打开浏览器）：${plan.file}`);
       // Configured port only: do not accidentally adopt a different installation.
       const child = session.ownChild(spawnComfy(plan, portFromUrl(cfg.comfyUrl) || COMFY_PORT_FIRST));
+      // 同上：服务面板要靠 state.comfyChild 判断「这是我们启动的」并允许停止。
+      state.comfyChild = child;
       try {
         const ready = await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child);
         session.assertRunning();
@@ -2264,6 +2424,8 @@ async function desktopMain(session) {
       } catch (error) {
         session.assertRunning(); // Parent shutdown still cancels the whole startup.
         log(`ComfyUI 启动失败，保留画布与网关：${error.message}（code=${child.exitCode}, signal=${child.signalCode || "none"}）`, "WARN");
+        // 没起来就别留着：否则面板会显示「已在运行」，点启动反而什么都没发生。
+        if (child.exitCode !== null || child.signalCode !== null) state.comfyChild = null;
       }
     }
   }
@@ -2276,6 +2438,9 @@ async function desktopMain(session) {
     cfg.corsOrigins += `,${new URL(cfg.comfyUrl).origin}`;
     log(`Desktop 启动网关：${cfg.gatewayUrl}（DISABLE_NODE_BOOTSTRAP=1）`);
     const child = session.ownChild(spawnGateway(cfg, comfy.url, cfg.comfyWorkflowsDir));
+    // 必须登记到 state：服务面板的启停与状态判断都读这里，
+    // 只交给 session 会导致「明明是我们启动的却显示不可停止」。
+    state.gatewayChild = child;
     const ready = await waitDesktop("网关", probeGateway, cfg.gatewayStartTimeoutSec, child);
     session.assertRunning();
     if (!ready) throw new Error(`网关未在 ${cfg.gatewayStartTimeoutSec}s 内通过身份校验`);
@@ -2301,6 +2466,9 @@ async function desktopMain(session) {
     if (listen.port !== cfg.canvasPort) log(`画布端口 ${cfg.canvasPort} 已占用，回退到 ${listen.port}`);
     cfg.canvasPort = listen.port;
     cfg.canvasUrl = `http://127.0.0.1:${listen.port}`;
+    // 记下引用，服务面板的「停止/启动」才有东西可操作。
+    state.canvasServer = listen.server;
+    state.canvasCfg = cfg;
     canvas = { url: cfg.canvasUrl, mode: "started" };
   }
   session.assertRunning();

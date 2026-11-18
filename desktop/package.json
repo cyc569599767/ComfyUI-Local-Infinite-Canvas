@@ -22,7 +22,8 @@
     "test": "node --test test/*.test.cjs",
     "test:smoke": "node scripts/launch.cjs --smoke-test",
     "test:integration": "node test/integration-fixture.mjs && node test/managed-integration-fixture.mjs",
-    "test:live": "node scripts/launch.cjs --integration-smoke"
+    "test:live": "node scripts/launch.cjs --integration-smoke",
+    "test:buttons": "node scripts/run-service-buttons.cjs"
   },
   "devDependencies": {
     "electron": "41.0.3",

@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('desktop', {
   restart: () => ipcRenderer.invoke('app:restart'),
   connect: () => ipcRenderer.invoke('app:connect'),
   refresh: () => ipcRenderer.invoke('app:refresh'),
+  startService: (name) => ipcRenderer.invoke('service:start', name),
+  stopService: (name) => ipcRenderer.invoke('service:stop', name),
   showPage: (target) => ipcRenderer.invoke('app:show-page', target),
   reloadPage: () => ipcRenderer.invoke('app:reload-page'),
   openDevTools: () => ipcRenderer.invoke('app:devtools'),

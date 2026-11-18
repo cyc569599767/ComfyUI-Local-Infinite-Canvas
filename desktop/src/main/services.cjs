@@ -215,6 +215,44 @@ class ServiceManager extends EventEmitter {
     });
   }
 
+  /**
+   * 向 launcher 发一条服务控制命令并等回包。
+   *
+   * 桌面模式下 launcher 的控制端口是 0（随机），HTTP 控制接口拿不到，
+   * 所以只能走 IPC。requestId 用来把并发请求的回包对上号。
+   */
+  controlLauncher(type, name, timeoutMs = 360000) {
+    if (!this.child || !this.child.connected) return Promise.reject(new Error('受管启动器未运行；请先连接服务'));
+    const requestId = `${type}-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { cleanup(); reject(new Error('服务操作超时，请查看日志')); }, timeoutMs);
+      const onMessage = (message) => {
+        if (message?.type !== `${type}:result` || message.requestId !== requestId) return;
+        cleanup();
+        if (message.ok) resolve(message.result || {});
+        else reject(new Error(message.error || '服务操作失败'));
+      };
+      const onExit = () => { cleanup(); reject(new Error('启动器已退出')); };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.child?.removeListener('message', onMessage);
+        this.child?.removeListener('exit', onExit);
+      };
+      this.child.on('message', onMessage);
+      this.child.once('exit', onExit);
+      try {
+        this.child.send({ type, name, requestId });
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
+  startService(name) { return this.controlLauncher('desktop:start-service', name); }
+  stopService(name) { return this.controlLauncher('desktop:stop-service', name); }
+  serviceStatus() { return this.controlLauncher('desktop:service-status', '', 15000); }
+
   async activeWork() {
     const services = this.state.services;
     if (!this.child || !services || ![services.gateway.mode, services.comfy.mode].includes('started')) return false;

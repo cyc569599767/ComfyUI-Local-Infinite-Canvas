@@ -25,6 +25,16 @@ h2 span { color: #e9b886; font-size: 11px; font-weight: 400; white-space: nowrap
 h2 .online { color: #99dfbb; }
 .services article p { font-family: Consolas, monospace; font-size: 13px; line-height: 1.4; margin: 8px 0 5px; overflow-wrap: anywhere; }
 .services article small { display: block; font-size: 11px; line-height: 1.5; color: #9aa8bf; }
+/* 启停按钮和标题挤在同一行：面板顶部空间有限，多一行会把日志区推到阈值外。
+   grid 三列 = 标题 | 状态 | 按钮，状态仍由 h2 内的 span 渲染。 */
+.services article { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "head actions" "url url" "owner owner"; align-items: center; column-gap: 8px; }
+.services article h2 { grid-area: head; }
+.services article p { grid-area: url; }
+.services article small { grid-area: owner; }
+.service-actions { grid-area: actions; display: flex; gap: 4px; }
+.service-actions button { padding: 1px 7px; font-size: 10px; line-height: 1.4; min-height: 0; color: #c2cee3; background: #202634; border: 1px solid #2f3849; border-radius: 5px; cursor: pointer; }
+.service-actions button:hover:not(:disabled) { background: #27303f; border-color: #3b465a; }
+.service-actions button:disabled { opacity: .38; cursor: not-allowed; }
 .actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .actions p { flex: 1; min-width: 0; margin: 0; color: #c2cee3; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 details { margin: 0; border: 1px solid #2b3243; border-radius: 8px; }

@@ -132,3 +132,117 @@ test('HTTP probe rejects generic 200 HTML and wrong gateway mapping', async (t) 
   valid = true;
   assert.equal((await probe(settings)).canvas.ready, true);
 });
+
+// ---- 服务面板启停：走 launcher IPC ----
+// 桌面模式下 launcher 的控制端口是 0（随机），HTTP 接口拿不到，
+// 所以启停只能走 process.send/on('message')。这里用一个假 child 验证协议。
+function fakeLauncher({ respond = true, result = { ok: true } } = {}) {
+  const { EventEmitter } = require('node:events');
+  const child = new EventEmitter();
+  child.connected = true;
+  child.sent = [];
+  child.send = (message, callback) => {
+    child.sent.push(message);
+    if (respond) {
+      // 模拟 launcher 回包：异步、且只回应匹配 requestId 的那一条。
+      setImmediate(() => child.emit('message', { type: `${message.type}:result`, requestId: message.requestId, ok: true, result }));
+    }
+    callback?.(null);
+    return true;
+  };
+  return child;
+}
+
+test('startService 通过 IPC 发命令并等到匹配 requestId 的回包', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  const child = fakeLauncher({ result: { ok: true, pid: 4321 } });
+  manager.child = child;
+  const result = await manager.startService('comfy');
+  assert.deepEqual(result, { ok: true, pid: 4321 });
+  assert.equal(child.sent.length, 1);
+  assert.equal(child.sent[0].type, 'desktop:start-service');
+  assert.equal(child.sent[0].name, 'comfy');
+  assert.ok(child.sent[0].requestId);
+});
+
+test('并发请求不会串台：回包按 requestId 对应', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  const { EventEmitter } = require('node:events');
+  const child = new EventEmitter();
+  child.connected = true;
+  child.send = (message) => { setImmediate(() => child.emit('message', { type: `${message.type}:result`, requestId: message.requestId, ok: true, result: { for: message.name } })); return true; };
+  manager.child = child;
+  const [a, b] = await Promise.all([manager.startService('gateway'), manager.startService('comfy')]);
+  assert.deepEqual(a, { for: 'gateway' });
+  assert.deepEqual(b, { for: 'comfy' });
+});
+
+test('launcher 未运行时直接报错，不发命令', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  await assert.rejects(() => manager.startService('comfy'), /受管启动器未运行/);
+});
+
+test('launcher 返回失败时把原始原因抛出来', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  const { EventEmitter } = require('node:events');
+  const child = new EventEmitter();
+  child.connected = true;
+  child.send = (message) => { setImmediate(() => child.emit('message', { type: `${message.type}:result`, requestId: message.requestId, ok: false, error: 'ComfyUI 不是本启动器启动的，无法停止' })); return true; };
+  manager.child = child;
+  await assert.rejects(() => manager.stopService('comfy'), /不是本启动器启动的，无法停止/);
+});
+
+test('回包超时会报错，不会永远挂着', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  manager.child = fakeLauncher({ respond: false });
+  await assert.rejects(() => manager.controlLauncher('desktop:start-service', 'comfy', 60), /超时/);
+});
+
+test('启动器中途退出时立刻失败，而不是等满超时', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  const child = fakeLauncher({ respond: false });
+  manager.child = child;
+  const started = Date.now();
+  const pending = manager.controlLauncher('desktop:start-service', 'comfy', 30000);
+  setTimeout(() => child.emit('exit', 1), 20);
+  await assert.rejects(pending, /启动器已退出/);
+  assert.ok(Date.now() - started < 5000, '应在退出时立即失败');
+});
+
+test('桌面模式启动的服务必须登记到 state，否则面板会误判「不可停止」', async () => {
+  // 真实 bug：桌面模式最初只把 child 交给 session.ownChild，没写进 state.gatewayChild，
+  // 结果面板显示 owned=false、停止按钮禁用，点停止直接报「不是本启动器启动的」。
+  const fs = require('node:fs/promises');
+  const source = await fs.readFile(require('node:path').join(__dirname, '../../launcher/start.mjs'), 'utf8');
+  assert.match(source, /state\.gatewayChild = child/, '桌面网关启动后必须登记到 state.gatewayChild');
+  assert.match(source, /state\.comfyChild = child/, '桌面 ComfyUI 启动后必须登记到 state.comfyChild');
+  assert.match(source, /state\.canvasServer = listen\.server/, '画布服务必须登记到 state.canvasServer');
+});
+
+test('接管的（adopt）外部服务不能被停止', async () => {
+  // 只动自己拉起的进程：外部 ComfyUI 归用户的启动器管，我们杀掉就是事故。
+  const fs = require('node:fs/promises');
+  const source = await fs.readFile(require('node:path').join(__dirname, '../../launcher/start.mjs'), 'utf8');
+  const stopComfy = source.slice(source.indexOf('async function stopComfyService'), source.indexOf('async function startComfyService'));
+  assert.match(stopComfy, /不是本启动器启动的/, '必须在没有 comfyChild 时拒绝停止');
+  const stopGateway = source.slice(source.indexOf('async function stopGatewayService'), source.indexOf('async function startGatewayService'));
+  assert.match(stopGateway, /不是本启动器启动的/, '必须在没有 gatewayChild 时拒绝停止');
+});
+
+test('面板按钮规则：只有自己启动的服务才能停止，adopt 的必须禁用', async () => {
+  const fs = require('node:fs/promises');
+  const source = await fs.readFile(require('node:path').join(__dirname, '../src/renderer/app.js'), 'utf8');
+  // 停止按钮必须依赖 mode==='started'；否则会去停用户自己的 ComfyUI。
+  assert.match(source, /mode === 'started'/, 'owned 判定必须基于 mode=started');
+  assert.match(source, /setServiceButtons\('comfy', \{ start: !ready\('comfy'\)/, 'ComfyUI 启动按钮应只在未就绪时可用');
+  assert.match(source, /stop: owned\('comfy'\)/, 'ComfyUI 停止按钮必须要求是自己启动的');
+});
+
+test('画布与网关联动：启停任一个都同时处理两者', async () => {
+  const fs = require('node:fs/promises');
+  const source = await fs.readFile(require('node:path').join(__dirname, '../src/renderer/app.js'), 'utf8');
+  // 网关停掉后画布无法生成，留一半没有意义。
+  assert.match(source, /key === 'comfy' \? \['comfy'\] : \['gateway', 'canvas'\]/, '画布与网关必须成组操作');
+  // 停止要反序（先画布后网关），避免网关没了画布还在请求。
+  assert.match(source, /\[\.\.\.names\]\.reverse\(\)/, '停止顺序必须与启动相反');
+});
