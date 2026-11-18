@@ -190,13 +190,79 @@ function writeChunk(res, text, signal) {
   });
 }
 
+/**
+ * 判断上游是不是在抱怨「不支持某个可选参数」。
+ *
+ * 真实案例：某些聚合网关把模型路由到内部的 openai-responses 端点，
+ * 该端点拒绝 tool_choice，但 tools 本身完全可用（实测仍会返回 tool_calls）。
+ * 这类限制不该让整个对话失败——tool_choice="auto" 本来就是默认语义。
+ */
+function rejectedOptionalParam(detail, param) {
+  if (!detail) return false;
+  const lower = detail.toLowerCase();
+  if (!lower.includes(param.toLowerCase())) return false;
+  return /not supported|unsupported|does not support|unknown (parameter|field)|unrecognized/i.test(lower);
+}
+
+/** 从已序列化的请求体里去掉一个顶层字段；去不掉就返回 null。 */
+function stripField(payload, field) {
+  if (!payload) return null;
+  let body;
+  try { body = JSON.parse(payload); } catch { return null; }
+  if (!body || typeof body !== "object" || !(field in body)) return null;
+  // 只降级「等价的默认值」：auto 是默认行为，去掉不改语义。
+  // 显式要求 required / 指定函数时不能偷偷去掉，否则模型可能不调用工具。
+  if (field === "tool_choice" && body.tool_choice !== "auto") return null;
+  delete body[field];
+  return JSON.stringify(body);
+}
+
 function publicError(error) {
   if (error instanceof AgentCloudError) return error;
   return new AgentCloudError("upstream_failed", "模型服务连接失败，请检查地址、网络和配置", 502);
 }
 
+/**
+ * 从上游 4xx 响应体里提取一条能指导用户的信息。
+ *
+ * 只对 400 做：这类错误几乎都是「参数不对」（最常见是模型名不唯一），
+ * 上游原文比「请求失败」有用得多。仍然要过安全清洗：
+ * 去掉 URL、去掉凭据字样、限制长度，绝不原样回传整个响应体。
+ */
+function safeUpstreamMessage(raw, apiKey) {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return ""; }
+  const candidate = parsed?.error?.message ?? parsed?.message ?? parsed?.detail;
+  if (typeof candidate !== "string") return "";
+  let text = candidate.replace(/\s+/g, " ").trim();
+  if (!text || text.length > 300) return "";
+  // 上游偶尔会把完整请求 URL 或 Key 写进 message，这两类绝对不能透给前端。
+  if (apiKey) text = text.split(apiKey).join("[redacted]");
+  if (/Bearer\s+[^\s"',;]+/i.test(text)) return "";
+  if (/https?:\/\/\S+/i.test(text)) return "";
+  return text;
+}
+
+/** 读取有上限的上游错误体；超过 8KB 就放弃，避免被异常大响应拖住。 */
+async function readUpstreamErrorBody(upstream, limit = 8192) {
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of upstream) {
+      size += chunk.length;
+      if (size > limit) return "";
+      chunks.push(chunk);
+    }
+  } catch {
+    return "";
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = http.request, httpsRequest = https.request,
-  timeoutMs = 120000, headerTimeoutMs = 15000, idleTimeoutMs = 30000, maxResponseBytes = RESPONSE_LIMIT, maxEventBytes = EVENT_LIMIT } = {}) {
+  // headerTimeout 必须给足：本地/自建推理服务常把模型冷加载放在首个请求里，
+  // 15 秒会在模型还没加载完时就放弃，用户看到的是「响应头超时」而不是「正在加载」。
+  timeoutMs = 120000, headerTimeoutMs = 90000, idleTimeoutMs = 60000, maxResponseBytes = RESPONSE_LIMIT, maxEventBytes = EVENT_LIMIT } = {}) {
   return async function transport({ endpoint, apiKey, payload, operation, signal, apiFormat = "openai" }, res) {
     const normalizer = createAgentCloudNormalizer(apiFormat);
     const controller = new AbortController();
@@ -207,15 +273,19 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
     let upstream;
     let outgoing;
     let headerTimer;
+    // 记录这次请求因为上游限制而主动降级了哪些参数，便于日志与排查。
+    let degraded = null;
     try {
       const pinnedPool = await abortable(resolveAgentCloudTargets(endpoint, lookup), controller.signal);
       const pinned = pinnedPool[0];
       const multipleTargets = pinnedPool.length > 1;
-      upstream = await new Promise((resolve, reject) => {
+      // 抽成函数是为了「可选参数不被支持」时能去掉该参数重发一次，
+      // 而不是把整个对话判失败。DNS 结果与 family 固定，重发不重新解析。
+      const send = (body) => new Promise((resolve, reject) => {
         const request = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
         const headers = { accept: operation === "models" ? "application/json" : "text/event-stream, application/json", "accept-encoding": "identity" };
         Object.assign(headers, agentCloudAuthHeaders(apiFormat, apiKey));
-        if (payload !== undefined) { headers["content-type"] = "application/json"; headers["content-length"] = Buffer.byteLength(payload); }
+        if (body !== undefined) { headers["content-type"] = "application/json"; headers["content-length"] = Buffer.byteLength(body); }
         outgoing = request(endpoint, { method: operation === "models" ? "GET" : "POST", headers, agent: false,
           maxHeaderSize: 16 * 1024, signal: controller.signal, family: multipleTargets ? 0 : pinned.family,
           // Node races only TCP connections from this validated snapshot, before sending
@@ -227,15 +297,49 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
         outgoing.on("error", reject);
         outgoing.setTimeout(idleTimeoutMs, () => controller.abort(new AgentCloudError("upstream_timeout", "模型响应读取超时", 504)));
         headerTimer = setTimeout(() => controller.abort(new AgentCloudError("upstream_timeout", "模型响应头超时", 504)), headerTimeoutMs);
-        outgoing.end(payload);
+        outgoing.end(body);
       });
+      upstream = await send(payload);
       clearTimeout(headerTimer);
-      const status = upstream.statusCode || 502;
+      let status = upstream.statusCode || 502;
+      // 上游明确拒绝某个可选参数时，去掉它重发一次。
+      // 这一步必须在读取 body 之前完成，因为 400 的 body 要被消费掉才能拿到原因。
+      if (status === 400 && operation === "chat") {
+        let detail = safeUpstreamMessage(await readUpstreamErrorBody(upstream), apiKey);
+        if (rejectedOptionalParam(detail, "tool_choice")) {
+          const retried = stripField(payload, "tool_choice");
+          if (retried) {
+            clearTimeout(headerTimer);
+            upstream = await send(retried);
+            clearTimeout(headerTimer);
+            status = upstream.statusCode || 502;
+            if (status >= 200 && status < 300) {
+              degraded = "tool_choice";
+            } else if (status === 400) {
+              // 重试也可能撞到另一个 400（比如模型名不对），必须用新响应体里的原因，
+              // 不能拿第一次那条「tool_choice 不支持」去误导用户。
+              detail = safeUpstreamMessage(await readUpstreamErrorBody(upstream), apiKey);
+            }
+          }
+        }
+        if (status < 200 || status >= 300) {
+          // 重试后仍失败，用同一条已经读到的 detail 生成错误，避免再消费一次 body。
+          const message = status >= 300 && status < 400 ? "模型 API 返回重定向；请填写最终 API 地址" :
+            status === 401 || status === 403 ? "模型 API 认证失败，请检查 Key 和权限" :
+            status === 404 ? "模型 API 路径或模型不存在" :
+            status === 429 ? "模型 API 限流，请稍后重试" :
+            detail ? `模型 API 拒绝了请求：${detail}` : "模型 API 拒绝了请求，请检查模型名是否与模型列表完全一致";
+          fail(status >= 300 && status < 400 ? "upstream_redirect" : "upstream_status", message, 502);
+        }
+      }
+      // 非 400（或非 chat）的错误：400 已在上面单独处理并消费过 body，
+      // 这里再读一次会永远等不到数据。
       if (status < 200 || status >= 300) {
-        // Do not read or include error bodies, Location, request URLs, or arbitrary error messages.
         const message = status >= 300 && status < 400 ? "模型 API 返回重定向；请填写最终 API 地址" :
           status === 401 || status === 403 ? "模型 API 认证失败，请检查 Key 和权限" :
-          status === 404 ? "模型 API 路径或模型不存在" : status === 429 ? "模型 API 限流，请稍后重试" : "模型 API 请求失败";
+          status === 404 ? "模型 API 路径或模型不存在" :
+          status === 429 ? "模型 API 限流，请稍后重试" :
+          "模型 API 请求失败";
         fail(status >= 300 && status < 400 ? "upstream_redirect" : "upstream_status", message, 502);
       }
       const mime = String(upstream.headers["content-type"] || "").split(";")[0].trim().toLowerCase();

@@ -328,7 +328,9 @@ function assertCloudBaseUrl(raw) {
   return url.toString();
 }
 
-async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096 }) {
+// 导出给分镜拆解复用：同一套云端通道、同样的回环 temperature 处理与错误文案，
+// 不复制第二份 HTTP 逻辑（否则两边的取消/重试行为会慢慢漂移）。
+export async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096, timeoutMs = 120000 }) {
   const baseUrl = String(cloud.baseUrl || "").trim();
   const apiKey = String(cloud.apiKey || "").trim();
   const model = String(cloud.model || "").trim();
@@ -364,7 +366,7 @@ async function cloudChat({ system, userText, images = [], cloud = {}, signal, te
     ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))]
     : userText;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("云端 API 超时")), 120000);
+  const timer = setTimeout(() => controller.abort(new Error("云端 API 超时")), timeoutMs);
   const onAbort = () => controller.abort(signal?.reason);
   if (signal) {
     if (signal.aborted) controller.abort(signal.reason);

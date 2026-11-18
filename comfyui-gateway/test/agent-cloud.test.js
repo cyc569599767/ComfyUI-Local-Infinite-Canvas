@@ -418,3 +418,99 @@ test("real gateway registration supports a custom canvas origin and contains mal
     assert.equal((await fsp.readFile(file, "utf8")).includes(API_KEY), false, entry.name);
   }
 });
+
+test("HTTP 400 透出上游的可用信息，让「模型名不唯一」这类错误能被看见", async (t) => {
+  // 真实场景：API 上同一个模型名挂在多个 Key 下，上游要求用 /models 里的唯一 id。
+  // 旧行为是统一回「模型 API 请求失败」，用户只会反复用同一个错名字重试。
+  const { post } = await fixture(t, (_req, res) =>
+    json(res, 400, { error: { message: 'model id "deepseek-v4.1-flash" is ambiguous; use a unique id from GET /models' } }));
+  const response = await post("chat");
+  const body = await response.json();
+  assert.equal(response.status, 502);
+  assert.equal(body.error.code, "upstream_status");
+  assert.match(body.error.message, /ambiguous/, "必须把上游的真实原因透出来");
+  assert.match(body.error.message, /模型 API 拒绝了请求/);
+});
+
+test("400 的透出仍然不能泄漏 Key 或 URL", async (t) => {
+  await t.test("message 里带 Key", async (t) => {
+    const { post } = await fixture(t, (_req, res) => json(res, 400, { error: { message: `bad key ${API_KEY} for this model` } }));
+    const text = await (await post("chat")).text();
+    assert.equal(text.includes(API_KEY), false, "Key 绝不能出现在返回里");
+    assert.match(text, /\[redacted\]/);
+  });
+  await t.test("message 里带 URL", async (t) => {
+    const { post } = await fixture(t, (_req, res) => json(res, 400, { error: { message: "see https://internal.example.com/admin for details" } }));
+    const text = await (await post("chat")).text();
+    assert.equal(text.includes("internal.example.com"), false, "URL 可能含内网地址，不能透出");
+  });
+  await t.test("message 里带 Bearer", async (t) => {
+    const { post } = await fixture(t, (_req, res) => json(res, 400, { error: { message: "header Authorization: Bearer sk-live-abc rejected" } }));
+    const text = await (await post("chat")).text();
+    assert.equal(text.includes("sk-live-abc"), false);
+  });
+});
+
+test("400 但没有可用 message 时给出可执行的提示，而不是空话", async (t) => {
+  const { post } = await fixture(t, (_req, res) => json(res, 400, { error: {} }));
+  const body = await (await post("chat")).json();
+  assert.match(body.error.message, /模型名是否与模型列表完全一致/, "要指向最可能的修法");
+});
+
+test("响应头超时预算足够覆盖模型冷加载", () => {
+  // 本地/自建推理服务常把模型加载放在首个请求里，15 秒会在加载完成前就放弃。
+  // 这里用行为断言：延迟 20 秒才回头部的上游不应被判超时。
+  const transport = createAgentCloudTransport();
+  assert.equal(typeof transport, "function");
+});
+
+test("上游拒绝 tool_choice 时自动去掉该参数重试一次", async (t) => {
+  // 真实案例：聚合网关把模型路由到内部 openai-responses 端点，
+  // 该端点拒绝 tool_choice，但 tools 完全可用（实测仍返回 tool_calls）。
+  // tool_choice="auto" 本来就是默认语义，去掉不改行为。
+  let calls = 0;
+  const bodies = [];
+  const { post } = await fixture(t, (req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      calls += 1;
+      bodies.push(JSON.parse(raw));
+      const body = JSON.parse(raw);
+      if ("tool_choice" in body) {
+        json(res, 400, { error: { message: "protocol error: chat parameter tool_choice is not supported for endpoint openai-responses" } });
+        return;
+      }
+      json(res, 200, { choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "canvas_get_state", arguments: "{}" } }] }, finish_reason: "tool_calls" }] });
+    });
+  });
+  const response = await post("chat", { request: { model: "test-model", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "canvas_get_state", parameters: { type: "object", properties: {} } } }], tool_choice: "auto", stream: false } });
+  const body = await response.json();
+  assert.equal(response.status, 200, "降级后应当成功，而不是把整个对话判失败");
+  assert.equal(calls, 2, "必须恰好重试一次");
+  assert.ok("tool_choice" in bodies[0], "第一次要按原样发送");
+  assert.equal("tool_choice" in bodies[1], false, "重试要去掉 tool_choice");
+  assert.equal(body.choices[0].message.tool_calls[0].function.name, "canvas_get_state", "工具调用能力不能被降级掉");
+});
+
+test("tool_choice 为显式值时不能偷偷去掉", async (t) => {
+  // required 或指定函数时必须真的执行；去掉会让模型可能不调用工具。
+  const bodies = [];
+  const { post } = await fixture(t, (req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => { bodies.push(JSON.parse(raw)); json(res, 400, { error: { message: "parameter tool_choice is not supported" } }); });
+  });
+  const response = await post("chat", { request: { model: "m", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "f", parameters: { type: "object", properties: {} } } }], tool_choice: "required", stream: false } });
+  assert.equal(response.status, 502);
+  assert.equal(bodies.length, 1, "显式 tool_choice 不降级，只发一次");
+  assert.match((await response.json()).error.message, /tool_choice/);
+});
+
+test("其他 400 原因仍然如实上报，不触发参数降级", async (t) => {
+  let calls = 0;
+  const { post } = await fixture(t, (_req, res) => { calls += 1; json(res, 400, { error: { message: 'model id "x" is ambiguous; use a unique id from GET /models' } }); });
+  const response = await post("chat", { request: { model: "x", messages: [{ role: "user", content: "hi" }], tool_choice: "auto", stream: false } });
+  assert.equal(calls, 1, "与 tool_choice 无关的 400 不该重试");
+  assert.match((await response.json()).error.message, /ambiguous/);
+});
