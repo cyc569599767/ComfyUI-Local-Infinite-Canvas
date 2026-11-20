@@ -1,6 +1,14 @@
 # Third-Party Notices
 
-本仓库只分发本地集成代码和画布源码；以下组件/资产**不随仓库分发**，使用时请遵守各自许可证。
+本仓库分发本地集成代码、画布源码及下列明确标注的第三方内容；未随仓库分发的组件/资产另行注明，使用时请遵守各自许可证。
+
+## Agent Infinite Creation 技能包与参考工作流
+
+- **Agent Infinite Creation / infinite-creation** — 上游 https://github.com/SwotAtmk/infinite-creation ，采用 **PolyForm Noncommercial License 1.0.0**，不是 MIT。商业用途不在该许可授权范围内，需另行取得上游书面授权。
+- Required Notice: Copyright (c) 2026 SwotAtmk (Agent Infinite Creation / infinite-creation, https://github.com/SwotAtmk/infinite-creation)
+- `infinite-canvas/web/public/creation-skills/` 包含 17 个技能包及其源文件、参考资料和模板；`infinite-canvas/web/dist/creation-skills/` 是对应的发布副本。每个包随附 `LICENSE.upstream`，包内原有 LICENSE 和署名同时保留。完整性清单见各目录 `manifest.json`。
+- `comfyui-gateway/workflows/creation-*.json` 中迁入或改编自该项目的参考工作流同样保留其适用许可，不因本项目根目录 MIT 许可证而重新许可。完整上游条款见 `infinite-canvas/web/public/creation-skills/story-pipeline-cn/LICENSE.upstream`，官方许可文本 https://polyformproject.org/licenses/noncommercial/1.0.0/ 。
+- 本地适配包括节点/输入绑定、素材命名、媒体接入与模型配置；不包含上游模型权重。
 
 ## 运行时与依赖
 

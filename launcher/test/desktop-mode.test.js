@@ -352,6 +352,70 @@ test("desktop portable BAT handles controlled dp0 paths and forwarded args witho
   assert.equal(comfyPythonArguments(plan, 8188, true).at(-1), "--disable-auto-launch");
 });
 
+test("desktop service IPC starts and stops portable ComfyUI in the background without a console", async (t) => {
+  if (process.platform !== "win32") return t.skip("No Windows console handle on this platform");
+  const python = process.env.DESKTOP_TEST_PYTHON;
+  if (!python) return t.skip("Set DESKTOP_TEST_PYTHON to exercise the real Windows process startup");
+  const fx = await fixture(t, { comfyStartTimeoutSec: 15 });
+  const comfyDir = fx.config.comfyDir;
+  await fs.mkdir(comfyDir, { recursive: true });
+  // Startup begins with an empty selected directory, so the dashboard is ready
+  // before the user explicitly starts ComfyUI from the service controls.
+  let launcher = await fs.readFile(fx.entry, "utf8");
+  launcher = launcher.replace('const pythonCandidates = [', `const pythonCandidates = [${JSON.stringify(python)},`);
+  await fs.writeFile(fx.entry, launcher);
+  const run = startLauncher(t, fx, ["--desktop"], { DESKTOP_TEST_PYTHON: python });
+  const { services } = await run.message("desktop:ready");
+  assert.equal(services.comfy.mode, "missing");
+
+  const mainPy = path.join(comfyDir, "main.py");
+  const bat = path.join(comfyDir, "run_nvidia_gpu.bat");
+  await fs.writeFile(mainPy, [
+    "import ctypes, json, os, sys",
+    "from http.server import BaseHTTPRequestHandler, HTTPServer",
+    "class Handler(BaseHTTPRequestHandler):",
+    " def do_GET(self):",
+    "  body = {'system': {'ram_total': 2048, 'ram_free': 1024}, 'devices': [{'name': 'Fixture', 'type': 'cpu', 'vram_total': 0, 'vram_free': 0}]} if self.path == '/system_stats' else {}",
+    "  raw = json.dumps(body).encode()",
+    "  self.send_response(200 if self.path == '/system_stats' else 404)",
+    "  self.send_header('Content-Type', 'application/json')",
+    "  self.send_header('Content-Length', str(len(raw)))",
+    "  self.end_headers()",
+    "  self.wfile.write(raw)",
+    " def log_message(self, *_args): pass",
+    "ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p",
+    "open(os.path.join(os.path.dirname(__file__), 'console-state.json'), 'w', encoding='utf-8').write(json.dumps({'console': bool(ctypes.windll.kernel32.GetConsoleWindow()), 'argv': sys.argv}))",
+    "port = int(sys.argv[sys.argv.index('--port') + 1])",
+    "HTTPServer(('127.0.0.1', port), Handler).serve_forever()",
+    "",
+  ].join("\n"));
+  await fs.writeFile(bat, `@echo off\r\n"${python}" -s "${mainPy}" --windows-standalone-build\r\npause\r\n`);
+
+  const startRequestId = "start-comfy-no-console";
+  run.child.send({ type: "desktop:start-service", name: "comfy", requestId: startRequestId });
+  const started = await run.message("desktop:start-service:result", (message) => message.requestId === startRequestId);
+  assert.equal(started.ok, true, started.error);
+  assert.equal(started.result.url, fx.config.comfyUrl);
+  assert.equal((await fetch(`${services.gateway.url}/health`)).ok, true, "ComfyUI startup must not disrupt the gateway");
+  const processState = JSON.parse(await fs.readFile(path.join(comfyDir, "console-state.json"), "utf8"));
+  assert.equal(processState.console, false, "button-launched Python must not have a console window");
+  assert.ok(processState.argv.includes("--disable-auto-launch"), "do not launch a second browser window");
+
+  const statusRequestId = "comfy-owned-after-start";
+  run.child.send({ type: "desktop:service-status", requestId: statusRequestId });
+  const status = await run.message("desktop:service-status:result", (message) => message.requestId === statusRequestId);
+  assert.equal(status.result.comfy.owned, true, "manual IPC start must remain stoppable by the dashboard");
+
+  const stopRequestId = "stop-comfy-after-start";
+  run.child.send({ type: "desktop:stop-service", name: "comfy", requestId: stopRequestId });
+  const stopped = await run.message("desktop:stop-service:result", (message) => message.requestId === stopRequestId);
+  assert.equal(stopped.ok, true, stopped.error);
+  await assert.rejects(fetch(fx.config.comfyUrl, { signal: AbortSignal.timeout(1000) }));
+  await run.stop();
+  await closed(services.gateway.url); await closed(services.canvas.url);
+  assertReadOnlyCalls(); await fx.unchanged();
+});
+
 test("managed mode leaves unsupported browser-opening vendor scripts untouched and does not run them", async (t) => {
   const fx = await fixture(t);
   const comfyDir = fx.config.comfyDir;

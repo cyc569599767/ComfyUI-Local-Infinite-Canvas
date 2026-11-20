@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+import { safeCreationAssetName } from "./creation-output-names.js";
 import { nowIso, randomId, safeFileName, writeJsonAtomic } from "./util.js";
 
 function fileUrl(filename) {
@@ -214,7 +215,7 @@ export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks =
         task.status = "cancelled";
         task.error = "任务已取消";
       } else {
-        const saved = await saveOutput(task.id, result.buffer, result.ext || "mp4");
+        const saved = await saveOutput(task.id, result.buffer, result.ext || "mp4", result.assetName);
         task.status = "completed";
         task.progress = 1;
         task.promptId = result.promptId || task.promptId;
@@ -252,10 +253,19 @@ export function createTaskStore({ dataDir, logger, retentionDays = 0, maxTasks =
     }
   }
 
-  async function saveOutput(id, buffer, ext = "mp4") {
-    const filename = `${id}.${safeFileName(ext).replace(/^\./, "") || "bin"}`;
-    const target = path.join(outputDir, filename);
-    await fsp.writeFile(target, buffer);
+  async function saveOutput(id, buffer, ext = "mp4", assetName = "") {
+    const name = safeCreationAssetName(assetName);
+    const extension = safeFileName(ext).replace(/[^a-z0-9]/gi, "") || "bin";
+    const stem = `${name ? `${name}_` : ""}${safeFileName(id)}`;
+    let filename = `${stem}.${extension}`;
+    let target = path.join(outputDir, filename);
+    try { await fsp.writeFile(target, buffer, { flag: "wx" }); }
+    catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      filename = `${stem}_${randomId("")}.${extension}`;
+      target = path.join(outputDir, filename);
+      await fsp.writeFile(target, buffer, { flag: "wx" });
+    }
     return { file: target, url: fileUrl(filename), bytes: buffer.length };
   }
 

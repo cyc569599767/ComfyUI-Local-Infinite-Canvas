@@ -205,6 +205,11 @@ test("pack expansion skips retired ids while direct ids and requires still fail 
 
 test("C1 old remote index keeps the four-view card and blocks retired downloads", async () => {
     const legacy = legacyIndex();
+    // This test checks dependency presence, not real model byte counts. Windows
+    // truncate allocates the full size; keep the served fixture and files small.
+    for (const resource of legacy.resources) {
+        if (FOUR_VIEW_IDS.slice(0, 3).includes(resource.id)) resource.size = 1024;
+    }
     const { server, url } = await serveIndex({ value: legacy });
     const workspace = await tempWorkspace();
     const manager = createManager({ workspace, indexUrl: url });

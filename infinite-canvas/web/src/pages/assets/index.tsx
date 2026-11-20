@@ -5,6 +5,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { useCopyText } from "@/hooks/use-copy-text";
+import { creationAssetDownloadName } from "@/lib/agent/creation-output-names";
 import { formatBytes, formatDuration, readFileAsDataUrl } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile } from "@/services/file-storage";
 import { getImageBlob, getImagePreviewRevision, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
@@ -175,7 +176,7 @@ export default function AssetsPage() {
                 return;
             }
             const ext = mediaExtension(asset);
-            saveAs(blob, `${asset.title || "asset"}.${ext}`);
+            saveAs(blob, creationAssetDownloadName(asset, ext) || `${asset.title || "asset"}.${ext}`);
         } catch {
             message.error(t("assets.downloadFailed"));
         }

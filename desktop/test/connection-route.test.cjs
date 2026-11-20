@@ -1,6 +1,20 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');
-const {buildConnectionRoute:route,connectionIntersectsView:visible,connectionLayerGeometry:layer}=require('../../infinite-canvas/web/src/lib/canvas/connection-route.ts');
+const path = require('node:path');
+const { createRequire } = require('node:module');
+const vm = require('node:vm');
+// This source now imports the creation layout via the web tsconfig alias.
+// Bundle using the web's existing build dependency instead of Node's TS loader,
+// which does not implement tsconfig paths or extensionless TS imports.
+const web = path.resolve(__dirname, '../../infinite-canvas/web');
+const webRequire = createRequire(require.resolve('vite', { paths: [web] }));
+const bundle = webRequire('esbuild').buildSync({
+  absWorkingDir: web, entryPoints: ['src/lib/canvas/connection-route.ts'],
+  tsconfig: path.join(web, 'tsconfig.json'), bundle: true, platform: 'node', format: 'cjs', write: false,
+});
+const loaded = { exports: {} };
+vm.runInThisContext(`(function(module,exports,require){${bundle.outputFiles[0].text}\n})`)(loaded, loaded.exports, require);
+const {buildConnectionRoute:route,connectionIntersectsView:visible,connectionLayerGeometry:layer}=loaded.exports;
 const node=(id,x,y,w=160,h=100)=>({id,type:'image',position:{x,y},width:w,height:h});
 test('connections preserve direct cubic shape and exact source/target ports',()=>{
  const r=route(node('a',30,120),node('b',300,220));

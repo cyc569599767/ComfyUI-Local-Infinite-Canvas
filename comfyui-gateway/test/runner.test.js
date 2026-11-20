@@ -15,6 +15,25 @@ function entry() {
   };
 }
 
+test("execution error prioritizes failed node and traceback instead of truncating behind cached events", async () => {
+  const runEntry = entry();
+  await assert.rejects(runWorkflow({entry:runEntry, context:buildContext({prompt:"x"}), comfy:{
+    submit:async()=>({promptId:"failure-id"}),
+    history:async()=>({status:{status_str:"error",messages:[
+      ["execution_start",{prompt_id:"failure-id"}],
+      ["execution_cached",{nodes:Array.from({length:1000},(_,i)=>String(i))}],
+      ["execution_error",{node_id:"170:169",node_type:"KSampler",exception_type:"ValueError",exception_message:"too many values to unpack (expected 4)",prompt_id:"failure-id",traceback:['File "D:/ComfyUI/comfy/ldm/qwen_image21/model.py", line 427','B, C, H, W = x.shape']}],
+    ]}}),
+  }}), error => {
+    assert.equal(error.code,"comfy_execution_failed");
+    assert.match(error.message,/170:169.*KSampler/);
+    assert.match(error.message,/too many values to unpack/);
+    assert.match(error.message,/匹配整套/);
+    assert.equal(error.message.includes("execution_cached"),false);
+    return true;
+  });
+});
+
 test("a selected main model replaces the workflow UNET file", async () => {
   let submitted = null;
   const runEntry = {

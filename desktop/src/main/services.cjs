@@ -249,8 +249,24 @@ class ServiceManager extends EventEmitter {
     });
   }
 
-  startService(name) { return this.controlLauncher('desktop:start-service', name); }
-  stopService(name) { return this.controlLauncher('desktop:stop-service', name); }
+  async startService(name) {
+    const result = await this.controlLauncher('desktop:start-service', name);
+    // A manually started ComfyUI is owned even when the last probe recorded it as missing.
+    // Preserve that ownership across the follow-up probe so the dashboard keeps its Stop button.
+    if (name === 'comfy' && result.ok && !result.adopted && this.state.services?.comfy) {
+      this.update({ services: { ...this.state.services, comfy: { ...this.state.services.comfy, mode: 'started', ready: true } } });
+    }
+    return result;
+  }
+
+  async stopService(name) {
+    const result = await this.controlLauncher('desktop:stop-service', name);
+    if (name === 'comfy' && result.ok && this.state.services?.comfy) {
+      this.update({ services: { ...this.state.services, comfy: { ...this.state.services.comfy, mode: 'missing', ready: false } } });
+    }
+    return result;
+  }
+
   serviceStatus() { return this.controlLauncher('desktop:service-status', '', 15000); }
 
   async activeWork() {

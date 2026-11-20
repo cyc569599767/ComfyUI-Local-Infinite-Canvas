@@ -8,9 +8,10 @@ const {buildGenerationConfig}=await import('../src/lib/canvas/canvas-generation-
 const {resolveVideoWorkflowMode}=await import('../src/lib/canvas/video-model-mode');
 const {createVideoGenerationTask,createVideoUpscaleTask}=await import('../src/services/api/video');
 const {buildNodeGenerationContext}=await import('../src/components/canvas/canvas-node-generation');
+const {requestLocalAudioGeneration}=await import('../src/services/api/audio');
 const requests:FormData[]=[];
 const requestPaths:string[]=[];
-const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:async req=>{requestPaths.push(new URL(req.url).pathname);requests.push(await req.formData());return Response.json({id:'fixture-task',status:'queued'});}});
+const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:async req=>{requestPaths.push(new URL(req.url).pathname);requests.push(await req.formData());return Response.json(new URL(req.url).pathname.endsWith('/audio/speech')?{data:[{b64_json:'AA=='}],mime_type:'audio/wav'}:{id:'fixture-task',status:'queued'});}});
 afterAll(()=>{server.stop(true);if(original)Object.defineProperty(globalThis,'localStorage',original);else Reflect.deleteProperty(globalThis,'localStorage');});
 const workflowIds=['video-h3-ref2va','video-h3-ref2va-novdn','video-h3-frames','video-h3-frames-novdn','video-h3-t2v','video-h3-t2v-novdn','video-h3-fast','video-h3-character-swap'];
 const models:ChannelModel[]=workflowIds.map(id=>({name:id,workflowId:id,capability:'video'}));models.push({name:'custom-base',workflowId:'video-h3-ref2va-novdn',baseModel:'custom.safetensors',capability:'video'},{name:'other-provider',capability:'video'});
@@ -95,6 +96,34 @@ test('fast draft configured text remains text and uploads no attached images',as
 test('fixed text workflow cannot inherit stale reference mode',async()=>{
  await createVideoGenerationTask({...selected('video-h3-t2v-novdn'),videoMode:'reference'},'Prompt',[pic],{videos:[vid],audios:[aud]});const body=requests.at(-1)!;expect(body.get('mode')).toBe('text');expect(body.getAll('images')).toHaveLength(0);expect(body.getAll('video[]')).toHaveLength(0);expect(body.getAll('audio[]')).toHaveLength(0);
 });
+test('创作专用生成配置不继承云端通道/插帧/全局种子',()=>{
+ const node:CanvasNodeData={id:'c',type:'video',title:'c',position:{x:0,y:0},width:300,height:200,metadata:{model:'local-gateway::creation-video-h3-768',creationOutput:{projectNodeId:'wb',stage:'pipeline'},params:{resolution:'540P',aspect_ratio:'9:16',seed:7}}};
+ const result=buildGenerationConfig({...config,videoInterpolation:'2x',seed:'999',seedFixed:'true',params:{loras:[{name:'wrong'}]}},node,'video');
+ expect(result.channels).toHaveLength(1);expect(result.channels[0].id).toBe('local-gateway');expect(result.channels[0].baseUrl).not.toBe(config.channels[0].baseUrl);
+ expect(result.params).toEqual({resolution:'540P',aspect_ratio:'9:16',seed:7,assetName:'c'});expect(result.videoInterpolation).toBe('off');expect(result.videoMode).toBe('reference');
+});
+test('创作H3九图三音三视频不重复上传且保留分辨率参数',async()=>{
+ for(const resolution of ['360p','480p','540p','720p','768p','1080p']) {
+  const model=resolution==='1080p'?'creation-video-h3-1080':'creation-video-h3-768';
+  await createVideoGenerationTask({...selected(model),videoMode:'text',videoInterpolation:'2x',params:{resolution:resolution.toUpperCase(),aspect_ratio:'9:16'}},'Prompt',Array.from({length:9},(_,i)=>({...pic,id:String(i)})),{videos:[vid,vid,vid],audios:[aud,aud,aud]});
+  const body=requests.at(-1)!;
+  expect(body.getAll('images')).toHaveLength(9);expect(body.getAll('image[]')).toHaveLength(0);
+  expect(body.getAll('videos')).toHaveLength(3);expect(body.getAll('audios')).toHaveLength(3);
+  expect(JSON.parse(String(body.get('params')))).toMatchObject({resolution:resolution.toUpperCase(),aspect_ratio:'9:16'});
+  expect(JSON.parse(String(body.get('params'))).interpolation).toBeUndefined();
+  expect(body.get('model')).toBe(model);expect(body.get('mode')).toBe('reference');expect(body.get('generate_audio')).toBe('true');
+ }
+ await expect(createVideoGenerationTask({...selected('creation-video-h3-768'),videoMode:'reference'},'Prompt',Array.from({length:10},()=>pic))).rejects.toThrow('最多');
+});
+test('创作音色音乐和视频请求携带语义名称不把名称混入提示词',async()=>{
+ for(const [model,mode,name] of [['creation-audio-voice-design','voice-design','陆明-音色'],['creation-audio-music','music','灯塔主题配乐']] as const){
+  await requestLocalAudioGeneration({...selected(model),params:{assetName:name}},mode,{prompt:'实际朗读文案或音乐描述',voiceDescription:'低沉男声'});
+  const body=requests.at(-1)!;expect(body.get('input')).toBe('实际朗读文案或音乐描述');expect(JSON.parse(String(body.get('params'))).assetName).toBe(name);
+ }
+ await createVideoGenerationTask({...selected('creation-video-h3-768'),params:{assetName:'灯塔重逢-视频'}},'镜头运动描述',[pic]);
+ expect(JSON.parse(String(requests.at(-1)!.get('params'))).assetName).toBe('灯塔重逢-视频');
+});
+
 test('no-reference request does not manufacture media to bypass server validation',async()=>{
  await createVideoGenerationTask(selected('video-h3-ref2va-novdn'),'Prompt',[]);const body=requests.at(-1)!;expect(body.get('mode')).toBe('reference');expect(body.getAll('images')).toHaveLength(0);expect(body.getAll('video[]')).toHaveLength(0);expect(body.getAll('audio[]')).toHaveLength(0);
 });

@@ -42,6 +42,33 @@ test('workflow upgrade merges new upstream registry IDs while preserving existin
   assert.ok(conflicts.some(item => item.startsWith('registry.json')));
 });
 
+test('desktop upgrade adds Qwen21 alongside seven originals without replacing user models or entries', t => {
+  const root = temporary(t);
+  const source = path.join(root, 'source'); const target = path.join(root, 'user');
+  const bundled = path.resolve(__dirname, '../../comfyui-gateway/workflows');
+  const entries = JSON.parse(fs.readFileSync(path.join(bundled, 'registry.json'), 'utf8')).workflows.filter(entry => entry.source?.kind === 'creation-reference');
+  assert.equal(entries.length, 8);
+  assert.ok(entries.some(entry => entry.id === 'creation-image-qwen21-edit'));
+  file(source, 'registry.json', JSON.stringify({ version: 1, workflows: entries }));
+  for (const entry of entries) file(source, entry.file, fs.readFileSync(path.join(bundled, entry.file), 'utf8'));
+  const local = { id: 'user-image', name: 'user-image', file: 'user-image.json', label: '保留用户工作流' };
+  file(target, 'registry.json', JSON.stringify({ version: 1, workflows: [local] }));
+  file(target, local.file, '{}');
+  const overrides = JSON.stringify({ version: 1, workflows: { 'creation-image-krea2': { '96': { model: 'user-choice' } } } });
+  file(root, 'data/workflow-model-overrides.json', overrides);
+  const baseline = path.join(root, 'baseline.json');
+  seedWorkflows(source, target, baseline);
+  seedWorkflows(source, target, baseline);
+  const result = JSON.parse(fs.readFileSync(path.join(target, 'registry.json'), 'utf8')).workflows;
+  assert.deepEqual(result.find(entry => entry.id === local.id), local);
+  assert.equal(result.length, 9);
+  for (const entry of entries) {
+    assert.equal(result.filter(row => row.id === entry.id).length, 1);
+    assert.equal(fs.readFileSync(path.join(target, entry.file), 'utf8'), fs.readFileSync(path.join(bundled, entry.file), 'utf8'));
+  }
+  assert.equal(fs.readFileSync(path.join(root, 'data/workflow-model-overrides.json'), 'utf8'), overrides);
+});
+
 test('application isolates installed resources from config, data, outputs and workflows', t => {
   const root = temporary(t); const runtime = path.join(root, 'resources'); const user = path.join(root, 'user');
   for (const entry of ['launcher/start.mjs', 'comfyui-gateway/src/server.js', 'infinite-canvas/web/dist/index.html', 'runtime-manifest.json', 'comfyui-gateway/workflows/registry.json']) file(runtime, entry, '{}');

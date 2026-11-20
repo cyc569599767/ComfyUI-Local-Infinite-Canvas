@@ -89,6 +89,21 @@ test('renderer clears inherited VITE keys without modifying parent env', () => {
   assert.equal(original.VITE_SECRET, 'never-inline');
 });
 
+test('explicit Agent renderer enables canvas Agent without inheriting Vite keys or publishing source-editing plugin', t => {
+  const environment = build.rendererEnvironment({ VITE_LOCAL_ONLY: 'true', VITE_SECRET: 'private', KEEP: 'yes' }, { withAgent: true });
+  assert.deepEqual(environment, { KEEP: 'yes', VITE_LOCAL_ONLY: '0', VITE_LOCAL_GATEWAY_URL: '' });
+  const root = fixture(t);
+  const layout = build.getLayout(root);
+  put(root, 'infinite-canvas/web/node_modules/vite/bin/vite.js');
+  assert.equal(build.rendererCommand(layout, {}, { withAgent: true }).options.env.VITE_LOCAL_ONLY, '0');
+  const incremental = build.rendererCommand(layout, {}, { withAgent: true, preserveExisting: true });
+  assert.deepEqual(incremental.args.slice(-2), ['--emptyOutDir', 'false']);
+  assert.equal(incremental.options.env.VITE_LOCAL_ONLY, '0');
+  put(layout.staging, `${verify.RENDERER}/plugins/index.json`, ['/plugins/canvas-assistant.js', '/plugins/comfyui-lora.js']);
+  build.filterPublishedPlugins(layout.staging);
+  assert.deepEqual(verify.readJson(path.join(layout.staging, verify.RENDERER, 'plugins/index.json')), ['/plugins/comfyui-lora.js']);
+});
+
 test('renderer uses Node and the repository Vite with an absolute staging outDir', (t) => {
   const root = fixture(t);
   const layout = build.getLayout(root);

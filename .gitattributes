@@ -8,3 +8,8 @@
 *.gif binary
 *.mp4 binary
 *.woff2 binary
+# Vendored skill manifests contain byte-level SHA-256 checksums.
+# Preserve upstream bytes/formatting and generated shader strings.
+infinite-canvas/web/public/creation-skills/** -text -whitespace
+infinite-canvas/web/dist/creation-skills/** -text -whitespace
+infinite-canvas/web/dist/assets/** -whitespace

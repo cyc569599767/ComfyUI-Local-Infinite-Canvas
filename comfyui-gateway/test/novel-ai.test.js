@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 
 import { createNovelAi, NovelAiError } from "../src/novel-ai.js";
 
@@ -310,4 +311,86 @@ test("章纲：JSON 被截成半截时同样降批重试", async () => {
   const list = await ai.chapters({ idea: "想法", structure: {}, volumes: [], chapterCount: 4, batchSize: 4 });
   assert.equal(list.length, 4);
   assert.deepEqual(list.map((c) => c.seq), [1, 2, 3, 4]);
+});
+
+async function cloudFixture(t, handler) {
+  const bodies = [];
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw));
+      handler(req, res, bodies.length);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+  return {
+    bodies,
+    cloud: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture-only-key-123", model: "fixture-novel-model", apiFormat: "openai" },
+  };
+}
+
+const sendJson = (res, status, body) => {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+};
+
+test("云端章纲：真实 HTTP 400 保留上游状态和请求号，不能拆批重发", async (t) => {
+  const { cloud, bodies } = await cloudFixture(t, (_req, res) => {
+    res.setHeader("x-request-id", "provider-fixture-400");
+    sendJson(res, 400, { error: { message: "provider error: OpenAI Responses 400 Bad Request: invalid_request: Invalid request" } });
+  });
+  await assert.rejects(() => createNovelAi().chapters({
+    idea: "仅用于本地测试", engine: "cloud", chapterCount: 20, cloud,
+  }), (error) => {
+    assert.equal(error.code, "cloud_api_bad_request");
+    assert.equal(error.details.upstreamStatus, 400);
+    assert.equal(error.details.upstreamRequestId, "provider-fixture-400");
+    assert.equal(error.details.apiFormat, "openai", "上游错误提到 Responses，不等于调用方使用 Responses");
+    assert.equal(error.details.request.temperatureSent, false);
+    assert.match(error.message, /具体字段需在服务端日志中确认/);
+    assert.equal(bodies.length, 1, "普通上游 400 不是模型截断，禁止拆批重发");
+    return true;
+  });
+});
+
+test("云端错误：不泄露 Key、作品内容、URL 或上游原始响应", async (t) => {
+  const idea = "PRIVATE-FIXTURE-NOVEL-IDEA";
+  const { cloud } = await cloudFixture(t, (_req, res) => sendJson(res, 400, {
+    error: { message: `bad request fixture-only-key-123 Bearer sk-private-123 https://private.invalid/path ${idea}` },
+    request: { messages: [idea], authorization: "fixture-only-key-123" },
+  }));
+  await assert.rejects(() => createNovelAi().outline({ idea, engine: "cloud", cloud }), (error) => {
+    const exposed = JSON.stringify({ message: error.message, details: error.details });
+    for (const secret of [idea, cloud.apiKey, "sk-private-123", "private.invalid"]) assert.equal(exposed.includes(secret), false, secret);
+    assert.equal(error.details.upstreamStatus, 400);
+    assert.equal("messages" in error.details, false);
+    assert.equal("authorization" in error.details, false);
+    return true;
+  });
+});
+
+test("云端章纲：上游 context length 错误不是生成截断，不拆批重试", async (t) => {
+  const { cloud, bodies } = await cloudFixture(t, (_req, res) => sendJson(res, 400, {
+    error: { message: "maximum context length exceeded" },
+  }));
+  await assert.rejects(() => createNovelAi().chapters({ idea: "测试", engine: "cloud", chapterCount: 20, cloud }),
+    (error) => error.code === "cloud_api_bad_request" && error.details.upstreamStatus === 400);
+  assert.equal(bodies.length, 1);
+});
+
+test("云端总纲：真实 HTTP JSON 请求显式关闭流式，回环地址不发温度", async (t) => {
+  const { cloud, bodies } = await cloudFixture(t, (_req, res) => sendJson(res, 200, {
+    choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ title: "测试作品", outline: "本地验证的总纲" }) } }],
+  }));
+  const result = await createNovelAi().outline({ idea: "本地测试", engine: "cloud", cloud });
+  assert.equal(result.outline, "本地验证的总纲");
+  assert.equal(bodies[0].stream, false);
+  assert.equal("temperature" in bodies[0], false);
+  assert.equal(bodies[0].model, cloud.model);
+  assert.equal(bodies[0].max_tokens, 8192);
 });

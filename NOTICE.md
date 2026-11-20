@@ -28,7 +28,7 @@
 
 - 项目名：ComfyUI-本地无限画布
 - 作者：1314521gjy（GitHub）
-- 许可证：MIT License，见根目录 `LICENSE`
+- 许可证：本地原创集成代码为 MIT License，见根目录 `LICENSE`；第三方技能包与参考工作流不包含在该 MIT 授权内，分别适用其随附许可。
 - 仓库：https://github.com/1314521gjy/ComfyUI-Local-Infinite-Canvas
 
 ## 第三方与模型

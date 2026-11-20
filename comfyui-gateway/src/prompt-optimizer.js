@@ -340,8 +340,37 @@ function assertCloudBaseUrl(raw) {
   return url.toString();
 }
 
-// 导出给分镜拆解复用：同一套云端通道、同样的回环 temperature 处理与错误文案，
-// 不复制第二份 HTTP 逻辑（否则两边的取消/重试行为会慢慢漂移）。
+function cloudErrorId(value, apiKey) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value)
+    && (!apiKey || !value.includes(apiKey)) && !/^sk-/i.test(value) ? value : undefined;
+}
+
+function cloudHttpError({ response, data, apiKey, maxTokens, temperatureSent, imageCount }) {
+  const upstreamRequestId = cloudErrorId(response.headers.get("x-request-id"), apiKey)
+    || cloudErrorId(response.headers.get("request-id"), apiKey)
+    || cloudErrorId(data?.request_id, apiKey)
+    || cloudErrorId(/\b(req_[A-Za-z0-9_-]{8,120})\b/.exec(String(data?.error?.message ?? data?.message ?? ""))?.[1], apiKey);
+  // Never expose arbitrary provider text: it can echo prompt fragments, URLs or credentials.
+  // Keep only bounded metadata and a safe upstream request ID for log correlation.
+  const details = {
+    upstreamStatus: response.status,
+    apiFormat: "openai",
+    operation: "chat/completions",
+    ...(upstreamRequestId ? { upstreamRequestId } : {}),
+    request: { maxTokens, temperatureSent, stream: false, messageCount: 2, imageCount },
+  };
+  // 普通 400 不能推断为 token 截断、JSON 内容限制或随机失败，也不能盲目重试。
+  const hint = response.status === 400
+    ? "上游拒绝请求（HTTP 400），具体字段需在服务端日志中确认；本程序不会猜测原因或自动重发。"
+    : `上游请求失败（HTTP ${response.status}）。`;
+  return new PromptOptimizeError(
+    `云端 API 失败：${hint}${upstreamRequestId ? ` 上游请求号：${upstreamRequestId}` : ""}`,
+    { status: 502, code: response.status === 400 ? "cloud_api_bad_request" : "cloud_api_failed", details },
+  );
+}
+
+// OpenAI 兼容协议在下面直接 fetch；其它协议才调用 requestAgentCloudJson。
+// 不要只修 agent-cloud transport，就假定覆盖到了这条调用路径。
 export async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096, timeoutMs = 120000 }) {
   const baseUrl = String(cloud.baseUrl || "").trim();
   const apiKey = String(cloud.apiKey || "").trim();
@@ -393,6 +422,8 @@ export async function cloudChat({ system, userText, images = [], cloud = {}, sig
         { role: "user", content: userContent },
       ],
       max_tokens: maxTokens,
+      // Streaming is deliberately disabled: this helper expects one JSON document.
+      stream: false,
     };
     // 本机服务不传 temperature，交给模型自己的默认采样。
     if (!isLoopbackEndpoint) payload.temperature = requestTemperature;
@@ -417,16 +448,21 @@ export async function cloudChat({ system, userText, images = [], cloud = {}, sig
     if (!response.ok && !isLoopbackEndpoint && temperature !== 1) {
       const message = data?.error?.message || data?.message || text || "";
       // Kimi 等思考模型只接受 temperature=1；按报错重试一次，不维护模型名白名单。
-      if (/invalid temperature|only\s+1\s+is\s+allowed|temperature.*not\s+supported/i.test(String(message))) {
+      if (/invalid temperature|only\s+1\s+is\s+allowed/i.test(String(message))) {
         ({ response, text, data } = await post(1));
       }
     }
     if (!response.ok) {
-      const message = data?.error?.message || data?.message || text || `HTTP ${response.status}`;
-      const imageHint = images.length && [400, 415, 422].includes(response.status)
-        ? "（若当前模型不支持图片输入，请换支持视觉的模型或改用本地优化）"
-        : "";
-      throw new PromptOptimizeError(`云端 API 失败：${truncate(String(message), 800)}${imageHint}`, { status: 502, code: "cloud_api_failed", details: data });
+      // Preserve only safe, bounded diagnostics. A normal 400 may signal protocol, model,
+      // routing or endpoint limitations; do not guess, reshape the request or auto-retry it.
+      throw cloudHttpError({
+        response,
+        data,
+        apiKey,
+        maxTokens,
+        temperatureSent: !isLoopbackEndpoint,
+        imageCount: images.length,
+      });
     }
     return { content: cloudContent(data), finishReason: cloudFinishReason(data), model, elapsedMs: Date.now() - started };
   } catch (error) {

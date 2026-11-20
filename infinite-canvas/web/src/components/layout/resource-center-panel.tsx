@@ -30,6 +30,7 @@ import { isGatewayDown } from "@/services/api/gateway-status";
 import { LOCAL_ONLY } from "@/constant/app-mode";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useConfigStore } from "@/stores/use-config-store";
+import { CreationWorkflowSection, CREATION_WORKFLOW_IDS } from "./creation-workflow-section";
 
 const copyByLocale = {
     zh: {
@@ -619,6 +620,7 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const [status, setStatus] = useState<ResourceStatus | null>(null);
     const [loading, setLoading] = useState(true);
+    const [workflowError, setWorkflowError] = useState("");
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState("");
     const [job, setJob] = useState<ResourceJob | null>(null);
@@ -661,11 +663,11 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
         setError("");
         if (refresh) setRefreshing(true);
         else setLoading(true);
+        void fetchRegisteredWorkflows().then((items) => { setAllWorkflows(items); setWorkflowError(""); }).catch((e) => setWorkflowError(String(e.message || e)));
+        if (refresh) window.dispatchEvent(new Event("local-gateway-refresh-resources"));
         try {
             const next = refresh ? await refreshResourceStatus() : await fetchResourceStatus();
             applyStatus(next);
-            // 工作流全量列表独立加载：资源中心主体只关心资源包，改名需要覆盖不依赖资源包的工作流。
-            void fetchRegisteredWorkflows().then(setAllWorkflows).catch(() => undefined);
         } catch (loadError) {
             setError(loadError instanceof Error ? loadError.message : String(loadError));
         } finally {
@@ -682,6 +684,7 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
     useEffect(() => {
         const refresh = () => {
             void fetchResourceStatus().then(applyStatus).catch(() => undefined);
+            void fetchRegisteredWorkflows().then((items) => { setAllWorkflows(items); setWorkflowError(""); }).catch((e) => setWorkflowError(String(e.message || e)));
         };
         window.addEventListener("local-gateway-refresh-resources", refresh);
         return () => window.removeEventListener("local-gateway-refresh-resources", refresh);
@@ -1054,12 +1057,11 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
         });
     };
 
-    if (loading && !status) {
-        return <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-stone-200 p-8 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400"><RefreshCw className="size-4 animate-spin" />{copy.scanFirst}</div>;
-    }
-
     return (
         <div className="space-y-3">
+            <CreationWorkflowSection />
+            {loading && !status ? <div className="text-xs text-stone-500">{copy.scanFirst}</div> : null}
+            {workflowError ? <div role="alert" className="text-xs text-red-600">{workflowError}<Button size="small" onClick={() => void load()}>{copy.refresh}</Button></div> : null}
             <div data-onboarding="resource-center" className="rounded-xl border border-sky-200 bg-sky-50/70 p-3 dark:border-sky-900/60 dark:bg-sky-950/20">
                 <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
                     <Bot className="size-4 text-sky-600 dark:text-sky-300" />
@@ -1526,7 +1528,7 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
                         <span className="text-stone-400 dark:text-stone-500">{copy.allWorkflowsHint}</span>
                     </div>
                     <div className="thin-scrollbar max-h-64 space-y-1 overflow-y-auto">
-                        {allWorkflows.map((workflow) => (
+                        {allWorkflows.filter((workflow) => !CREATION_WORKFLOW_IDS.includes(workflow.id)).map((workflow) => (
                             <div key={workflow.id} className="flex items-center gap-2 rounded-lg border border-stone-200 bg-white/60 px-2 py-1.5 dark:border-stone-800 dark:bg-white/[0.02]">
                                 <div className="min-w-0 flex-1">
                                     <div className={`truncate text-xs font-medium ${workflow.enabled === false ? "text-stone-400 dark:text-stone-500" : "text-stone-800 dark:text-stone-100"}`}>{workflow.label}</div>

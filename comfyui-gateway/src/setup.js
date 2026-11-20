@@ -8,6 +8,7 @@ import { detectComfyLayout, loadDirectorySettings, normalizeDirectorySettings, w
 import { isApiWorkflow, isUiWorkflow } from "./registry.js";
 import { findSimilarModel } from "./model-match.js";
 import { MODEL_LOADER_SPECS as LOADER_SPECS, discoverModelLoaderSpecs } from "./model-loaders.js";
+import { workflowModelCompatibilityProblems } from "./workflow-model-compatibility.js";
 import { MODEL_DIR_KEYS, collectModelRoots, modelRelativePath } from "./model-paths.js";
 import { nowIso, randomId, truncate, writeJsonAtomic } from "./util.js";
 
@@ -424,8 +425,18 @@ export function createSetupManager({ config, registry, comfy, logger, mainModelF
         return crossClassUserAliasFor(classType, input, value, view);
     }
 
-    function modelAliasFor(classType, input, value, view = null) {
+    function modelAliasFor(classType, input, value, view = null, { strictModelNames = false } = {}) {
         if (!value) return "";
+        if (strictModelNames) {
+            // strict 不能回退到同类其他输入的合并候选，尤其是 H3 多模型加载器。
+            const catalog = view ? view.loaderCatalog : loaderCatalog;
+            const options = (catalog?.[`${classType}\u0000${input}`] || []).filter(isModelOption);
+            const exact = options.find((item) => normalizeAliasValue(item) === normalizeAliasValue(value));
+            if (exact) return exact;
+            const basename = normalizeAliasValue(value).split("/").pop();
+            const matches = options.filter((item) => normalizeAliasValue(item).split("/").pop() === basename);
+            return matches.length === 1 ? matches[0] : "";
+        }
         // 用户显式「自选替换」优先：相似匹配只是没自选时的自动兜底，
         // 否则资源卡显示“已替换”，实际出图却仍走相似模型。
         const user = userModelAliasFor(classType, input, value, view);
@@ -657,7 +668,7 @@ export function createSetupManager({ config, registry, comfy, logger, mainModelF
     }
 
     function validateWorkflow(workflow, classes, loaders, entry, view = null) {
-        const problems = [];
+        const problems = workflowModelCompatibilityProblems(entry, workflow);
         for (const [nodeId, node] of Object.entries(workflow || {})) {
             const classType = node?.class_type;
             if (!classType || !classes.has(classType)) {
@@ -668,6 +679,12 @@ export function createSetupManager({ config, registry, comfy, logger, mainModelF
             for (const loader of nodeLoaders) {
                 const value = node.inputs?.[loader.input];
                 if (typeof value !== "string" || !value || loader.options.has(value)) continue;
+                if (entry?.strictModelNames) {
+                    if (!modelAliasFor(classType, loader.input, value, view, entry)) {
+                        problems.push({ type: "model", message: `缺少精确模型 ${classType}.${loader.input}=${value}（仅允许精确文件名或唯一同名目录映射）`, classType, input: loader.input, value });
+                    }
+                    continue;
+                }
                 const override = mainModelFile(entry?.id);
                 const overrideLower = normalizeAliasValue(override).toLowerCase();
                 const overrideInstalled = Boolean(override) && [...loader.options].some((option) => normalizeAliasValue(option).toLowerCase() === overrideLower);

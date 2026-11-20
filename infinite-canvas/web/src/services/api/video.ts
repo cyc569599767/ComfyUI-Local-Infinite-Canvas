@@ -37,6 +37,8 @@ const VIDEO_UPSCALE_MODELS: Record<VideoUpscaleMethod, string> = {
 };
 export type VideoInterpolateSource = VideoUpscaleSource;
 export type VideoInterpolateParams = { multiplier: 2 | 3 };
+/** 时间线片段：与视频编辑工作台的 EditClip 对齐，source 指向本次上传的第几个文件。 */
+export type VideoMergeClip = { source: number; inPoint: number; outPoint: number; duration: number; start: number; track: number; layer?: number; volume: number };
 export type VideoPreview = { url: string; mime?: string; step?: number; total?: number };
 type WaitOptions = RequestOptions & { onPreview?: (preview: VideoPreview | null) => void; onSteps?: (steps: { step: number; total: number }) => void };
 type GeminiInlineData = { bytesBase64Encoded: string; mimeType: string };
@@ -189,6 +191,61 @@ export async function createVideoInterpolateTask(config: AiConfig, source: Video
     }
 }
 
+export type VideoMergeSource = { name: string; type?: string; url?: string; storageKey?: string; duration?: number };
+export type VideoMergeParams = {
+    /** 按播放顺序排好的片段；source 是 sources 数组的下标。 */
+    clips: VideoMergeClip[];
+    sources: VideoMergeSource[];
+    totalSeconds?: number;
+    size?: string;
+    fps?: number;
+    /** 合并只在本地网关有实现；默认沿用当前视频模型所在的通道。 */
+    model?: string;
+};
+
+/**
+ * 把时间线合并成一个 mp4。
+ *
+ * 复用超分/插帧那套「上传素材 → 建任务 → 轮询 /v1/videos/:id」的链路：
+ * 合并本身在网关用 ffmpeg 跑，前端不需要额外依赖，也不必把整条时间线塞进内存。
+ */
+export async function createVideoMergeTask(config: AiConfig, params: VideoMergeParams, options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (!params.clips.length) throw new Error(apiText("noVideoTask"));
+    const formData = new FormData();
+    // 同一素材被裁成两段时只上传一次，clips.source 复用它 —— 上传量是素材数而不是片段数。
+    const files = await Promise.all(
+        params.sources.map(async (source, index) => {
+            return referenceMediaToFile({ ...source, name: source.name || `clip_${index + 1}.mp4` }, "source.mp4", "invalidReferenceVideo", options);
+        }),
+    );
+    if (!files.length) throw new Error(apiText("noVideoTaskId"));
+    // Resolution may finish out of order; append only after Promise.all so each
+    // timeline.source continues to point to the intended multipart file.
+    files.forEach(file => formData.append("videos", file, file.name));
+    formData.append("timeline", JSON.stringify(params.clips));
+    if (Number(params.totalSeconds) > 0) formData.append("total_seconds", String(params.totalSeconds));
+    if (params.size) formData.append("size", params.size);
+    if (Number(params.fps) > 0) formData.append("fps", String(params.fps));
+    // 合并只是网关的 ffmpeg 拼接，不挑模型；但通道必须落在本地网关上，
+    // 桌面版默认通道就是它，云端通道没有 /videos/merge 这条路由。
+    // 显式传入带通道编码的模型名，create 和 poll 就会解析到同一个通道。
+    const channelModel = params.model || config.videoModel || config.model;
+    if (!channelModel) throw new Error(apiText("videoModelRequired"));
+    const requestConfig = resolveModelRequestConfig(config, channelModel);
+    try {
+        const created = unwrapVideoResponse(
+            (await axios.post<ApiVideoResponse>(aiApiUrl(requestConfig, "/videos/merge"), formData, {
+                headers: aiHeaders(requestConfig),
+                signal: options?.signal,
+            })).data,
+        );
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model: channelModel };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     if (task.provider === "plugin") {
         const result = pluginVideoResults.get(task.id);
@@ -303,11 +360,13 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     const mode = resolveVideoMode(config.videoMode, references.length);
     const fastDraft = baseVideoWorkflowId(videoWorkflowId(config, model)) === "video-h3-fast";
     const frameMode = config.frameMode || (references.length >= 2 ? "both" : "first");
-    const selectedImages = references.slice(0, mode === "text" ? 0 : mode === "frames" ? 2 : 6);
-    const selectedVideos = mode === "reference" ? (options?.videos || []).slice(0, 1) : [];
-    const selectedAudios = mode === "reference" ? (options?.audios || []).slice(0, 2) : [];
+    const creationH3 = /^creation-video-h3-(768|1080)$/.test(modelOptionName(model));
+    if (creationH3 && (references.length > 9 || (options?.videos?.length || 0) > 3 || (options?.audios?.length || 0) > 3)) throw new Error("创作H3最多支持9张图、3段视频、3段音频，不能静默截断引用。");
+    const selectedImages = references.slice(0, mode === "text" ? 0 : mode === "frames" ? 2 : creationH3 ? 9 : 6);
+    const selectedVideos = mode === "reference" ? (options?.videos || []).slice(0, creationH3 ? 3 : 1) : [];
+    const selectedAudios = mode === "reference" ? (options?.audios || []).slice(0, creationH3 ? 3 : 2) : [];
     const requestSize = fastDraft ? normalizeFastDraftSize(config.size, config.vquality) : normalizeVideoSize(config.size, config.vquality) || "1280x720";
-    const accelerateReference = Boolean(config.referenceAcceleration) && mode === "reference" && !fastDraft && selectedImages.length > 1;
+    const accelerateReference = Boolean(config.referenceAcceleration) && !creationH3 && mode === "reference" && !fastDraft && selectedImages.length > 1;
     let images: File[];
     if (accelerateReference) {
         const match = /^(\d+)x(\d+)$/.exec(requestSize);
@@ -333,8 +392,8 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     body.append("mode", mode);
     const requestParams = {
         ...(options?.params || config.params || {}),
-        ...(config.videoInterpolation && config.videoInterpolation !== "off" ? { interpolation: config.videoInterpolation } : {}),
-        transition_step: config.videoSelfLiftMode === "quality" ? 5 : 6,
+        ...(!creationH3 && config.videoInterpolation && config.videoInterpolation !== "off" ? { interpolation: config.videoInterpolation } : {}),
+        ...(!creationH3 ? { transition_step: config.videoSelfLiftMode === "quality" ? 5 : 6 } : {}),
         ...(mode === "frames" ? { frameMode } : {}),
     };
     if (Object.keys(requestParams).length) {
@@ -354,12 +413,12 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
         }
     } else if (mode === "reference") {
         images.forEach((file, idx) => {
-            body.append("image[]", file, `ref_${idx + 1}.png`);
+            if (!creationH3) body.append("image[]", file, `ref_${idx + 1}.png`);
             body.append("images", file, `ref_${idx + 1}.png`);
         });
     }
-    videos.forEach((file) => body.append("video[]", file));
-    audios.forEach((file) => body.append("audio[]", file));
+    videos.forEach((file) => body.append(creationH3 ? "videos" : "video[]", file));
+    audios.forEach((file) => body.append(creationH3 ? "audios" : "audio[]", file));
     // 角色替换等「跟随源视频」的工作流靠它算帧数：ffprobe 探不到时后端用这个时长兜底。
     if (mode === "reference" && selectedVideos.length) {
         let durationMs = Number(selectedVideos[0]?.durationMs) || 0;

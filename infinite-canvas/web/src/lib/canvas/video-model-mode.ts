@@ -26,6 +26,7 @@ export function baseVideoWorkflowId(workflowId: string) {
  */
 export function resolveVideoWorkflowMode(config: AiConfig, model: string, mode: string) {
     const id = baseVideoWorkflowId(videoWorkflowId(config, model));
+    if (id === "creation-video-h3-768" || id === "creation-video-h3-1080") return "reference";
     if (id === "video-h3-ref2va" || id === "video-h3-character-swap") return "reference";
     if (id === "video-h3-frames") return "frames";
     if (id === "video-h3-t2v") return "text";

@@ -79,10 +79,11 @@ function copySourceTree(layout, relative, sourceFiles) {
   walk(source, relative);
 }
 
-function rendererEnvironment(environment = process.env) {
+function rendererEnvironment(environment = process.env, { withAgent = false } = {}) {
   const clean = Object.fromEntries(Object.entries(environment).filter(([key]) => !/^VITE_/i.test(key)));
   // Do not serialize this object: it may contain registry credentials or local secrets.
-  clean.VITE_LOCAL_ONLY = 'true';
+  // Full canvas is an explicit build option, never inherited from VITE_* secrets.
+  clean.VITE_LOCAL_ONLY = withAgent ? '0' : 'true';
   clean.VITE_LOCAL_GATEWAY_URL = '';
   return clean;
 }
@@ -94,7 +95,7 @@ function assertNoRendererEnvFiles(web) {
   if (envFiles.length) throw new Error('Renderer .env files are not allowed for a release build; use a clean source checkout');
 }
 
-function rendererCommand(layout, environment = process.env) {
+function rendererCommand(layout, environment = process.env, options = {}) {
   assertStagingPath(layout.root, layout.staging);
   const outDir = path.join(layout.staging, RENDERER);
   assertNoLinks(layout.root, outDir);
@@ -102,8 +103,8 @@ function rendererCommand(layout, environment = process.env) {
   if (!fs.existsSync(vite)) throw new Error('Install locked renderer dependencies before building (Vite is missing)');
   return {
     command: process.execPath,
-    args: [vite, 'build', '--outDir', outDir, '--emptyOutDir'],
-    options: { cwd: layout.web, env: rendererEnvironment(environment), stdio: 'inherit', shell: false, windowsHide: true },
+    args: [vite, 'build', '--outDir', outDir, ...(options.preserveExisting ? ['--emptyOutDir', 'false'] : ['--emptyOutDir'])],
+    options: { cwd: layout.web, env: rendererEnvironment(environment, options), stdio: 'inherit', shell: false, windowsHide: true },
   };
 }
 
@@ -242,14 +243,22 @@ function filterPublishedPlugins(staging) {
   fs.writeFileSync(file, `${JSON.stringify(plugins.filter((entry) => !/canvas-assistant\.js/i.test(entry)), null, 2)}\n`);
 }
 
-function buildRuntime(repoRoot = path.resolve(__dirname, '../..')) {
+function buildRuntime(repoRoot = path.resolve(__dirname, '../..'), { withAgent = false, preserveExisting = false } = {}) {
   const layout = getLayout(repoRoot);
   const desktopPackage = readJson(path.join(layout.desktop, 'package.json'));
   if (desktopPackage.devDependencies?.electron !== ELECTRON_VERSION) throw new Error(`Desktop must pin Electron ${ELECTRON_VERSION}`);
   assertNoRendererEnvFiles(layout.web);
   validateLock(readJson(path.join(layout.gateway, 'package.json')), readJson(path.join(layout.gateway, 'package-lock.json')));
   const npmCli = resolveNpmCli();
-  const renderer = rendererCommand(layout);
+  const renderer = rendererCommand(layout, process.env, { withAgent, preserveExisting });
+  // An incremental build never removes files or reinstalls dependencies. Require
+  // a verified prior runtime and an identical dependency lock before writing.
+  if (preserveExisting) {
+    verifyRuntime(layout.staging);
+    for (const file of ['package.json', 'package-lock.json']) {
+      if (!fs.readFileSync(path.join(layout.gateway, file)).equals(fs.readFileSync(path.join(layout.staging, GATEWAY, file)))) throw new Error('Incremental build requires unchanged gateway dependencies');
+    }
+  }
   assertNoLinks(layout.root, path.dirname(layout.staging));
   fs.mkdirSync(path.dirname(layout.staging), { recursive: true });
   let lockFd;
@@ -260,7 +269,7 @@ function buildRuntime(repoRoot = path.resolve(__dirname, '../..')) {
   }
   try {
     fs.writeFileSync(lockFd, 'Exclusive Comfy Canvas runtime build. Remove only after confirming no build is running.\n');
-    resetStaging(layout.root, layout.staging);
+    if (!preserveExisting) resetStaging(layout.root, layout.staging);
     const sourceFiles = {};
     for (const tree of SOURCE_TREES) copySourceTree(layout, `${GATEWAY}/${tree}`, sourceFiles);
     for (const tree of ['nodes', 'vae_approx']) copySourceTree(layout, `${GATEWAY}/resources/${tree}`, sourceFiles);
@@ -273,7 +282,7 @@ function buildRuntime(repoRoot = path.resolve(__dirname, '../..')) {
     captureRendererSources(layout, sourceFiles);
     runCommand(renderer);
     filterPublishedPlugins(layout.staging);
-    runCommand(npmInstallCommand(layout, npmCli));
+    if (!preserveExisting) runCommand(npmInstallCommand(layout, npmCli));
     const dependencies = [
       ...collectDependencyLicenses(path.join(layout.staging, GATEWAY), 'gateway', { productionOnlyInstall: true }),
       ...collectDependencyLicenses(layout.web, 'renderer'),
@@ -299,8 +308,9 @@ function buildRuntime(repoRoot = path.resolve(__dirname, '../..')) {
 
 if (require.main === module) {
   try {
-    if (process.argv.length > 2) throw new Error('Usage: node build-runtime.cjs (output is fixed to desktop/.build/runtime)');
-    buildRuntime();
+    const args = process.argv.slice(2);
+    if (args.some(arg => !['--with-agent', '--preserve-existing'].includes(arg)) || new Set(args).size !== args.length) throw new Error('Usage: node build-runtime.cjs [--with-agent] [--preserve-existing] (output is fixed to desktop/.build/runtime)');
+    buildRuntime(undefined, { withAgent: args.includes('--with-agent'), preserveExisting: args.includes('--preserve-existing') });
   } catch (error) {
     console.error(`Runtime build failed: ${error.message}`);
     process.exitCode = 1;

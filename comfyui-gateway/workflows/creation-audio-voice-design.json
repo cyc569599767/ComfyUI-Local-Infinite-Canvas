@@ -1,0 +1,48 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "device": "cuda:0",
+      "dtype": "bfloat16",
+      "keep_model_loaded": true,
+      "use_flash_attn": false
+    },
+    "class_type": "Qwen3TTSModelLoader",
+    "_meta": {
+      "title": "Qwen3TTSModelLoader"
+    }
+  },
+  "2": {
+    "inputs": {
+      "text": "",
+      "voice_description": "",
+      "language": "Auto",
+      "seed": 798671063927382,
+      "max_new_tokens": 2048,
+      "temperature": 1,
+      "top_p": 0.8,
+      "repetition_penalty": 1.1,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "Qwen3TTSVoiceDesign",
+    "_meta": {
+      "title": "Qwen3TTSVoiceDesign"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "audio/qwen3_tts_voice_design",
+      "audio": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveAudio",
+    "_meta": {
+      "title": "Save Audio (FLAC) (DEPRECATED)"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { saveAs } from "file-saver";
 
+import { creationOutputName } from "@/lib/agent/creation-output-names";
 import i18n from "@/i18n";
 import { createZip } from "@/lib/zip";
 import { getMediaBlob } from "@/services/file-storage";
@@ -17,7 +18,9 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
                 collectStorageKeys(project).map(async (storageKey) => {
                     const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
                     if (!blob) return;
-                    const path = `projects/${project.id}/files/${safeFileName(storageKey)}.${fileExtension(blob.type, storageKey)}`;
+                    const owner = project.nodes.find(node => node.metadata?.storageKey === storageKey || node.metadata?.images?.some(image => image.storageKey === storageKey));
+                    const label = owner && creationOutputName(owner, project.nodes);
+                    const path = `projects/${project.id}/files/${label ? `${safeFileName(label)}_` : ""}${safeFileName(storageKey)}.${fileExtension(blob.type, storageKey)}`;
                     files.push({ storageKey, path, mimeType: blob.type || "application/octet-stream", bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }),
@@ -31,7 +34,7 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
     saveAs(zip, `${safeFileName(fileName)}.zip`);
 }
 
-export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n.t("canvas.export.defaultNodesName")) {
+export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n.t("canvas.export.defaultNodesName"), contextNodes = nodes) {
     const zipFiles: { name: string; data: BlobPart }[] = [];
     const used = new Set<string>();
     const uniqueName = (base: string, ext: string) => {
@@ -44,7 +47,7 @@ export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n
 
     await Promise.all(
         nodes.map(async (node) => {
-            const title = node.title || node.type;
+            const title = creationOutputName(node, contextNodes) || node.title || node.type;
             const storageKey = node.metadata?.storageKey || "";
             if (storageKey) {
                 const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
@@ -84,6 +87,10 @@ function fileExtension(mimeType: string, storageKey: string) {
     if (mimeType.includes("webm")) return "webm";
     if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "mp3";
     if (mimeType.includes("wav")) return "wav";
+    if (mimeType.includes("flac")) return "flac";
     if (mimeType.includes("ogg")) return "ogg";
+    if (mimeType.includes("aac")) return "aac";
+    if (mimeType.includes("opus")) return "opus";
+    if (mimeType.includes("m4a")) return "m4a";
     return storageKey.startsWith("image:") ? "png" : "bin";
 }

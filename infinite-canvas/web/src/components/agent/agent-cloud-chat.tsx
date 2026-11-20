@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import { AgentChatComposer } from "./agent-chat-composer";
 import { AgentChatMessage, AgentPendingToolCard, type AgentChatMessageItem } from "./agent-chat-message";
+import { canvasFeatureCatalog, cloudTools, compactCanvasState } from "./agent-cloud-shared";
 import { summarizeCanvasAgentOps, type CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
@@ -51,132 +52,6 @@ async function requestChatStream(params: {
     return readAgentChatResponse(response, { signal: params.signal, onDelta: params.onDelta, apiKey: params.runtime.apiKey });
 }
 
-function canvasFeatureCatalog() {
-    const config = useConfigStore.getState().config;
-    const imageModels = selectableModelsByCapability(config, "image").map((value) => ({ value, label: modelOptionLabel(config, value) }));
-    const videoModels = selectableModelsByCapability(config, "video").map((value) => ({ value, label: modelOptionLabel(config, value) }));
-    return {
-        note: "这是你自己查用的能力目录。回答时只摘与问题相关的 1-2 句，不要把整段贴给用户。",
-        modelUsage: "创建生成卡时 metadata.model 必须使用 models.image[].value；label 只用于匹配用户说法。用户指定了模型就不要替换，Z Image 不能用 Krea2。",
-        directExecution: "Agent 可直接执行的只有 canvas_apply_ops：读取、添加/更新/删除节点、连接/删除连线、选中、视口、run_generation。区域布局编辑器、局部编辑、四视图、提示词优化/反推、视频超分/插帧等是独立 UI，说明入口即可，不要声称已经执行。",
-        features: [
-            {
-                id: "moss-layout",
-                name: "MOSS 区域布局",
-                entry: "MOSS 模型（8步/50步）的配置卡或图片卡 → 图像设置 → 区域布局 → 打开区域布局编辑器",
-                when: "一张图里需要多个区域，每个区域单独填写提示词或文字",
-                how: "在编辑器里画框，为每个区域填写提示词/文字；背景框先画，人物、物体、文字框后画；确认后生成。区域类型：背景/人物/物体/文字",
-                limits: "仅 MOSS 模型可用；普通文生图不会使用旧布局；这不是局部编辑",
-            },
-            {
-                id: "local-edit",
-                name: "局部编辑（蒙版）",
-                entry: "图片卡悬浮工具 → 局部编辑",
-                when: "只修改图片中的一块区域，其他区域保持原样",
-                how: "在图上涂蓝色蒙版并填写修改要求，确认后生成编辑结果；默认走 Qwen Image 2.1 编辑",
-                limits: "入口在图片卡悬浮工具；不是 MOSS 区域布局；不是整图重绘",
-            },
-            {
-                id: "four-view",
-                name: "四视图",
-                entry: "图片卡悬浮工具 → 四视图",
-                when: "从一张角色图生成角色设定四视图",
-                how: "以原图为参考，调用固定 image-krea2-four-view 工作流，输出一张四视图角色设定图",
-                limits: "需要角色图片；画布会自动使用固定四视图提示词，不需要写拼图/分栏排版词；输出是一张四视图设定图，不是四张普通图，也不是多角度",
-            },
-            {
-                id: "prompt",
-                name: "提示词优化 / 反推 / 提示词库",
-                entry: "配置卡或提示词面板 → 优化提示词；图片卡 → 反推提示词；左侧提示词库",
-                when: "把简短描述扩写成提示词，或从图片反推提示词",
-                how: "反推引擎可选 Qwen3.5-9B、Florence-2 PromptGen、云端 API；优化提示词使用当前提示词优化 API；提示词库可搜索",
-                limits: "反推需要图片参考，输出文本；不会自动生成图片",
-            },
-            {
-                id: "image-tools",
-                name: "图片工具",
-                entry: "图片卡悬浮工具",
-                tools: ["复制提示词", "反推提示词", "替换图片", "锁/自由比例", "局部编辑", "裁剪", "切图", "放大", "AI 超分", "多角度", "四视图", "查看大图", "存资产", "存为风格"],
-                multiAngle: "多角度是换机位生成新图，和四视图不同",
-            },
-            {
-                id: "video",
-                name: "视频工具",
-                entry: "视频卡悬浮工具 / 视频工作台",
-                tools: ["首尾帧 / 全能参考模式", "视频超分（SeedVR2）", "RIFE 插帧 2×/3×", "H3 角色替换", "极速草稿", "对比", "同步播放"],
-                draft: "极速草稿用首尾帧快速预览，最终成片仍用 VDN 或多参工作流",
-            },
-            {
-                id: "style-recipe",
-                name: "风格配方",
-                entry: "左侧「风格配方」页签；图片菜单 → 存为风格",
-                how: "保存底模、LoRA 与案例图；套用时新建生成卡并还原独立 LoRA 卡和连线",
-                limits: "不保存提示词、尺寸、张数；这些由生成卡自己设置",
-            },
-            {
-                id: "lora",
-                name: "LoRA 叠层",
-                entry: "画布上的 LoRA 卡，连接到图片或视频卡",
-                how: "单卡最多 10 条 LoRA，每条独立强度；生成时一起注入",
-            },
-            {
-                id: "assets",
-                name: "资产与自由卡片",
-                entry: "左侧「资产」「自由卡片」；画布顶部可插入",
-                how: "资产可复用为参考图；自由卡片可导入 ComfyUI 工作流",
-            },
-            {
-                id: "node-types",
-                name: "画布卡片类型",
-                how: "图片、文本、配置、视频、音频、分组、自由卡片；配置卡负责模型/尺寸/数量/输入顺序，图片和视频卡负责生成与展示",
-            },
-        ],
-        models: {
-            image: imageModels,
-            video: videoModels,
-            defaults: {
-                image: modelOptionLabel(config, config.imageModel || config.model),
-                video: modelOptionLabel(config, config.videoModel || config.model),
-            },
-        },
-    };
-}
-
-function compactCanvasState() {
-    const snapshot = useAgentStore.getState().canvasContext?.snapshot;
-    if (!snapshot) return { error: "当前不在画布页面，请先打开一个画布。" };
-    return {
-        projectId: snapshot.projectId,
-        title: snapshot.title,
-        selectedNodeIds: snapshot.selectedNodeIds,
-        nodes: snapshot.nodes.slice(0, 120).map((node) => ({
-            id: node.id,
-            type: node.type,
-            title: node.title,
-            position: node.position,
-            width: node.width,
-            height: node.height,
-            content: typeof node.metadata?.content === "string" ? node.metadata.content.slice(0, 2000) : "",
-            prompt: typeof node.metadata?.prompt === "string" ? node.metadata.prompt.slice(0, 500) : "",
-            model: node.metadata?.model || "",
-            status: node.metadata?.status || "",
-            generationMode: node.metadata?.generationMode || "",
-            generationType: node.metadata?.generationType || "",
-            imageMode: node.metadata?.imageMode || "",
-            size: node.metadata?.size || "",
-            count: node.metadata?.count || "",
-            seed: node.metadata?.seed || "",
-            seconds: node.metadata?.seconds || "",
-            vquality: node.metadata?.vquality || "",
-            videoMode: node.metadata?.videoMode || "",
-            frameMode: node.metadata?.frameMode || "",
-            aspectRatio: node.metadata?.aspectRatio || "",
-            params: node.metadata?.params || null,
-            freeCard: node.metadata?.freeCard ? { name: node.metadata.freeCard.name, workflowId: node.metadata.freeWorkflowId || "" } : null,
-        })),
-        connections: snapshot.connections.map((connection) => ({ id: connection.id, fromNodeId: connection.fromNodeId, toNodeId: connection.toNodeId })),
-    };
-}
 
 function AgentSettingToggle({ icon, title, description, checked, theme, onChange }: { icon: ReactNode; title: string; description: string; checked: boolean; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onChange: () => void }) {
     const { t } = useTranslation();
@@ -449,7 +324,8 @@ export function AgentCloudChat() {
             "只有用户明确说“重跑/再生成/用这张卡”时才复用已有卡。用户指出模型用错时，新建一张正确模型的新卡，保留旧卡；旧结果不要作为新卡参考，除非用户明确要求。",
             "模型必须严格匹配用户指定：Z Image 不能用 Krea2 或默认模型；列表里没有精确匹配时先问，不要自动替换。",
             "画布权限已放开：自动确认模式下 canvas_apply_ops 直接执行，不要用“没有权限”推辞画布内操作。除提示词外，你还可以改标题、位置、尺寸、模型，以及 metadata 里的生成参数（size、count、seed、seconds、vquality、videoMode、frameMode、imageMode、aspectRatio、params.loras 等）；先 canvas_get_state 读取 params，再 update_node 写回。",
-            "可创建的卡片：文本、图片、配置、视频、音频、分组、自由卡片（free-card）、LoRA 卡（comfyui-lora:lora）。新建图片/视频卡后可用 connect_nodes 接 LoRA/参考/配置卡，再 run_generation。",
+            "可创建的卡片：文本、图片、配置、视频、音频、分组、自由卡片（free-card）、LoRA 卡（comfyui-lora:lora）、工作台卡（workbench）。新建图片/视频卡后可用 connect_nodes 接 LoRA/参考/配置卡，再 run_generation。",
+            "工作台卡示例：{\"type\":\"add_node\",\"id\":\"agent-wb-1\",\"nodeType\":\"workbench\",\"title\":\"视频剪辑台\",\"metadata\":{\"workbenchKind\":\"video-editor\"}}。workbenchKind 取值：storyboard（故事分镜导演台）、digital-human（数字人）、video-editor（视频剪辑台）、novel（小说）、agent-creation（一站式创作），漏写会退化成故事分镜导演台。工作台本身不产出媒体，只是进入编辑面板的入口；打开 video-editor 工作台会自动把画布上的视频铺成时间线，用户可一键合成成片。",
             "步数由模型型号或档位决定，不是所有卡片都能通过 metadata 改；不要承诺给任意图片卡增加步数控件。",
             "执行任何画布写入前先调用 canvas_get_state 获取真实节点 ID，不要编造 ID。",
             "画布功能索引（用户问具体功能时先调用 canvas_get_features 获取入口、步骤和限制，不要凭记忆说不知道或编造）：MOSS 区域布局、局部编辑（蒙版）、四视图、提示词优化/反推、裁剪、切图、放大、AI 超分、多角度、替换图片；视频首尾帧/全能参考、视频超分、RIFE 插帧、角色替换、极速草稿；风格配方、LoRA 叠层、自由卡片、资产库、提示词库。",
@@ -855,84 +731,4 @@ export function AgentCloudChat() {
             />
         </div>
     );
-}
-
-function cloudTools() {
-    return [
-        {
-            type: "function",
-            function: {
-                name: "canvas_get_features",
-                description: "返回画布功能目录：MOSS 区域布局、局部编辑、四视图、提示词优化/反推、图片工具、视频工具、风格配方、LoRA、资产与自由卡片，以及当前可用的生图/视频模型。只用于自己查，回答时摘 1-2 句，不要整段复述。",
-                parameters: { type: "object", properties: {}, additionalProperties: false },
-            },
-        },
-        {
-            type: "function",
-            function: {
-                name: "canvas_get_state",
-                description: "读取当前画布的节点、样线、选中项和视口。修改画布前先调用，获取真实节点 ID。",
-                parameters: { type: "object", properties: {}, additionalProperties: false },
-            },
-        },
-        {
-            type: "function",
-            function: {
-                name: "canvas_apply_ops",
-                description: "对当前画布批量执行操作。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。新建生成卡时给 add_node 指定 id，再用 run_generation 指向该 id。文本卡用 nodeType=text、metadata.content 填写正文。",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        ops: {
-                            type: "array",
-                            description: "按顺序执行的操作列表",
-                            items: {
-                                type: "object",
-                                properties: {
-                                    type: { type: "string", enum: ["add_node", "update_node", "delete_node", "delete_connections", "connect_nodes", "select_nodes", "set_viewport", "run_generation"] },
-                                    id: { type: "string" },
-                                    ids: { type: "array", items: { type: "string" } },
-                                    nodeId: { type: "string" },
-                                    nodeType: { type: "string", description: "卡片类型，如 text、image、config、video、audio、group、free-card、comfyui-lora:lora" },
-                                    title: { type: "string" },
-                                    position: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
-                                    x: { type: "number" },
-                                    y: { type: "number" },
-                                    width: { type: "number" },
-                                    height: { type: "number" },
-                                    metadata: {
-                                        type: "object",
-                                        properties: {
-                                            content: { type: "string", description: "文本卡的正文；新建或更新文本卡时填写此字段，不是 text" },
-                                            prompt: { type: "string", description: "生成提示词" },
-                                            model: { type: "string", description: "canvas_get_features 返回的模型 value" },
-                                        },
-                                        additionalProperties: true,
-                                    },
-                                    patch: { type: "object", additionalProperties: true },
-                                    fromNodeId: { type: "string" },
-                                    toNodeId: { type: "string" },
-                                    viewport: { type: "object", additionalProperties: true },
-                                    prompt: { type: "string" },
-                                    mode: { type: "string" },
-                                },
-                                required: ["type"],
-                                additionalProperties: true,
-                            },
-                        },
-                    },
-                    required: ["ops"],
-                    additionalProperties: false,
-                },
-            },
-        },
-        {
-            type: "function",
-            function: {
-                name: "site_navigate",
-                description: "打开站内页面：/、/canvas、/canvas/:id、/image、/video、/assets、/config。",
-                parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false },
-            },
-        },
-    ];
 }

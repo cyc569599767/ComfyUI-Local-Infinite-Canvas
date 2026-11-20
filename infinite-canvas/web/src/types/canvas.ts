@@ -175,14 +175,37 @@ export type CanvasNodeMetadata = {
     seedFixed?: string;
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
-    /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台。 */
-    workbenchKind?: "storyboard" | "digital-human" | "video-editor" | "novel";
+    /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台，novel = 网文卷轴，agent-creation = Agent 无限创作。 */
+    workbenchKind?: "storyboard" | "digital-human" | "video-editor" | "novel" | "agent-creation";
     /** 该工作台绑定的故事分镜项目 id（存在网关）。 */
     storyboardProjectId?: string;
     /** 该工作台绑定的小说项目 id（存在网关）。 */
     novelProjectId?: string;
+    /** Agent 无限创作项目配置与进度，随此画布节点一起保存。 */
+    agentCreation?: {
+        idea: string;
+        style: string;
+        aspectRatio: "16:9" | "9:16" | "1:1";
+        targetSeconds: number;
+        /** 老项目缺省768p；只影响后续媒体生成，不重制已有产物。 */
+        resolution?: import("@/lib/agent/creation-settings").CreationResolution;
+        backgroundMusic?: boolean;
+        createImages: boolean;
+        createVideos: boolean;
+        status: "draft" | "running" | "ready" | "error";
+        progress: string;
+        conversationId: string;
+        lastError?: string;
+    };
+    creationOutput?: import("@/lib/agent/creation-pipeline").CreationOutput;
+    creationPipeline?: import("@/lib/agent/creation-pipeline").CreationPipelineState;
+    agentCreationProgress?: string;
     /** 数字人镜头的音频区间与运镜，导出时要用，必须跟着卡片一起存。 */
     digitalHumanSegment?: { start: number; end: number; camera: string; reference?: string };
+    /** 剪辑草稿及最近成片：随工作台保存，不使用临时播放器 URL 作为唯一身份。 */
+    videoEditor?: import("@/lib/canvas/video-timeline").VideoEditorDraft;
+    /** 剪辑台自身的输出不再自动回灌进该工作台。 */
+    videoEditorOriginId?: string;
     /** 视频编辑工作台导出的片段在时间线上的位置与裁剪信息。 */
     editTimeline?: { start: number; inPoint: number; outPoint: number; track: number; volume: number; totalSeconds: number };
     freeCardTextValues?: Record<string, string>;
@@ -217,6 +240,8 @@ export type CanvasConnection = {
     fromNodeId: string;
     toNodeId: string;
     role?: "lineage";
+    /** 自动生成的流水线展示边归属；不会作为生成参考输入。 */
+    creationProjectId?: string;
 };
 
 export type CanvasAssistantReference = {

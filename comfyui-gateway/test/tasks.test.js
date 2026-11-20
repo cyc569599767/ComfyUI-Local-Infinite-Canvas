@@ -40,6 +40,28 @@ function cancelledError() {
   return Object.assign(new Error("aborted"), { code: "cancelled" });
 }
 
+test("Chinese semantic output names preserve content and never overwrite duplicate IDs", async t => {
+  const {dataDir,store}=await fixture(t);
+  const first=await store.saveOutput("task-1",Buffer.from("old"),"png","陆明/蓝衣:%date%");
+  const second=await store.saveOutput("task-1",Buffer.from("new"),"png","陆明/蓝衣:%date%");
+  assert.equal(path.dirname(first.file),path.join(dataDir,"outputs"));
+  assert.match(path.basename(first.file),/^陆明_蓝衣__date__task-1\.png$/);
+  assert.notEqual(first.file,second.file);
+  assert.equal(await fsp.readFile(first.file,"utf8"),"old");
+  assert.equal(await fsp.readFile(second.file,"utf8"),"new");
+  assert.equal(decodeURIComponent(first.url.split('/').at(-1)),path.basename(first.file));
+  const plain=await store.saveOutput("legacy-id",Buffer.from("plain"),"mp4");
+  assert.equal(path.basename(plain.file),"legacy-id.mp4");
+});
+
+test("video task persists semantic name without changing task identity", async t=>{
+ const {dataDir,store}=await fixture(t);const task=store.create({model:"test"});const id=task.id;
+ store.enqueue(task,async()=>({buffer:Buffer.from("video"),ext:"mp4",assetName:"灯塔重逢-视频"}));
+ await waitFor(()=>task.status==="completed");
+ await waitForPersistedStatus(dataDir,id,"completed");
+ assert.equal(task.id,id);assert.ok(decodeURIComponent(task.url).includes("灯塔重逢-视频_"));
+});
+
 test("cancelling a queued task releases its run handles and persists immediately", async (t) => {
   const { dataDir, store } = await fixture(t);
   const blocker = store.create({ model: "test" });

@@ -514,3 +514,64 @@ test("其他 400 原因仍然如实上报，不触发参数降级", async (t) =>
   assert.equal(calls, 1, "与 tool_choice 无关的 400 不该重试");
   assert.match((await response.json()).error.message, /ambiguous/);
 });
+
+test("上游连续拒绝多个参数时逐个去掉，直到成功", async (t) => {
+  // 实测：openai-responses 端点先拒 tool_choice，再拒 temperature。
+  // 只试一次的旧实现会在第二个参数上失败。
+  const bodies = [];
+  const { post } = await fixture(t, (req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const body = JSON.parse(raw);
+      bodies.push(body);
+      if ("tool_choice" in body) {
+        json(res, 400, { error: { message: "chat parameter tool_choice is not supported for endpoint openai-responses" } });
+        return;
+      }
+      if ("temperature" in body) {
+        json(res, 400, { error: { message: "chat parameter temperature is not supported for endpoint openai-responses" } });
+        return;
+      }
+      json(res, 200, { choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] });
+    });
+  });
+  const response = await post("chat", { request: {
+    model: "m", messages: [{ role: "user", content: "hi" }],
+    temperature: 0.8, tool_choice: "auto", stream: false,
+  } });
+  assert.equal(response.status, 200, "两个参数都该被去掉后成功");
+  assert.equal(bodies.length, 3, "首次 + 去 tool_choice + 去 temperature = 3 次");
+  assert.equal("tool_choice" in bodies[2], false);
+  assert.equal("temperature" in bodies[2], false);
+});
+
+test("降级有上限，不会无限重试", async (t) => {
+  // 上游持续抱怨同一个参数时，不能死循环。
+  let calls = 0;
+  const { post } = await fixture(t, (req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      calls += 1;
+      json(res, 400, { error: { message: "chat parameter temperature is not supported" } });
+    });
+  });
+  const response = await post("chat", { request: {
+    model: "m", messages: [{ role: "user", content: "hi" }], temperature: 0.8, stream: false,
+  } });
+  assert.equal(response.status, 502);
+  // 首次 + 最多 len(DROPPABLE_PARAMS) 次重试，绝对不该无限增长。
+  assert.ok(calls <= 5, `调用次数应受上限保护，实际 ${calls}`);
+  assert.match((await response.json()).error.message, /temperature/);
+});
+
+test("必需字段不会被降级掉", async (t) => {
+  // 上游如果抱怨 model/messages，绝不能把它们删掉重发——那只会得到一个无意义的请求。
+  const { post } = await fixture(t, (req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => json(res, 400, { error: { message: "field model is not supported" } }));
+  });
+  const response = await post("chat", { request: { model: "m", messages: [{ role: "user", content: "hi" }], stream: false } });
+  assert.equal(response.status, 502, "不应重试成功");
+  assert.match((await response.json()).error.message, /model/);
+});

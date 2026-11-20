@@ -109,7 +109,7 @@ export function resolveCanvasBaseImage(
     }
 
     for (const connection of connections) {
-        if (connection.toNodeId !== node.id) continue;
+        if (connection.toNodeId !== node.id || connection.role === "lineage") continue;
         const source = nodes.find((item) => item.id === connection.fromNodeId);
         if (!source || source.type !== CanvasNodeType.Image) continue;
         const reference = referenceFromNode(source);
@@ -146,7 +146,7 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
 }
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
-  return mergedInputNodes(nodeId, nodes, connections);
+  return mergedInputNodes(nodeId, nodes, connections).filter(n => !n.metadata?.creationOutput?.revisionKind && !n.metadata?.creationOutput?.needsRevision);
 }
 
 // 配置节点是「组装提示词」的入口，但画布也允许把图片/视频直接连到生成节点。
@@ -235,6 +235,7 @@ function resourceText(node: CanvasNodeData): string | undefined {
 }
 
 function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
+    if (node.metadata?.creationOutput?.revisionKind || node.metadata?.creationOutput?.needsRevision) return null;
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return "image";
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return "video";
     if (isAudioNodeType(node.type) && node.metadata?.content) return "audio";

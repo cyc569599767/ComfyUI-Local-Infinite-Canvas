@@ -68,6 +68,7 @@ export async function requestLocalAudioGeneration(config: AiConfig, mode: Canvas
     }
     if (request.language) formData.set("language", request.language);
     const params: Record<string, unknown> = {};
+    if (typeof config.params?.assetName === "string" && requestConfig.model.startsWith("creation-")) params.assetName = config.params.assetName;
     if (request.seed?.trim()) params.seed = request.seed.trim();
     if (Object.keys(params).length) formData.set("params", JSON.stringify(params));
 

@@ -1,3 +1,5 @@
+import { creationOutputName } from "@/lib/agent/creation-output-names";
+import { LOCAL_GATEWAY_BASE_URL, LOCAL_GATEWAY_CHANNEL_ID } from "@/constant/app-mode";
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
 import { resolveVideoWorkflowMode } from "@/lib/canvas/video-model-mode";
 import i18n from "@/i18n";
@@ -106,13 +108,16 @@ export function getInputSummary(inputs: NodeGenerationInput[]) {
 export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
     const model = resolveModelForCapability(config, node?.metadata?.model, mode);
     const videoMode = node?.metadata?.videoMode || config.videoMode || defaultConfig.videoMode;
-    const params = { ...(node?.metadata?.params || config.params || {}) };
-    const seedFixed = (node?.metadata?.seedFixed ?? config.seedFixed ?? "") === "true";
-    const seed = String(node?.metadata?.seed ?? config.seed ?? "").trim();
+    const isCreation = Boolean(node?.metadata?.creationOutput && model.includes("::creation-"));
+    const params = { ...(node?.metadata?.params || (isCreation ? {} : config.params) || {}) };
+    if (isCreation && node) params.assetName = creationOutputName(node);
+    const seedFixed = (node?.metadata?.seedFixed ?? (isCreation ? "" : config.seedFixed) ?? "") === "true";
+    const seed = String(node?.metadata?.seed ?? (isCreation ? params.seed : config.seed) ?? "").trim();
     if (seedFixed && seed) params.seed = seed;
-    else delete params.seed;
+    else if (!isCreation) delete params.seed;
     return {
         ...config,
+        ...(isCreation ? { channels: [{ id: LOCAL_GATEWAY_CHANNEL_ID, name: "创作专用本地工作流", baseUrl: LOCAL_GATEWAY_BASE_URL, apiKey: config.channels.find((c) => c.id === LOCAL_GATEWAY_CHANNEL_ID)?.apiKey || "local", apiFormat: "openai" as const, models: [{ name: model.split("::").at(-1)!, capability: mode }] }] } : {}),
         seed,
         seedFixed: seedFixed ? "true" : "false",
         model,
@@ -125,7 +130,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
         videoMode: mode === "video" ? resolveVideoWorkflowMode(config, model, videoMode) : videoMode,
-        videoInterpolation: node?.metadata?.videoInterpolation || config.videoInterpolation || defaultConfig.videoInterpolation,
+        videoInterpolation: isCreation ? "off" : node?.metadata?.videoInterpolation || config.videoInterpolation || defaultConfig.videoInterpolation,
         videoSelfLiftMode: node?.metadata?.videoSelfLiftMode || config.videoSelfLiftMode || defaultConfig.videoSelfLiftMode,
         frameMode: node?.metadata?.frameMode || config.frameMode,
         imageMode: node?.metadata?.imageMode || config.imageMode || "",

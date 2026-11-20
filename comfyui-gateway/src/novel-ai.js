@@ -289,8 +289,8 @@ export function createNovelAi({ logger, comfy = null, localModel = "Qwen3.5-9B-Q
         const result = await cloudChat({ system, userText, cloud, signal, temperature: 0.8, maxTokens: Math.min(8192, maxTokens || 4096), timeoutMs: 480000 });
         logger?.info?.(`小说云端生成完成（${Math.round((Date.now() - started) / 1000)}s，finish=${result.finishReason || "?"}）`);
         // 带推理的模型会把 token 预算花在 reasoning_content 上：
-        // finish_reason=length 且正文为空，就是「思考吃光了预算」，
-        // 必须和「模型不肯给 JSON」区分开，否则用户永远不知道该缩小批量。
+        // finish_reason=length 且正文为空，就是「思考吃光了预算」；
+        // 普通 HTTP 400 不在这里推断为截断，也不拆批重试。
         if (result.finishReason === "length" && !String(result.content || "").trim()) {
           throw new NovelAiError(
             "模型把全部输出预算用在了推理上，正文被截断（finish_reason=length）。请减少单次生成数量，或换用不带长推理的模型。",
@@ -299,7 +299,19 @@ export function createNovelAi({ logger, comfy = null, localModel = "Qwen3.5-9B-Q
         }
         return result.content || "";
       } catch (error) {
-        throw new NovelAiError(`云端生成失败：${error?.message || String(error)}`, { status: 502, code: "novel_ai_cloud_failed" });
+        if (error?.code === "cloud_api_bad_request") {
+          throw new NovelAiError(error.message || "上游拒绝了云端请求", {
+            status: 502,
+            code: error.code,
+            details: error.details,
+          });
+        }
+        if (error instanceof NovelAiError) throw error;
+        throw new NovelAiError(`云端生成失败：${error?.message || String(error)}`, {
+          status: error?.status || 502,
+          code: error?.code || "novel_ai_cloud_failed",
+          details: error?.details,
+        });
       }
     }
     return runLocal({ system, userText, signal, deadlineMs, maxTokens });

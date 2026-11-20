@@ -1,6 +1,7 @@
 import { saveAs } from "file-saver";
 
 import { createZip, readZip } from "@/lib/zip";
+import { creationAssetDownloadName } from "@/lib/agent/creation-output-names";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, setImageBlob } from "@/services/image-storage";
 import type { Asset } from "@/stores/use-asset-store";
@@ -31,7 +32,8 @@ export async function exportAssets(assets: Asset[], filename: string) {
             if (!storageKey) return;
             const blob = asset.kind === "image" ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
             if (!blob) return;
-            const path = `files/${safeFileName(storageKey)}.${fileExtension(blob.type, asset.kind)}`;
+            const extension = fileExtension(blob.type, asset.kind);
+            const path = `files/${creationAssetDownloadName(asset, extension) || `${safeFileName(storageKey)}.${extension}`}`;
             files.push({ storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size });
             zipFiles.push({ name: path, data: blob });
         }),

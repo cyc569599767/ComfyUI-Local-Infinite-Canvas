@@ -8,6 +8,7 @@ import express from "express";
 import multer from "multer";
 
 import { buildContext } from "./bindings.js";
+import { h3EasyBinding, h3EasyReferences, h3EasyUploadFiles } from "./h3-easy-media.js";
 import { shouldLogRequest } from "./access-log.js";
 import { imageInputCapacity } from "./base-models.js";
 import { createAssistantManager } from "./assistant.js";
@@ -27,6 +28,7 @@ import { createResourceManager } from "./resources.js";
 import { createPromptOptimizer } from "./prompt-optimizer.js";
 import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } from "./qwen-edit.js";
 import { createVideoInterpolator } from "./video-interpolation.js";
+import { MAX_MERGE_CLIPS, createVideoMerger, parseMergeTimeline } from "./video-merge.js";
 import { createPreviewHub } from "./preview-hub.js";
 import { createLocalOutputReader } from "./local-output.js";
 import { absoluteTaskUrl } from "./public-url.js";
@@ -47,6 +49,7 @@ import { applyUpdate, checkForUpdate, detectInterruptedUpdate, getUpdateProgress
 import { uploadImages } from "./uploads.js";
 import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
 import { createWorkflowLabelStore } from "./workflow-labels.js";
+import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWorkflowModelPatch, workflowModelFields } from "./workflow-model-overrides.js";
 import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep } from "./util.js";
 
@@ -408,10 +411,12 @@ function workflowLoaderEvidence(entry, setup, status) {
       if (typeof expected !== "string" || !expected.trim()) continue;
       const options = Array.isArray(catalog[`${classType}\u0000${spec.input}`])
         ? catalog[`${classType}\u0000${spec.input}`]
-        : Array.isArray(catalog[classType]) ? catalog[classType] : [];
-      const wanted = expected.replace(/\\/g, "/").toLowerCase();
-      const installed = options.some((item) => String(item).replace(/\\/g, "/").toLowerCase() === wanted);
-      const alias = setup.modelAliasFor?.(classType, spec.input, expected) || "";
+        : entry.strictModelNames ? [] : Array.isArray(catalog[classType]) ? catalog[classType] : [];
+      const wanted = expected.replace(/\\/g, "/");
+      const installed = options.some((item) => entry.strictModelNames
+        ? String(item).replace(/\\/g, "/") === wanted
+        : String(item).replace(/\\/g, "/").toLowerCase() === wanted.toLowerCase());
+      const alias = setup.modelAliasFor?.(classType, spec.input, expected, null, entry) || "";
       const problem = (status?.problems || []).find((item) => item.classType === classType && item.input === spec.input && (!item.value || item.value === expected));
       const candidates = (setup.modelCandidates?.(classType, expected, spec.input) || []).slice(0, 10);
       rows.push({
@@ -522,12 +527,15 @@ export async function createGatewayApp(overrides = {}) {
   // label 覆盖必须早于 registry 加载，registry 构建 entry 时会同步读取。
   const workflowLabels = createWorkflowLabelStore({ dataDir: config.dataDir, logger });
   await workflowLabels.load();
+  const workflowModels = createWorkflowModelOverrideStore({ dataDir: config.dataDir, logger });
+  await workflowModels.load();
   const registry = createRegistry({
     dir: config.workflowDir,
     maxWorkflowBytes: config.maxWorkflowBytes,
     logger,
     mainModelFile: (id) => mainModels.fileForWorkflow(id),
     labelOverride: (id) => workflowLabels.get(id),
+    workflowOverride: workflowModels.apply,
   });
   await registry.load();
   const tasks = createTaskStore({
@@ -691,6 +699,7 @@ export async function createGatewayApp(overrides = {}) {
     loaderSpecs: () => setup.modelLoaderSpecs?.(),
   });
   const videoInterpolator = createVideoInterpolator({ config, logger });
+  const videoMerger = createVideoMerger({ config, logger });
 
   // 把 parameters.optionsFrom（如 "UpscaleModelLoader.model_name"）替换成 ComfyUI 实时选项。
   const isUpscaleModelOption = (name) => {
@@ -774,6 +783,14 @@ export async function createGatewayApp(overrides = {}) {
   const upload = multer({
     storage: createBoundedMemoryStorage(config.maxTotalUploadBytes),
     limits: { fileSize: config.maxUploadBytes, files: 12 },
+  });
+  const creationVideoUpload = multer({
+    storage: createBoundedMemoryStorage(config.maxTotalUploadBytes),
+    limits: { fileSize: config.maxUploadBytes, files: 15 },
+  });
+  const videoMergeUpload = multer({
+    storage: createBoundedMemoryStorage(config.maxTotalUploadBytes),
+    limits: { fileSize: config.maxUploadBytes, files: MAX_MERGE_CLIPS },
   });
 
   app.get("/health", async (_req, res) => {
@@ -1149,7 +1166,7 @@ export async function createGatewayApp(overrides = {}) {
       throw new HttpError(`不支持的生成步骤：${step}`, { status: 400, code: "novel_bad_step" });
     } catch (error) {
       if (error instanceof HttpError) throw error;
-      throw new HttpError(error?.message || "生成失败", { status: error?.status || 502, code: error?.code || "novel_ai_failed" });
+      throw new HttpError(error?.message || "生成失败", { status: error?.status || 502, code: error?.code || "novel_ai_failed", details: error?.details });
     }
   });
 
@@ -1605,6 +1622,43 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ ok: true, id: entry.id, label: updated?.label || entry.name, custom: Boolean(label) });
   });
 
+  async function liveModelInfo() {
+    try {
+      const info = await comfy.objectInfo();
+      if (!info || typeof info !== "object" || Array.isArray(info)) throw new Error("object_info 格式无效");
+      return info;
+    } catch {
+      throw new HttpError("ComfyUI 不可达，模型配置当前只读", { status: 503, code: "workflow_models_offline" });
+    }
+  }
+
+  app.get("/api/workflows/:id/models", async (req, res) => {
+    const entry = registry.resolve(req.params.id);
+    assertModelConfigurable(entry);
+    let info = {}, offline = false;
+    try { info = await liveModelInfo(); } catch { offline = true; }
+    res.json(workflowModelFields(entry, info, { offline }));
+  });
+
+  let modelConfigPending = Promise.resolve();
+  app.patch("/api/workflows/:id/models", async (req, res) => {
+    // 配置修改到快照刷新按请求串行完成，避免并发 PATCH 返回旧图或丢失字段。
+    const operation = modelConfigPending.catch(() => {}).then(async () => {
+      const entry = registry.resolve(req.params.id);
+      assertModelConfigurable(entry);
+      const info = await liveModelInfo();
+      const patch = validateWorkflowModelPatch(entry, req.body, info);
+      await workflowModels.update(entry.id, patch);
+      await registry.load({ force: true });
+      await setup.scan("workflow-models");
+      if (!setup.registrySnapshotCurrent() && setup.status().comfyReachable) await setup.scan("workflow-models");
+      emitModelChange("workflow-models");
+      return { ok: true, ...workflowModelFields(registry.resolve(entry.id), info) };
+    });
+    modelConfigPending = operation;
+    res.json(await operation);
+  });
+
   // 更新已注册工作流：改名称/类型/描述/绑定/参数，或替换工作流 JSON 内容。
   app.patch("/api/workflows/:id", async (req, res) => {
     const body = req.body || {};
@@ -1874,7 +1928,7 @@ export async function createGatewayApp(overrides = {}) {
     const data = [];
     for (const file of files) {
       if (responseFormat === "url") {
-        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
+        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"), file.assetName);
         data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
@@ -1942,6 +1996,7 @@ export async function createGatewayApp(overrides = {}) {
       const file = result.files[0];
       return {
         buffer: file.buffer,
+        assetName: file.assetName,
         ext: extFromMime(file.mimeType, file.filename, "mp4"),
         mimeType: file.mimeType,
         promptId: result.promptId,
@@ -2040,7 +2095,8 @@ export async function createGatewayApp(overrides = {}) {
       throw new HttpError(mode === "voice-clone" ? "音色克隆需要朗读文案 text" : "音色设计需要朗读文案 text", { status: 400, code: "missing_prompt" });
     }
     if (mode === "voice-design") {
-      const rawVoiceDescription = String(body.voice_description ?? body.voiceDescription ?? "").trim();
+      const rawVoiceDescription = String(body.voice_description ?? body.voiceDescription ?? (entry.strictModelNames ? params.voiceDescription : undefined) ?? "").trim();
+      if (entry.strictModelNames && !rawVoiceDescription) throw new HttpError("创作音色设计需要 voice_description 或 params.voiceDescription", { status: 400, code: "missing_parameter" });
       // 音色描述是音质的关键：缺失时 Qwen3-TTS 会自由发挥，性别/年龄容易跑偏。
       // 但不该让整次生成失败 —— 用一个明确的中性兜底并告警，与参考实现一致。
       if (!rawVoiceDescription) {
@@ -2101,7 +2157,7 @@ export async function createGatewayApp(overrides = {}) {
     // 兜底产生的产物要能让前端提示用户「补音色描述」，否则用户不知道音色为何偏中性。
     const warnings = params.voiceDescriptionFallback ? ["voice_description_fallback"] : [];
     if (responseFormat === "url") {
-      const saved = await tasks.saveOutput(randomId("aud_"), file.buffer, ext);
+      const saved = await tasks.saveOutput(randomId("aud_"), file.buffer, ext, file.assetName);
       res.json({ created: Math.floor(Date.now() / 1000), data: [{ url: absoluteTaskUrl(config, req, saved.url) }], mime_type: file.mimeType, prompt_id: result.promptId, warnings });
       return;
     }
@@ -2161,7 +2217,7 @@ export async function createGatewayApp(overrides = {}) {
     const data = [];
     for (const file of result.files) {
       if (responseFormat === "url") {
-        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
+        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"), file.assetName);
         data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
@@ -2219,7 +2275,7 @@ export async function createGatewayApp(overrides = {}) {
     const data = [];
     for (const file of result.files) {
       if (responseFormat === "url") {
-        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
+        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"), file.assetName);
         data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
@@ -2442,7 +2498,7 @@ export async function createGatewayApp(overrides = {}) {
     const data = [];
     for (const file of result.files) {
       if (responseFormat === "url") {
-        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"));
+        const saved = await tasks.saveOutput(randomId("img_"), file.buffer, extFromMime(file.mimeType, file.filename, "png"), file.assetName);
         data.push({ url: absoluteTaskUrl(config, req, saved.url) });
       } else {
         data.push({ b64_json: file.buffer.toString("base64") });
@@ -2622,6 +2678,7 @@ export async function createGatewayApp(overrides = {}) {
       const file = result.files[0];
       return {
         buffer: file.buffer,
+        assetName: file.assetName,
         ext: extFromMime(file.mimeType, file.filename, "mp4"),
         mimeType: file.mimeType,
         promptId: result.promptId,
@@ -2673,14 +2730,77 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ id: task.id, object: "video", status: "queued", progress: 0, created_at: Math.floor(Date.now() / 1000) });
   });
 
-  app.post("/v1/videos", upload.any(), async (req, res) => {
+  // 视频编辑工作台的「导出成片」：按全局时间线导出最上层镜头与其音频。
+  // 与 /v1/videos 的生成任务同构（返回 task id + 轮询 /v1/videos/:id），
+  // 前端因此可以复用同一套轮询与落库逻辑，不必为合并单独写一条链路。
+  app.post("/v1/videos/merge", videoMergeUpload.any(), async (req, res) => {
+    const videoFiles = (req.files || []).filter((file) => file?.buffer && /^videos?(\[\])?$/i.test(file.fieldname || ""));
+    if (!videoFiles.length) throw new HttpError("合并请求缺少视频片段", { status: 400, code: "missing_input_video" });
+    // 片段顺序由 timeline 决定，不能依赖 multer 的到达顺序（并发上传会乱序）。
+    const timeline = parseMergeTimeline(req.body?.timeline);
+    const clips = timeline.map((item) => {
+      const file = videoFiles[item.source];
+      if (!file) throw new HttpError(`timeline 的 source=${item.source} 超出上传视频范围`, { status: 400, code: "invalid_timeline" });
+      return {
+        buffer: file.buffer,
+        inPoint: item.inPoint,
+        outPoint: item.outPoint,
+        duration: item.duration,
+        start: item.start,
+        track: item.track,
+        layer: item.layer,
+        volume: item.volume,
+      };
+    });
+    const size = parseSize(req.body?.size);
+    const fps = Number(req.body?.fps) || 0;
+    const task = tasks.create({
+      model: "video-timeline-merge",
+      request: {
+        mode: "merge",
+        clips: clips.length,
+        total_seconds: Number(req.body?.total_seconds) || 0,
+        size: size ? `${size.width}x${size.height}` : "",
+      },
+    });
+    tasks.enqueue(task, async (_task, progress, signal) => {
+      const merged = await videoMerger.merge({
+        clips,
+        size: size || undefined,
+        fps,
+        requestId: req.id,
+        signal,
+        onProgress: progress,
+      });
+      return {
+        buffer: merged.buffer,
+        ext: "mp4",
+        mimeType: merged.mimeType,
+      };
+    });
+    logger.info(`video merge ${clips.length} clips queued ${task.id} ${req.id}`);
+    res.json({ id: task.id, object: "video", status: "queued", progress: 0, created_at: Math.floor(Date.now() / 1000) });
+  });
+
+  app.post("/v1/videos", creationVideoUpload.any(), async (req, res) => {
     await reloadRegistryAndSnapshot();
     const body = req.body || {};
     const entry = requireModel(registry, setup, body.model, "video");
-    const files = orderedVideoFiles(req.files || []);
-    const videoFiles = orderedVideoRefFiles(req.files || []);
-    const audioFiles = orderedAudioRefFiles(req.files || []);
+    const easyMedia = h3EasyBinding(entry);
+    const easyFiles = easyMedia ? h3EasyUploadFiles(req.files || []) : null;
+    const files = easyFiles ? easyFiles.uploadedImages : orderedVideoFiles(req.files || []);
+    const videoFiles = easyFiles ? easyFiles.uploadedVideos : orderedVideoRefFiles(req.files || []);
+    const audioFiles = easyFiles ? easyFiles.uploadedAudios : orderedAudioRefFiles(req.files || []);
     const extraParams = parseParams(body.params);
+    if (easyMedia) {
+      h3EasyReferences({ ...easyFiles, params: extraParams }, easyMedia);
+      const missing = missingNodeClasses({
+        ...(files.length ? { image: { class_type: "LoadImage" } } : {}),
+        ...(audioFiles.length ? { audio: { class_type: "LoadAudio" } } : {}),
+        ...(videoFiles.length ? { video: { class_type: "LoadVideo" } } : {}),
+      }, setup.hasNodeClass?.bind(setup));
+      if (missing.length) throw new HttpError(`缺少 H3Easy 媒体节点：${missing.join("、")}`, { status: 409, code: "workflow_unavailable", details: { missingNodes: missing } });
+    }
     const params = { ...extraParams };
     const interpolation = String(params.interpolation || "off").trim();
     if (!["off", "2x", "3x"].includes(interpolation)) {
@@ -2754,7 +2874,7 @@ export async function createGatewayApp(overrides = {}) {
       },
     });
     let sourceVideoTruncated = false;
-    if (videoFiles.length) {
+    if (videoFiles.length && !easyMedia) {
       // H3 统一按 24fps 出片：源视频用时长×24 换算帧数，30/60fps 素材不会算长。
       const sourceSeconds = Number(body.source_duration_seconds);
       const fromDuration = framesFromSeconds(sourceSeconds);
@@ -2827,6 +2947,7 @@ export async function createGatewayApp(overrides = {}) {
       }
       return {
         buffer: file.buffer,
+        assetName: file.assetName,
         ext: extFromMime(file.mimeType, file.filename, "mp4"),
         mimeType: file.mimeType,
         promptId: result.promptId,
@@ -2960,7 +3081,8 @@ export async function createGatewayApp(overrides = {}) {
   });
 
   app.get("/files/:name", (req, res) => {
-    const filename = safeFileName(req.params.name);
+    const filename = String(req.params.name || "");
+    if (!filename || filename.length > 240 || /[\u0000-\u001f\u007f<>:"/\\|?*]/.test(filename) || filename.startsWith(".") || /[. ]$/.test(filename)) throw new HttpError("文件名称无效", { status: 400, code: "invalid_filename" });
     const file = path.join(config.outputDir, filename);
     if (!filename || !fs.existsSync(file)) throw new HttpError("文件不存在", { status: 404, code: "file_not_found" });
     res.sendFile(filename, { root: config.outputDir, dotfiles: "deny" });

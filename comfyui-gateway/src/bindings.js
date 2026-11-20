@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 
 import { clamp, deepClone, parseSize } from "./util.js";
+import { bindH3EasyMedia } from "./h3-easy-media.js";
+import { pruneToOutputs } from "./creation-workflows.js";
 
 export class BindingError extends Error {
   constructor(message, { code = "binding_error", details } = {}) {
@@ -79,6 +81,15 @@ function qwen21Sigmas(value) {
 
 function applyTransform(value, binding) {
   switch (binding.transform) {
+    case "creationH3Resolution": {
+      const resolution = typeof value === "string" ? value.trim().toUpperCase() : "";
+      if (!["360P", "480P", "540P", "720P", "768P"].includes(resolution)) {
+        throw new BindingError("普通创作 H3 分辨率仅支持 360P、480P、540P、720P、768P；1080P 请使用 creation-video-h3-1080 专用工作流。", { code: "invalid_resolution" });
+      }
+      return resolution;
+    }
+    case "lyricsOrSpace":
+      return String(value ?? "").trim() ? String(value) : " ";
     case "qwenSigmas":
       return qwen21Sigmas(value);
     case "secondsToFrames":
@@ -127,8 +138,13 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
     if (!binding || !binding.node || !binding.input) continue;
     if (Array.isArray(binding.modes) && !binding.modes.map(String).includes(String(context.mode || ""))) continue;
     const node = next[binding.node];
+    if (binding.h3EasyMedia) {
+      bindH3EasyMedia(next, binding, context);
+      continue;
+    }
     const isImageBinding = binding.from === "image" || binding.imageIndex !== undefined;
     if (!node?.inputs || (!(binding.input in node.inputs) && !isImageBinding && !binding.array)) {
+      if (entry.strictModelNames) throw new BindingError(`创作工作流绑定无效：${binding.node}.${binding.input}`, { code: "invalid_workflow_binding" });
       logger?.warn?.(`binding ${key} 指向 ${binding.node}.${binding.input}，但工作流里没有这个输入，已跳过。`);
       continue;
     }
@@ -188,6 +204,7 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
       const isVideo = binding.loadType === "video" || binding.from === "video";
       const isAudio = binding.loadType === "audio" || binding.from === "audio";
       const media = (isVideo ? context.uploadedVideos : isAudio ? context.uploadedAudios : context.uploadedImages) || [];
+      if (entry.strictModelNames && binding.max && media.length > Number(binding.max)) throw new BindingError(`创作工作流最多接收 ${binding.max} 个参考素材，收到 ${media.length} 个，不能静默截断。`, { code: "too_many_reference_media" });
       const selected = media.slice(0, Number(binding.max || 8));
       const min = Number(binding.min || 0);
       if (selected.length < min) {
@@ -288,12 +305,15 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
     }
 
     let value;
-    if (binding.from) value = resolvePath(context, binding.from);
+    if (binding.value !== undefined) value = binding.value;
+    else if (binding.from) value = resolvePath(context, binding.from);
     else if (key in context) value = context[key];
 
+    // 严格枚举仅在未传值时使用默认值，显式 null/空串必须进入校验。
+    const strictResolution = binding.transform === "creationH3Resolution";
     if ((value === undefined || value === null || value === "") && binding.random) value = crypto.randomInt(1, 2147483647);
-    if ((value === undefined || value === null || value === "") && binding.default !== undefined) value = binding.default;
-    if (value === undefined || value === null) {
+    if ((value === undefined || (!strictResolution && (value === null || value === ""))) && binding.default !== undefined) value = binding.default;
+    if (value === undefined || (!strictResolution && value === null) || (binding.required && typeof value === "string" && !value.trim())) {
       if (binding.required) throw new BindingError(`缺少必填参数：${key}`, { code: "missing_parameter" });
       continue;
     }
@@ -331,7 +351,7 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
     }
   }
 
-  return next;
+  return entry.outputNodes?.length ? pruneToOutputs(next, entry.outputNodes) : next;
 }
 
 export { secondsToFrames, secondsToFrames17 };

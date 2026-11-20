@@ -70,20 +70,24 @@ test('工作台子菜单项使用具体名称，主项不带副标题', () => {
     // 子项如果复用通用的「工作台」标题，菜单内外两层都叫工作台，
     // 用户点进去之前看不出里面是什么。
     expect(menuSource).toContain('WORKBENCH_ITEMS');
-    for (const key of ['canvas.workbench.storyboard', 'canvas.workbench.digitalHuman', 'canvas.workbench.videoEditor']) {
+    for (const key of ['canvas.workbench.storyboard', 'canvas.workbench.digitalHuman', 'canvas.workbench.videoEditor', 'canvas.workbench.agentCreation']) {
         expect(menuSource).toContain(key);
     }
     // 主项不该再有描述行（截图反馈过副标题多余）。
     expect(menuSource).not.toContain('canvas.createMenu.workbenchDescription');
 });
 
-test('三种工作台共用节点类型，靠 workbenchKind 区分', () => {
-    // 全用 CanvasNodeType.Workbench 建卡，否则节点体系要跟着裂开。
+test('工作台共用节点类型，并注册 Agent 无限创作', () => {
     expect(menuSource).toContain('CanvasNodeType.Workbench, { workbenchKind: kind }');
-    // kind 必须是三种之一，写错会让面板分发退化成故事分镜。
-    for (const kind of ['"storyboard"', '"digital-human"', '"video-editor"']) {
+    for (const kind of ['"storyboard"', '"digital-human"', '"video-editor"', '"novel"', '"agent-creation"']) {
         expect(menuSource).toContain(kind);
     }
+    const host = require('node:fs').readFileSync('src/components/canvas/workbench-node-content.tsx', 'utf8');
+    expect(host).toContain('AgentCreationPanelHost');
+    // 项目设定存在节点 metadata.agentCreation 里（源码走可选链 ctx.node.metadata?.agentCreation）。
+    expect(host).toContain('metadata?.agentCreation');
+    // 面板挂载时必须把 kind 写回，否则画布重开会被 readWorkbenchKind 兜底成 storyboard。
+    expect(host).toContain('workbenchKind: "agent-creation"');
 });
 
 test('卷轴工作台：列表加载与自动选中必须在同一个 effect 里', () => {

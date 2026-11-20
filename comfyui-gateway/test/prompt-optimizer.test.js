@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createPromptOptimizer } from "../src/prompt-optimizer.js";
+import { cloudChat, createPromptOptimizer } from "../src/prompt-optimizer.js";
 import h3ObjectInfo from "./fixtures/h3-prompt-object-info.json" with { type: "json" };
 
 process.env.ALLOW_PRIVATE_CLOUD = "1";
@@ -635,4 +635,40 @@ test("templates stay untouched when no alias function is provided", async () => 
     await optimizer.captionImage({ uploadedImages: [{ name: "cat.png" }] });
     assert.equal(submitted["2"].inputs.model, "Qwen3.5-9B-Q4_K_M.gguf");
     assert.equal(submitted["2"].inputs.mmproj, "mmproj-BF16.gguf");
+});
+
+test("remote temperature unsupported is not retried with another unsupported value", async (t) => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: { message: "chat parameter temperature is not supported for endpoint openai-responses" } }), {
+            status: 400, headers: { "content-type": "application/json" },
+        });
+    });
+    await assert.rejects(() => cloudChat({ system: "fixture", userText: "fixture", cloud: {
+        baseUrl: "https://fixture.invalid/v1", apiKey: "fixture-only-key", model: "fixture-model", apiFormat: "openai",
+    } }), (error) => error.code === "cloud_api_bad_request" && error.details.upstreamStatus === 400);
+    assert.equal(calls, 1);
+});
+
+test("generic provider 400 does not change model, protocol or prompt and is sent once", async (t) => {
+    const bodies = [];
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+        assert.equal(String(url), "https://fixture.invalid/v1/chat/completions");
+        bodies.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ error: { message: "provider error: OpenAI Responses 400 Bad Request: invalid_request: Invalid request req_fixture_provider_001" } }), {
+            status: 400, headers: { "content-type": "application/json" },
+        });
+    });
+    await assert.rejects(() => cloudChat({ system: "system fixture", userText: "user fixture", cloud: {
+        baseUrl: "https://fixture.invalid/v1", apiKey: "fixture-only-key", model: "exact-model-id", apiFormat: "openai",
+    } }), (error) => {
+        assert.equal(error.code, "cloud_api_bad_request");
+        assert.equal(error.details.upstreamRequestId, "req_fixture_provider_001");
+        return true;
+    });
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].model, "exact-model-id");
+    assert.deepEqual(bodies[0].messages, [{ role: "system", content: "system fixture" }, { role: "user", content: "user fixture" }]);
+    assert.equal(bodies[0].stream, false);
 });

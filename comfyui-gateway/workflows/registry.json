@@ -2,6 +2,570 @@
   "version": 1,
   "workflows": [
     {
+      "id": "creation-image-qwen21-edit",
+      "name": "creation-image-qwen21-edit",
+      "type": "image",
+      "label": "创作 Qwen 2.1 图像编辑",
+      "file": "creation-image-qwen21-edit.json",
+      "description": "用户选择的完整 Qwen 2.1 编辑链：2.1 Turbo、Qwen3VL 8B、2.1 VAE、一致性 LoRA 0.48、9步采样；独立ID，不沿用2511模型覆盖。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "422"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "image-qwen21v2-edit.json",
+        "hardware": "nvidia",
+        "profile": "qwen21",
+        "bundled": true
+      },
+      "bindings": {
+        "prompt": {
+          "node": "430",
+          "input": "prompt",
+          "required": true
+        },
+        "negative": {
+          "node": "430",
+          "input": "negative_prompt",
+          "default": "artifacts, low quality, blurry, deformed, watermark"
+        },
+        "seed": {
+          "node": "456",
+          "input": "noise_seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "resolution": {
+          "node": "430",
+          "input": "resolution",
+          "value": 1024
+        },
+        "refs": {
+          "node": "430",
+          "input": "images",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "images.image_",
+          "indexBase": 1,
+          "min": 1,
+          "max": 3
+        },
+        "filenamePrefix": {
+          "node": "422",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-image-qwen21-edit"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "id": "creation-image-krea2",
+      "name": "creation-image-krea2",
+      "type": "image",
+      "label": "创作 Krea2 超写实",
+      "file": "creation-image-krea2.json",
+      "description": "无限创作专用：krea2_hyperreal_2608.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "95"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "krea2_hyperreal_2608.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "102",
+          "input": "text",
+          "required": true
+        },
+        "width": {
+          "node": "100",
+          "input": "width",
+          "from": "size.width",
+          "transform": "int",
+          "default": 1920
+        },
+        "height": {
+          "node": "100",
+          "input": "height",
+          "from": "size.height",
+          "transform": "int",
+          "default": 1080
+        },
+        "batch": {
+          "node": "100",
+          "input": "batch_size",
+          "from": "count",
+          "default": 1
+        },
+        "seed": {
+          "node": "96",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "95",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-image-krea2"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "id": "creation-image-qwen-edit",
+      "name": "creation-image-qwen-edit",
+      "type": "image",
+      "label": "创作 Qwen 2511 图像编辑",
+      "file": "creation-image-qwen-edit.json",
+      "description": "无限创作专用：image_qwen_image_edit_2511_i2i.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "9"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "image_qwen_image_edit_2511_i2i.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "170:151",
+          "input": "prompt",
+          "required": true
+        },
+        "seed": {
+          "node": "170:169",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "image": {
+          "node": "41",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0,
+          "required": true
+        },
+        "filenamePrefix": {
+          "node": "9",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-image-qwen-edit"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "id": "creation-video-h3-768",
+      "name": "creation-video-h3-768",
+      "type": "video",
+      "label": "创作 H3 360P–768P",
+      "file": "creation-video-h3-768.json",
+      "description": "无限创作专用：MiniMax_H3_Easy_r2v.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "12"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "MiniMax_H3_Easy_r2v.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "2",
+          "input": "prompt",
+          "required": true
+        },
+        "seconds": {
+          "node": "2",
+          "input": "seconds",
+          "from": "seconds",
+          "default": 5
+        },
+        "resolution": {
+          "node": "2",
+          "input": "resolution",
+          "from": "params.resolution",
+          "default": "768P",
+          "transform": "creationH3Resolution"
+        },
+        "aspectRatio": {
+          "node": "2",
+          "input": "aspect_ratio",
+          "from": "params.aspect_ratio",
+          "default": "16:9"
+        },
+        "mode": {
+          "node": "2",
+          "input": "mode",
+          "value": "reference"
+        },
+        "seed": {
+          "node": "6",
+          "input": "noise_seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "media": {
+          "node": "2",
+          "input": "media",
+          "h3EasyMedia": true,
+          "maxImages": 9,
+          "maxAudios": 3,
+          "maxVideos": 3
+        },
+        "filenamePrefix": {
+          "node": "12",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-video-h3-768"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        },
+        {
+          "key": "aspect_ratio",
+          "label": "宽高比",
+          "type": "select",
+          "default": "16:9",
+          "options": [
+            "16:9",
+            "9:16",
+            "1:1",
+            "4:3",
+            "3:4",
+            "21:9"
+          ]
+        },
+        {
+          "key": "resolution",
+          "label": "分辨率",
+          "type": "select",
+          "default": "768P",
+          "options": [
+            "360P",
+            "480P",
+            "540P",
+            "720P",
+            "768P"
+          ]
+        }
+      ],
+      "minMedia": 1
+    },
+    {
+      "id": "creation-video-h3-1080",
+      "name": "creation-video-h3-1080",
+      "type": "video",
+      "label": "创作 H3 1080P 二次采样",
+      "file": "creation-video-h3-1080.json",
+      "description": "无限创作专用：MiniMax_H3_Easy_hybrid_r2v_Sigma_Latent_Upscale.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "272"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "MiniMax_H3_Easy_hybrid_r2v_Sigma_Latent_Upscale.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "256",
+          "input": "prompt",
+          "required": true
+        },
+        "seconds": {
+          "node": "256",
+          "input": "seconds",
+          "from": "seconds",
+          "default": 5
+        },
+        "resolution": {
+          "node": "256",
+          "input": "resolution",
+          "value": "768P"
+        },
+        "aspectRatio": {
+          "node": "256",
+          "input": "aspect_ratio",
+          "from": "params.aspect_ratio",
+          "default": "16:9"
+        },
+        "mode": {
+          "node": "256",
+          "input": "mode",
+          "value": "reference"
+        },
+        "seed": {
+          "node": "129",
+          "input": "noise_seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "media": {
+          "node": "256",
+          "input": "media",
+          "h3EasyMedia": true,
+          "maxImages": 9,
+          "maxAudios": 3,
+          "maxVideos": 3
+        },
+        "upscale": {
+          "node": "210",
+          "input": "mode.scale",
+          "value": 1.4
+        },
+        "filenamePrefix": {
+          "node": "272",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-video-h3-1080"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        },
+        {
+          "key": "aspect_ratio",
+          "label": "宽高比",
+          "type": "select",
+          "default": "16:9",
+          "options": [
+            "16:9",
+            "9:16",
+            "1:1",
+            "4:3",
+            "3:4",
+            "21:9"
+          ]
+        }
+      ],
+      "minMedia": 1
+    },
+    {
+      "id": "creation-audio-voice-design",
+      "name": "creation-audio-voice-design",
+      "type": "audio",
+      "label": "创作 Qwen3 音色设计",
+      "file": "creation-audio-voice-design.json",
+      "description": "无限创作专用：qwen3_tts_voice_design_ui.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "3"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "qwen3_tts_voice_design_ui.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "2",
+          "input": "text",
+          "required": true
+        },
+        "voiceDescription": {
+          "node": "2",
+          "input": "voice_description",
+          "from": "params.voiceDescription",
+          "required": true
+        },
+        "seed": {
+          "node": "2",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "3",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-audio-voice-design"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ],
+      "audioMode": "voice-design"
+    },
+    {
+      "id": "creation-audio-voice-clone",
+      "name": "creation-audio-voice-clone",
+      "type": "audio",
+      "label": "创作 Qwen3 音色克隆",
+      "file": "creation-audio-voice-clone.json",
+      "description": "无限创作专用：Qwen3-TTS_Voice_Clone_Reference.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "8"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "Qwen3-TTS_Voice_Clone_Reference.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "42",
+          "input": "text",
+          "required": true
+        },
+        "seed": {
+          "node": "42",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "audio": {
+          "node": "6",
+          "input": "audio",
+          "from": "audio",
+          "audioIndex": 0,
+          "required": true
+        },
+        "filenamePrefix": {
+          "node": "8",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-audio-voice-clone"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ],
+      "audioMode": "voice-clone"
+    },
+    {
+      "id": "creation-audio-music",
+      "name": "creation-audio-music",
+      "type": "audio",
+      "label": "创作 MiniMax Music3",
+      "file": "creation-audio-music.json",
+      "description": "无限创作专用：audio_minimax_music_3.json；默认保留参考模型、LoRA、采样和音轨；可在添加工作流中显式配置模型，不自动使用相似权重。",
+      "strictModelNames": true,
+      "outputNodes": [
+        "35"
+      ],
+      "source": {
+        "kind": "creation-reference",
+        "file": "audio_minimax_music_3.json",
+        "hardware": "nvidia"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "37:13",
+          "input": "caption",
+          "required": true
+        },
+        "lyrics": {
+          "node": "37:13",
+          "input": "lyrics",
+          "from": "params.lyrics",
+          "default": " ",
+          "transform": "lyricsOrSpace"
+        },
+        "maxDuration": {
+          "node": "37:13",
+          "input": "max_duration",
+          "from": "params.maxDuration",
+          "default": 60
+        },
+        "seed": {
+          "node": "37:38",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "filenamePrefix": {
+          "node": "35",
+          "input": "filename_prefix",
+          "from": "params.filenamePrefix",
+          "default": "creation/creation-audio-music"
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 0,
+          "max": 9007199254740991,
+          "step": 1
+        }
+      ],
+      "audioMode": "music"
+    },
+    {
       "id": "image-z-image-turbo",
       "name": "image-z-image-turbo",
       "type": "image",

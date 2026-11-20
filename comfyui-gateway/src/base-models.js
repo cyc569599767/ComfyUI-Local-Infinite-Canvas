@@ -51,6 +51,10 @@ export function imageInputCapacity(entry) {
   let count = 0;
   for (const binding of Object.values(entry?.bindings || {})) {
     if (!binding) continue;
+    if (binding.h3EasyMedia) {
+      count += Number(binding.maxImages ?? 9);
+      continue;
+    }
     if (binding.from !== "image" && binding.imageIndex === undefined && !binding.frameMode) continue;
     if (binding.frameMode) count += Math.max(2, Number(binding.max) || 0);
     else if (binding.array) count += Math.max(1, Number(binding.max) || 1);

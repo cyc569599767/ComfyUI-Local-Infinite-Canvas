@@ -73,6 +73,8 @@ export function loadConfig(overrides = {}) {
     comfyDownloadTimeoutMs: num(overrides.comfyDownloadTimeoutMs ?? process.env.COMFY_DOWNLOAD_TIMEOUT_MS, 60 * 60 * 1000),
     videoTimeoutMs: num(overrides.videoTimeoutMs ?? process.env.VIDEO_TIMEOUT_MS, 0),
     interpolationTimeoutMs: num(overrides.interpolationTimeoutMs ?? process.env.INTERPOLATION_TIMEOUT_MS, 30 * 60 * 1000),
+    // 时间线合成是纯 ffmpeg 拼接，通常比插帧快得多；给 15 分钟足够兜住长片。
+    mergeTimeoutMs: num(overrides.mergeTimeoutMs ?? process.env.MERGE_TIMEOUT_MS, 15 * 60 * 1000),
     // 留空则按 frame_interpolation 目录里实际存在的权重自动挑一个。
     interpolationModel: String(overrides.interpolationModel ?? process.env.INTERPOLATION_MODEL ?? "").trim(),
     pollIntervalMs: num(overrides.pollIntervalMs ?? process.env.POLL_INTERVAL_MS, 750),

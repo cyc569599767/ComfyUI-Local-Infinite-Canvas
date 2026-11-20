@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useId, type MouseEvent as ReactMouseEvent } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -19,10 +19,22 @@ export function ConnectionPath({
     onContextMenu?: (event: ReactMouseEvent<SVGPathElement>) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const arrowId = useId();
     const pathD = route.d;
+    const isCreationLineage = route.creation && connection.role === "lineage";
+    const stroke = active ? theme.node.activeStroke : route.creation && !isCreationLineage ? theme.node.text : theme.node.muted;
+    const strokeOpacity = active ? 1 : isCreationLineage ? 0.55 : 0.9;
 
     return (
         <g data-connection-from={connection.fromNodeId} data-connection-to={connection.toNodeId}>
+            {route.creation ? <>
+                <title>{isCreationLineage ? "创作流程：按阶段与产物顺序流转，仅展示流程，不作为生成参考。" : "真实参考：源节点向箭头指向的目标节点提供生成参考。"}</title>
+                <defs>
+                    <marker id={arrowId} viewBox="0 0 12 12" refX="20" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto">
+                        <path d="M 1 1 L 10 6 L 1 11" fill="none" stroke={stroke} strokeWidth="1.5" strokeOpacity={strokeOpacity} strokeLinecap="round" strokeLinejoin="round" />
+                    </marker>
+                </defs>
+            </> : null}
             <path
                 data-connection-id={connection.id}
                 d={pathD}
@@ -44,9 +56,11 @@ export function ConnectionPath({
             <path
                 data-connection-visible={connection.id}
                 d={pathD}
-                stroke={active ? theme.node.activeStroke : theme.node.muted}
-                strokeWidth={active ? 3 : 2}
-                strokeOpacity={active ? 1 : 0.9}
+                stroke={stroke}
+                strokeWidth={active ? 3 : isCreationLineage ? 1.5 : 2}
+                strokeOpacity={strokeOpacity}
+                strokeDasharray={isCreationLineage ? "6 6" : undefined}
+                markerEnd={route.creation ? `url(#${arrowId})` : undefined}
                 vectorEffect="non-scaling-stroke"
                 strokeLinejoin="round"
                 strokeLinecap="round"

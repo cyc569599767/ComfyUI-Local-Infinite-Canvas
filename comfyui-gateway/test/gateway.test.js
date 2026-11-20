@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -461,4 +462,46 @@ test("cross-site writes are rejected but local origins pass", async () => {
     assert.equal(blockedSite.response.status, 403);
     const allowed = await jsonFetch(`${baseUrl}/api/resources/refresh`, { method: "POST", headers: { Origin: "http://127.0.0.1:3000" } });
     assert.notEqual(allowed.response.status, 403);
+});
+
+test("novel generation preserves safe upstream diagnostics and existing chapters on HTTP 400", async (t) => {
+  let calls = 0;
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      calls += 1;
+      res.writeHead(400, { "content-type": "application/json", "x-request-id": "provider-novel-route-400" });
+      res.end(JSON.stringify({ error: { message: "provider error: OpenAI Responses 400 Bad Request: invalid_request: Invalid request" } }));
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    upstream.closeAllConnections();
+    await new Promise((resolve, reject) => upstream.close((error) => error ? reject(error) : resolve()));
+  });
+  const headers = { "content-type": "application/json" };
+  const created = await jsonFetch(`${baseUrl}/api/novels`, {
+    method: "POST", headers, body: JSON.stringify({ name: "route fixture", idea: "fixture idea" }),
+  });
+  assert.equal(created.response.status, 201);
+  const id = created.data.novel.id;
+  await jsonFetch(`${baseUrl}/api/novels/${id}`, {
+    method: "PUT", headers, body: JSON.stringify({ chapters: [{ seq: 1, title: "existing", outline: "keep outline", novel: "keep prose", volume: 1 }] }),
+  });
+  const before = await jsonFetch(`${baseUrl}/api/novels/${id}`);
+  const rejected = await jsonFetch(`${baseUrl}/api/novels/${id}/generate`, {
+    method: "POST", headers: { ...headers, "x-request-id": "gateway-novel-route-400" },
+    body: JSON.stringify({ step: "chapters", engine: "cloud", chapterCount: 20, cloud: {
+      baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: "fixture-only-key", model: "fixture-model", apiFormat: "openai",
+    } }),
+  });
+  assert.equal(rejected.response.status, 502);
+  assert.equal(rejected.response.headers.get("x-request-id"), "gateway-novel-route-400");
+  assert.equal(rejected.data.error.code, "cloud_api_bad_request");
+  assert.equal(rejected.data.error.details.upstreamStatus, 400);
+  assert.equal(rejected.data.error.details.upstreamRequestId, "provider-novel-route-400");
+  assert.equal(rejected.data.error.details.request.temperatureSent, false);
+  assert.equal(calls, 1, "ordinary HTTP 400 must not trigger batch splitting");
+  const after = await jsonFetch(`${baseUrl}/api/novels/${id}`);
+  assert.deepEqual(after.data.novel, before.data.novel, "failed generation must not alter existing work");
 });

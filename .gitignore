@@ -37,6 +37,9 @@ infinite-canvas/plugins/canvas/*/dist/
 .vscode/
 
 # local test artifacts
+/.tmp-temp/
+/deliverables/
+/infinite-canvas/web/.tmp-extract.cjs
 tmp-*
 # 交互测试夹具与浏览器缓存：可能含真实画布的导出数据，只在本地用
 comfyui-gateway/.e2e/

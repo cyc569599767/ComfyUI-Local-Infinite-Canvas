@@ -14,6 +14,14 @@ export const MODEL_LOADER_SPECS = [
     { classType: "LoraLoader", input: "lora_name", key: "loras", dirs: ["loras"] },
     { classType: "LoraLoaderModelOnly", input: "lora_name", key: "lorasModelOnly", dirs: ["loras"] },
     { classType: "ApplyVDNH3Advanced", input: "vdn_checkpoint", key: "vdn", dirs: ["vdn"] },
+    ...["fl2va_model", "ref2va_model", "text_encoder", "video_vae", "audio_vae"].map((input) => ({
+        classType: "MiniMaxH3EasyLoader", input, key: `h3Easy.${input}`,
+        dirs: [input.endsWith("_model") ? "diffusion_models" : input === "text_encoder" ? "text_encoders" : "vae"],
+    })),
+    { classType: "MiniMaxH3EasyLatentUpscaler3D", input: "model_name", key: "h3EasyUpscaler", dirs: ["latent_upscale_models"] },
+    { classType: "ModelPreviewOverrideKJ", input: "tiny_vae", key: "tinyVae", dirs: ["vae_approx"] },
+    { classType: "Qwen3TTSModelLoader", input: "model_name", key: "qwenTts", dirs: [] },
+    { classType: "Qwen3TTSSenseVoiceASR", input: "model_id", key: "senseVoice", dirs: [] },
     // llama-cpp 的 LLM 权重和视觉投影是两个不同输入，不能共用一个选项列表。
     { classType: "llama_cpp_model_loader", input: "model", key: "llmModel", dirs: ["LLM"] },
     { classType: "llama_cpp_model_loader", input: "mmproj", key: "llmMmproj", dirs: ["LLM"] },

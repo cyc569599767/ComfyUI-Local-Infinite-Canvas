@@ -165,6 +165,39 @@ test('startService 通过 IPC 发命令并等到匹配 requestId 的回包', asy
   assert.ok(child.sent[0].requestId);
 });
 
+test('manual Comfy start makes the service ownable by Stop even if last probe saw it missing', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  manager.state.services = {
+    canvas: { url: 'http://127.0.0.1:3000', mode: 'started', ready: true },
+    gateway: { url: 'http://127.0.0.1:8190', mode: 'started', ready: true },
+    comfy: { url: 'http://127.0.0.1:8188', mode: 'missing', ready: false },
+  };
+  manager.child = fakeLauncher({ result: { ok: true, url: 'http://127.0.0.1:8188' } });
+  await manager.startService('comfy');
+  assert.equal(manager.state.services.comfy.mode, 'started');
+  assert.equal(manager.state.services.comfy.ready, true);
+  assert.deepEqual(manager.state.services.comfy.url, 'http://127.0.0.1:8188');
+  assert.equal(manager.snapshot().services.comfy.mode, 'started');
+});
+
+test('a Comfy instance adopted during manual start remains non-owned and is not stoppable', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  manager.state.services = { comfy: { url: 'http://127.0.0.1:8188', mode: 'missing', ready: false } };
+  manager.child = fakeLauncher({ result: { ok: true, adopted: true, url: 'http://127.0.0.1:8188' } });
+  await manager.startService('comfy');
+  assert.equal(manager.state.services.comfy.mode, 'missing');
+  assert.equal(manager.state.services.comfy.ready, false);
+});
+
+test('stopping owned Comfy immediately resets the dashboard ready state', async () => {
+  const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
+  manager.state.services = { comfy: { url: 'http://127.0.0.1:8188', mode: 'started', ready: true } };
+  manager.child = fakeLauncher({ result: { ok: true } });
+  await manager.stopService('comfy');
+  assert.equal(manager.state.services.comfy.mode, 'missing');
+  assert.equal(manager.state.services.comfy.ready, false);
+});
+
 test('并发请求不会串台：回包按 requestId 对应', async () => {
   const manager = new ServiceManager({ root: '/tmp', env: {}, probeServices: async () => ({}), spawnProcess: () => { throw new Error('unused'); } });
   const { EventEmitter } = require('node:events');

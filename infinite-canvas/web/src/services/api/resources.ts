@@ -194,6 +194,7 @@ export type RegisteredWorkflow = {
     label: string;
     type: string;
     description?: string;
+    source?: { kind?: string; file?: string };
     enabled?: boolean;
     availability?: { available?: boolean; problems?: Array<{ type?: string; message?: string }> };
 };
@@ -203,6 +204,31 @@ export async function fetchRegisteredWorkflows(): Promise<RegisteredWorkflow[]> 
     const data = await readJson(response);
     if (!response.ok || data.ok === false) throw new Error(errorMessage(data, `读取工作流列表失败（HTTP ${response.status}）`));
     return Array.isArray(data.workflows) ? (data.workflows as RegisteredWorkflow[]) : [];
+}
+
+export type WorkflowModelField = {
+    nodeId: string; input: string; classType: string; label: string;
+    defaultValue: string; value: string; overridden: boolean; available: boolean;
+    options: string[]; missingNode: boolean; optionKind: "files" | "repository";
+    compatibilityError?: string; rejectedOptions?: Array<{ value: string; reason: string }>;
+};
+export type WorkflowModelConfig = { id: string; label: string; offline?: boolean; fields: WorkflowModelField[] };
+export type WorkflowModelPatch = { overrides: Array<{ nodeId: string; input: string; value: string | null }> } | { reset: true };
+
+export async function fetchWorkflowModels(id: string): Promise<WorkflowModelConfig> {
+    const response = await gatewayFetch(`${gatewayRoot}/api/workflows/${encodeURIComponent(id)}/models`);
+    const data = await readJson(response);
+    if (!response.ok || !Array.isArray(data.fields)) throw new Error(errorMessage(data, `读取模型配置失败（HTTP ${response.status}），请确认网关已更新`));
+    return data as WorkflowModelConfig;
+}
+
+export async function saveWorkflowModels(id: string, patch: WorkflowModelPatch): Promise<WorkflowModelConfig> {
+    const response = await gatewayFetch(`${gatewayRoot}/api/workflows/${encodeURIComponent(id)}/models`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+    });
+    const data = await readJson(response);
+    if (!response.ok || data.ok !== true || !Array.isArray(data.fields)) throw new Error(errorMessage(data, `保存模型配置失败（HTTP ${response.status}）`));
+    return data as WorkflowModelConfig;
 }
 
 export type ResourceStatus = {

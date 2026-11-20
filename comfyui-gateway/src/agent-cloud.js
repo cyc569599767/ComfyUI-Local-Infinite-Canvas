@@ -204,6 +204,17 @@ function rejectedOptionalParam(detail, param) {
   return /not supported|unsupported|does not support|unknown (parameter|field)|unrecognized/i.test(lower);
 }
 
+/**
+ * 允许被静默去掉的参数白名单。
+ *
+ * 只列「去掉后语义不变或可接受」的采样/控制参数：
+ * - tool_choice=auto 是默认行为，去掉不改语义（显式 required 不算，见 stripField）。
+ * - temperature / top_p / parallel_tool_calls 是采样旋钮，去掉后模型用自己的
+ *   默认值，结果仍然可用——总比整个请求失败强。
+ * model、messages 这类必需字段永远不该进来。
+ */
+const DROPPABLE_PARAMS = ["tool_choice", "temperature", "top_p", "parallel_tool_calls"];
+
 /** 从已序列化的请求体里去掉一个顶层字段；去不掉就返回 null。 */
 function stripField(payload, field) {
   if (!payload) return null;
@@ -215,6 +226,12 @@ function stripField(payload, field) {
   if (field === "tool_choice" && body.tool_choice !== "auto") return null;
   delete body[field];
   return JSON.stringify(body);
+}
+
+/** 找出上游在抱怨哪个可降级参数；没有就返回空串。 */
+function findRejectedParam(detail) {
+  if (!detail) return "";
+  return DROPPABLE_PARAMS.find((param) => rejectedOptionalParam(detail, param)) || "";
 }
 
 function publicError(error) {
@@ -302,25 +319,33 @@ export function createAgentCloudTransport({ lookup = dnsLookup, httpRequest = ht
       upstream = await send(payload);
       clearTimeout(headerTimer);
       let status = upstream.statusCode || 502;
-      // 上游明确拒绝某个可选参数时，去掉它重发一次。
+      // 上游明确拒绝某个可选参数时，去掉它重发。
       // 这一步必须在读取 body 之前完成，因为 400 的 body 要被消费掉才能拿到原因。
+      //
+      // 用循环而不是只试一次：同一个上游可能连续拒绝多个参数
+      // （实测 openai-responses 端点先拒 tool_choice、再拒 temperature），
+      // 每次只去掉当前抱怨的那个，最多重试 DROPPABLE_PARAMS.length 次。
       if (status === 400 && operation === "chat") {
         let detail = safeUpstreamMessage(await readUpstreamErrorBody(upstream), apiKey);
-        if (rejectedOptionalParam(detail, "tool_choice")) {
-          const retried = stripField(payload, "tool_choice");
-          if (retried) {
-            clearTimeout(headerTimer);
-            upstream = await send(retried);
-            clearTimeout(headerTimer);
-            status = upstream.statusCode || 502;
-            if (status >= 200 && status < 300) {
-              degraded = "tool_choice";
-            } else if (status === 400) {
-              // 重试也可能撞到另一个 400（比如模型名不对），必须用新响应体里的原因，
-              // 不能拿第一次那条「tool_choice 不支持」去误导用户。
-              detail = safeUpstreamMessage(await readUpstreamErrorBody(upstream), apiKey);
-            }
+        let nextPayload = payload;
+        for (let attempt = 0; attempt < DROPPABLE_PARAMS.length; attempt += 1) {
+          const param = findRejectedParam(detail);
+          if (!param) break;
+          const retried = stripField(nextPayload, param);
+          if (!retried) break;
+          clearTimeout(headerTimer);
+          upstream = await send(retried);
+          clearTimeout(headerTimer);
+          status = upstream.statusCode || 502;
+          if (status >= 200 && status < 300) {
+            degraded = degraded ? `${degraded},${param}` : param;
+            break;
           }
+          if (status !== 400) break;
+          // 重试也可能撞到另一个 400（比如模型名不对），必须用新响应体里的原因，
+          // 不能拿上一次那条「XXX 不支持」去误导用户。
+          detail = safeUpstreamMessage(await readUpstreamErrorBody(upstream), apiKey);
+          nextPayload = retried;
         }
         if (status < 200 || status >= 300) {
           // 重试后仍失败，用同一条已经读到的 detail 生成错误，避免再消费一次 body。

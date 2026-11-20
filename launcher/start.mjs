@@ -613,17 +613,21 @@ async function listenCanvasServer(cfg, preferredPort, session = null) {
 }
 
 function spawnComfy(plan, port = COMFY_PORT_FIRST) {
-  const options = { cwd: plan.cwd, detached: true,
-    stdio: DESKTOP ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: plan.kind !== "script",
+  if (DESKTOP && plan.kind !== "python") {
+    throw new Error("桌面模式只允许通过无窗口的 Python 启动 ComfyUI");
+  }
+  // Windows 桌面端保留子进程管理与日志管道，不创建独立的控制台会话。
+  const options = { cwd: plan.cwd, detached: !DESKTOP || process.platform !== "win32",
+    stdio: DESKTOP ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: plan.kind === "python",
     ...(DESKTOP ? { env: comfySpawnEnvironment() } : {}) };
   let child;
   if (plan.kind === "python") {
     child = spawn(plan.file, comfyPythonArguments(plan, port, DESKTOP), options);
   } else if (plan.kind === "desktop") {
-    child = spawn(plan.file, [], { ...options, windowsHide: false });
+    child = spawn(plan.file, [], options);
   } else {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    child = spawn(comspec, ["/d", "/s", "/c", plan.file], { ...options, windowsHide: false });
+    child = spawn(comspec, ["/d", "/s", "/c", plan.file], options);
   }
   if (DESKTOP) {
     child.stdout?.on("data", data => forwardLines(data, "comfy"));
@@ -1792,7 +1796,7 @@ async function restartComfy(cfg) {
  *
  * 只有本启动器拉起的进程（state.comfyChild / state.gatewayChild）才可停止；
  * 接管的（adopt）外部服务一律拒绝，由原启动器负责——否则会杀掉用户自己的进程。
- * 这两个函数同时被 HTTP 控制接口和桌面 IPC 复用，避免两条路径行为不一致。
+ * ComfyUI 的命令行启动可以用整合包批处理；桌面 IPC 另走无窗口启动路径。
  */
 async function stopComfyService() {
   if (!state.comfyChild) {
@@ -2289,8 +2293,7 @@ async function desktopMain(session) {
   session.assertRunning();
   const cfg = loadConfig();
   cfg.comfyUrl = desktopLocalUrl(cfg.comfyUrl);
-  // 桌面模式 controlPort 是 0（随机口），HTTP 控制接口对桌面端不可达，
-  // 所以服务启停走 IPC。同一个处理函数也挂在 HTTP 路由上，供非桌面场景使用。
+  // 桌面 HTTP 控制口只读，服务启停走 IPC。ComfyUI 启动沿用桌面后台路径，不走 CLI 批处理。
   const serviceHandlers = {
     "desktop:service-status": () => ({
       canvas: { ready: Boolean(state.canvasServer), owned: Boolean(state.canvasServer) },
@@ -2298,7 +2301,14 @@ async function desktopMain(session) {
       comfy: { ready: Boolean(state.comfyChild || state.comfyUrl), owned: Boolean(state.comfyChild), adopted: Boolean(state.adoptedComfyUrl) },
     }),
     "desktop:start-service": async (name) => {
-      if (name === "comfy") return startComfyService(cfg);
+      if (name === "comfy") {
+        try {
+          return await startDesktopComfyService();
+        } catch (error) {
+          if (!session.signal.aborted) log(`ComfyUI 启动失败：${error.message}`, "ERROR");
+          throw error;
+        }
+      }
       if (name === "gateway") return startGatewayService(cfg);
       if (name === "canvas") return startCanvasService(cfg);
       throw new Error(`不支持单独启动的服务：${name}`);
@@ -2357,6 +2367,68 @@ async function desktopMain(session) {
     return false;
   };
 
+  async function prepareDesktopComfyPlan() {
+    session.assertRunning();
+    const install = cfg.comfyDir ? comfyInstallInfo(cfg.comfyDir)
+      : process.env.DESKTOP_DISTRIBUTION === "1" ? null : findComfyInstall(cfg);
+    // Discovery runs synchronous probes. Drain pending shutdown IPC before spawning.
+    await new Promise(setImmediate);
+    session.assertRunning();
+    const plan = resolveDesktopComfyPlan(install, resolveLaunchPlan(install));
+    if (plan) {
+      cfg.comfyDir ||= install.dir;
+      cfg.comfyWorkflowsDir ||= install.workflowsDir;
+    }
+    return plan;
+  }
+
+  function launchDesktopComfy(plan) {
+    session.assertRunning();
+    if (state.comfyChild) return state.comfyChild;
+    log(`Desktop 后台启动 ComfyUI（不打开终端或浏览器）：${plan.file}`);
+    // Use the port the gateway is bound to, not the legacy CLI's port scan.
+    const child = session.ownChild(spawnComfy(plan, portFromUrl(cfg.comfyUrl) || COMFY_PORT_FIRST));
+    state.comfyChild = child;
+    const clearExitedChild = () => {
+      if (state.comfyChild !== child) return;
+      state.comfyChild = null;
+      state.comfyUrl = null;
+    };
+    child.once("exit", clearExitedChild);
+    if (!child.pid) child.once("error", clearExitedChild);
+    return child;
+  }
+
+  async function startDesktopComfyService() {
+    session.assertRunning();
+    if (CONNECT_ONLY) throw new Error("只连接模式不会启动 ComfyUI");
+    if (state.comfyChild) return { ok: true, alreadyRunning: true };
+    const running = await probeDesktopComfy();
+    if (state.comfyChild) return { ok: true, alreadyRunning: true };
+    if (running) {
+      state.comfyUrl = state.adoptedComfyUrl = cfg.comfyUrl;
+      log(`ComfyUI 已在运行（${cfg.comfyUrl}），直接接管`);
+      return { ok: true, adopted: true, url: cfg.comfyUrl };
+    }
+    const plan = await prepareDesktopComfyPlan();
+    if (!plan) throw new Error("未找到可后台启动的 ComfyUI，请在设置中选择安装目录");
+    if (state.comfyChild) return { ok: true, alreadyRunning: true };
+    state.adoptedComfyUrl = null;
+    const child = launchDesktopComfy(plan);
+    try {
+      if (!await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child)) {
+        throw new Error("ComfyUI 未在超时时间内就绪");
+      }
+      if (state.comfyChild !== child) throw new Error("ComfyUI 启动已取消");
+      state.comfyUrl = cfg.comfyUrl;
+      log(`ComfyUI 已启动：${cfg.comfyUrl}`);
+      return { ok: true, url: cfg.comfyUrl };
+    } catch (error) {
+      if (!session.signal.aborted && state.comfyChild === child) killOurChild(child, "ComfyUI");
+      throw error;
+    }
+  }
+
   // listen(0) deliberately ignores the persisted CLI control port. Desktop's
   // private endpoint is read-only: no adopted Comfy restart or config writes.
   const control = session.ownServer(http.createServer((req, res) => {
@@ -2394,38 +2466,26 @@ async function desktopMain(session) {
   let comfy = { url: cfg.comfyUrl, mode: await probeDesktopComfy() ? "adopt" : "missing" };
   session.assertRunning();
   if (comfy.mode === "missing" && !CONNECT_ONLY && !gateway) {
-    const install = cfg.comfyDir ? comfyInstallInfo(cfg.comfyDir)
-      : process.env.DESKTOP_DISTRIBUTION === "1" ? null : findComfyInstall(cfg);
-    // Installation discovery contains synchronous filesystem/Python probes.
-    // Drain queued IPC/disconnect before spawning anything after that work.
-    await new Promise(setImmediate);
-    session.assertRunning();
     let plan = null;
     try {
-      plan = resolveDesktopComfyPlan(install, resolveLaunchPlan(install));
+      plan = await prepareDesktopComfyPlan();
     } catch (error) {
-      // Unsupported vendor scripts must not open a browser or lose environment
-      // setup; keep canvas/gateway usable and explain how to connect manually.
+      session.assertRunning();
+      // Keep canvas/gateway usable for installs without a supported background plan.
       log(`Desktop 未自动启动 ComfyUI：${error.message}`, "WARN");
     }
     if (plan) {
-      cfg.comfyDir ||= install.dir;
-      cfg.comfyWorkflowsDir ||= install.workflowsDir;
-      log(`Desktop 启动 ComfyUI（禁止自动打开浏览器）：${plan.file}`);
-      // Configured port only: do not accidentally adopt a different installation.
-      const child = session.ownChild(spawnComfy(plan, portFromUrl(cfg.comfyUrl) || COMFY_PORT_FIRST));
-      // 同上：服务面板要靠 state.comfyChild 判断「这是我们启动的」并允许停止。
-      state.comfyChild = child;
+      const child = launchDesktopComfy(plan);
       try {
         const ready = await waitDesktop("ComfyUI", probeDesktopComfy, cfg.comfyStartTimeoutSec, child);
         session.assertRunning();
-        if (ready) comfy = { url: cfg.comfyUrl, mode: "started" };
-        else log("ComfyUI 启动尚未就绪；继续提供画布与网关，稍后可检查状态。", "WARN");
+        if (ready && state.comfyChild === child) {
+          state.comfyUrl = cfg.comfyUrl;
+          comfy = { url: cfg.comfyUrl, mode: "started" };
+        } else log("ComfyUI 启动尚未就绪；继续提供画布与网关，稍后可检查状态。", "WARN");
       } catch (error) {
         session.assertRunning(); // Parent shutdown still cancels the whole startup.
         log(`ComfyUI 启动失败，保留画布与网关：${error.message}（code=${child.exitCode}, signal=${child.signalCode || "none"}）`, "WARN");
-        // 没起来就别留着：否则面板会显示「已在运行」，点启动反而什么都没发生。
-        if (child.exitCode !== null || child.signalCode !== null) state.comfyChild = null;
       }
     }
   }

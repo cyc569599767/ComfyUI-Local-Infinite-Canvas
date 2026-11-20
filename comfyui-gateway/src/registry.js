@@ -199,7 +199,7 @@ function bindingWarnings(workflow, bindings) {
   return warnings;
 }
 
-export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger, mainModelFile = () => "", labelOverride = () => "" } = {}) {
+export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger, mainModelFile = () => "", labelOverride = () => "", workflowOverride = (_id, workflow) => workflow } = {}) {
   const registryPath = path.join(dir, REGISTRY_FILE);
   let cache = new Map();
   let byName = new Map();
@@ -253,15 +253,16 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       try {
         if (!raw?.file) throw new Error("缺少 file 字段");
         const filePath = path.isAbsolute(raw.file) ? raw.file : path.join(dir, raw.file);
-        const workflow = await readJsonFile(filePath, maxWorkflowBytes);
-        if (!isApiWorkflow(workflow)) {
-          if (isUiWorkflow(workflow)) logger?.warn?.(`跳过 UI 格式工作流 ${raw.file}，请在 ComfyUI 中导出 API 格式。`);
+        const templateWorkflow = await readJsonFile(filePath, maxWorkflowBytes);
+        if (!isApiWorkflow(templateWorkflow)) {
+          if (isUiWorkflow(templateWorkflow)) logger?.warn?.(`跳过 UI 格式工作流 ${raw.file}，请在 ComfyUI 中导出 API 格式。`);
           else logger?.warn?.(`跳过无效工作流 ${raw.file}`);
           continue;
         }
-        const type = inferType(workflow, raw.type);
         const id = raw.id || slugify(raw.name || path.basename(filePath, ".json"), `workflow-${Date.now()}`);
-        const name = ensureTypePrefix(raw.name || id, type);
+        const workflow = raw.source?.kind === "creation-reference" ? workflowOverride(id, deepClone(templateWorkflow)) : templateWorkflow;
+        const type = inferType(workflow, raw.type);
+        const name = raw.strictModelNames ? (raw.name || id) : ensureTypePrefix(raw.name || id, type);
         const entry = {
           ...raw,
           id,
@@ -269,6 +270,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
           type,
           file: raw.file,
           filePath,
+          templateWorkflow,
           workflow,
           // 用户自定义显示名 > registry.json 里的 label > JSON 文件名；三者都拿不到才用 name。
           label: normalizeLabel(labelOverride(id) || raw.label, raw.file || id) || name,
@@ -301,8 +303,12 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     loaded = true;
   }
 
-  async function load() {
-    if (loading) return loading;
+  async function load({ force = false } = {}) {
+    if (loading) {
+      if (!force) return loading;
+      await loading;
+      return load({ force: true });
+    }
     loading = doLoad().finally(() => {
       loading = null;
     });
@@ -336,6 +342,9 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       description: entry.description || "",
       category: entry.category || null,
       hidden: entry.hidden === true,
+      strictModelNames: entry.strictModelNames === true,
+      audioMode: entry.audioMode,
+      outputNodes: entry.outputNodes,
       file: entry.file,
       bindings: entry.bindings || {},
       defaults: entry.defaults || {},
@@ -360,6 +369,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
   }
 
   function decorateWithMainModel(entry, variant, loaderOptions) {
+    if (entry.strictModelNames) return entry;
     const decorated = decorateEntry(entry, variant, loaderOptions);
     if (variant) return decorated;
     const file = mainModelFile(entry.id);
@@ -402,6 +412,7 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
   function resolveModel(idOrName, loaderOptions = {}) {
     const direct = resolve(idOrName);
     if (direct) {
+      if (direct.strictModelNames) return { entry: direct, variant: null };
       const override = mainModelFile(direct.id);
       if (override && (loaderOptions?.["UNETLoader"] || []).includes(override)) {
         return { entry: decorateWithMainModel(direct, null, loaderOptions), variant: null };
