@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## Fork 同步说明 — 选择性合入上游 v0.25.0–v0.25.3（2026-11-21）
+
+上游 205b37a8（v0.25.3）改动量很大且包含大规模删除/重构，本 fork 采用**外科式选择性合并**，只引入与本地功能不冲突的能力，其余暂缓：
+
++ [新增] **H3（HyperFlow 6+2）**：文生/首尾帧/多参三模式共用一条 INT8 工作流，8 步 schedule（6 步低清 + 2 步高清），Sage/SolAttn/TRT VAE/T8 可用；随包 `ComfyUI-HyperFlow-Flash` 与 `comfyui_hyperflow_int8_nodes`。
++ [新增] **H3-Image**（`image-h3image` 文生图 / 多图编辑）与旧版 **P-H3-Image**（`image-ph3image`）。
++ [新增] **Viggle Remake 角色替换 / 视频编辑**（`video-h3-viggle-swap`）：1 段源视频 + 1–4 张参考图，沿用源音轨；支持 pins 自动选帧、Sage 开关、长视频分段接力（`RemakePrefix`）、pruned→Singularity 变体自动回退；随包 `ComfyUI-Viggle-Remake`。
++ [新增] **YuE2 写歌**：`/v1/audio/song` 支持 int8 快速档与 BF16 质量档、纯器乐（`YuE2InstrumentalConvert`）；新增歌词优化 `/v1/prompts/optimize?task=lyrics`；音频资源卡 `audio`。
++ [新增] **本地台词生成**：`/v1/audio/speech-indextts`（IndexTTS-2 零样本克隆）与 `/v1/audio/speech-h3`（H3 描述音色，免参考音频）。
++ [新增] 预览事件订阅与步骤进度字段（`preview-hub`、`gateway-status`、`step-progress`）。
++ [新增] 随包助手技能 `canvas`、`deploy-repair`。
++ [保留] 本地全部既有功能不变：独立 Agent 无限创作十二阶段、创作专用工作流与逐节点模型配置、显式模型精确匹配、自由卡应用/导出包、桌面服务、中文媒体响应头、视频时间线剪辑（重叠/鼠标跟随拖拽/两种预览）。
++ [暂缓] 上游的图像质量档位重构、自选工作流（自由卡）重构、3D 全景 PNG、实验入口改名、oldx LoRA 资源卡。
+
 ## Fork 同步说明 — v0.24.13（2026-11-07）
 
 + 合入上游 v0.24.9–v0.24.13：Qwen 2.1 v2 五合一、风格配方、媒体 URL、Agent 运行时安装与权限修复。

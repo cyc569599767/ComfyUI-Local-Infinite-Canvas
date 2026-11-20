@@ -58,12 +58,15 @@ for (const [index, entry] of entries.entries()) {
 }
 
 test("既有注册项和工作流内容保持原样", () => {
+  // 摘要覆盖除创作专用外的全部注册项；v0.25.3 选择性合并新增了
+  // video-hyperflow-ref2va-6p2 / image-h3image / image-ph3image / video-h3-viggle-swap 四条，
+  // 其余历史条目必须继续与基线逐字节一致。
   const legacy = rows.filter((entry) => !entry.id.startsWith("creation-"));
-  assert.equal(digest(JSON.stringify(legacy)), "014a8a87818085a3bb342b85e230e4c9933a5822a28e537c62df293969e1c6df");
+  assert.equal(digest(JSON.stringify(legacy)), "53ce5fcf7de340752d91a5640537e0b66ecfc36e3eb994bb2f94debdbe0537f4");
   const files = [...new Set(legacy.flatMap((entry) => [entry.file, ...Object.values(entry.variants || {}).map((variant) => variant.file)]).filter(Boolean))].sort();
   // 规范化换行，避免 Windows Git autocrlf 造成无意义差异。
   const canonical = files.map((file) => [file, digest(JSON.stringify(read(file)))]);
-  assert.equal(digest(JSON.stringify(canonical)), "8549a0e244f0bc25d9cc7ebb966811416cbbd34d5d0b967c4efd672e301b90a1");
+  assert.equal(digest(JSON.stringify(canonical)), "9ea1def2c8cd17dbd59462283912f0514922639fee02f55abaf65b0e72ce8470");
   for (const file of files) assert.equal(fs.existsSync(path.join(dir, file)), true);
 });
 

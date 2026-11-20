@@ -37,6 +37,10 @@
 - **comfystreamerh3** — MIT，Copyright (c) 2026 Comfy Org；上游 https://github.com/Comfy-Org/comfystreamerh3 ；随工作台提供预解压目录，未改动源码。
 - **ComfyUI-ClipProj** — MIT，Copyright (c) 2026 nicolab28；上游 https://github.com/nicolab28/ComfyUI-ClipProj ；随工作台提供预解压目录，未改动源码。
 - **Goohaitools-comfyui** — GPL-3.0；上游 https://github.com/goohai/Goohaitools-comfyui ；随工作台提供预解压目录，未改动源码。
+- **ComfyUI-HyperFlow-Flash** — GPL-3.0；上游 https://github.com/Video-Rebirth/ComfyUI-HyperFlow-Flash ；提供 `HyperFlowSigmas` / `HyperFlowLoader`，随工作台提供预解压目录，未改动源码。
+- **comfyui_hyperflow_int8_nodes** — GPL-3.0；上游 https://github.com/BennyDaBall930/comfyui_hyperflow_int8_nodes ；提供 `HyperFlowINT8Loader`，随工作台提供预解压目录，未改动源码。
+- **ComfyUI-Viggle-Remake** — Apache-2.0（`LICENSE-CODE` 随节点目录）；随工作台提供预解压目录，未改动源码。
+- **yue2_instrumental** — Apache-2.0（`LICENSE` 随节点目录）；提供 `YuE2InstrumentalConvert`，随工作台提供预解压目录，未改动源码。
 
 ## 自托管的 Qwen 2.1 LoRA（资源卡下载）
 
@@ -75,6 +79,30 @@
 - **ClipProj 4B v3.1 MLP 投影** — 许可以上游模型页为准；来源 `NicoLab28/ClipProj-MiniMax-H3`；未改动权重。
 - **minimax_h3_video_vae_int8_convrot** — MiniMax H3 社区许可；来源 ModelScope `Comfy-Org/MiniMax-H3`。
 - **minimax_h3_audio_vae_fp32** — MiniMax H3 Community License；来源 ModelScope `Comfy-Org/MiniMax-H3`（hf-mirror 备源）。
+
+## 可选下载的音频组件（YuE2 写歌）
+
+以下组件由「音频（YuE2）」资源卡按需下载，不进入主安装包。**YuE2 权重为 CC-BY-NC-4.0，仅限个人/非商业用途**：
+
+- **YuE2-3B int8（`yue2_3b_int8_convrot`）** — CC-BY-NC-4.0；来源 https://huggingface.co/Comfy-Org/YuE2 与 ModelScope `Comfy-Org/YuE2`；checkpoint 已含 VAE，约 3.96GB；未改动权重。
+- **YuE2-3B BF16（`yue2_3b_bf16`，可选高精度）** — CC-BY-NC-4.0；同上来源；约 7.8GB；未改动权重。
+- 写歌/纯音乐依赖 ComfyUI 0.44+ 的原生 YuE2 节点；纯音乐转换还需随包的 `yue2_instrumental` 节点（Apache-2.0）。
+
+## 可选下载的 HyperFlow（6+2）组件
+
+以下组件由「H3（HyperFlow 6+2）」资源卡按需下载，不进入主安装包：
+
+- **HyperFlow H3 Flash 14B Ref2VA INT8（`hyperflow_ref2va_int8`）** — MiniMax H3 社区许可（转换衍生）；社区转换版（BennyDaBall），非官方；来源 https://huggingface.co/BennyDaBall/HyperFlow-H3-Flash-INT8-ComfyUI ；约 16.3GB；未改动权重。
+- TRT VAE engine、ONNX VAE 编码/解码器等 bake 组件同样不随仓库分发，按资源卡说明在本机生成。
+
+## 可选下载的 Viggle Remake 组件
+
+以下组件由「Viggle Remake 角色替换 / 视频编辑」资源卡按需下载，不进入主安装包：
+
+- **Viggle Remake 换人 INT8（`viggle_swap_int8`）** — MiniMax-H3 社区许可（H3 衍生）；约 20.97GB；未改动权重。
+- **Viggle Remake 换人 Q4_K_M（`viggle_swap_gguf_q4`）** — 同上；低显存备用，需 ComfyUI-GGUF 与 `--reserve-vram`。
+- **Viggle Remake 视频编辑 LoRA（`viggle_edit_lora`）** — 同上；ComfyUI 重打包版。
+- **H3 pruned INT8 底模（`h3_unet_fl2va_pruned_int8_convrot`）** 与 **Singularity 未剪枝 INT8（`h3_unet_singularity_ref2va_v13_int8_unpruned`）** — MiniMax H3 社区许可；编辑模式的默认/高质量底模。
 
 ## 可选下载的超分模型
 

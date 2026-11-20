@@ -912,7 +912,11 @@ test("krea2 and four-view packs keep the base workflow and standalone resource e
     assert.equal(index.resources.some((item) => item.id === "krea2_darkbrush_lora"), false);
     assert.equal(index.resources.some((item) => item.id === "krea2_retroanime_lora"), false);
     // 95 = 原有 91 + RelayVSR 的 x2/x4 各一套「主模型 + Flash VAE」。
-    assert.equal(index.resources.length, 95);
+    // 98 = 95 + YuE2 写歌的「纯音乐节点 + int8 checkpoint + BF16 可选档」。
+    // 101 = 98 + HyperFlow 的「INT8 加载节点 + Flash 节点 + Ref2VA INT8 主模型」。
+    // 108 = 101 + Viggle 的「Remake 节点 + 换人 INT8 + Q4 备用 + edit LoRA + pruned 底模
+    //        + Singularity 未剪枝底模 + H3 视频 VAE」。
+    assert.equal(index.resources.length, 108);
     assert.equal(new Set(index.resources.map(item => item.id)).size, index.resources.length);
 });
 

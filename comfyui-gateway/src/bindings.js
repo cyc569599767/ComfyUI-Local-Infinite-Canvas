@@ -217,6 +217,9 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
       }
       selected.forEach((uploaded, index) => {
         const loadNodeId = nextGatewayLoadId(next);
+        // Viggle 的源视频与参考图落在同名单槽位输入上（source / ref_1），
+        // singleInput 让「单个素材写固定键、多个素材写前缀编号」两种形态共用一个绑定。
+        const inputKey = binding.singleInput ? String(binding.singleInput) : `${prefix}${indexBase + index}`;
         if (isVideo && binding.loader === "native") {
           next[loadNodeId] = {
             class_type: "LoadVideo",
@@ -237,6 +240,12 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
           return;
         }
         if (isVideo) {
+          // Viggle 这类「整段源视频」工作流需要把源帧数同时用作加载上限和目标长度，
+          // sourceLengthStatic 表示长度直接写字面值，而不是连加载节点的帧数输出。
+          const sourceFrames = Math.round(Number(context.sourceVideoFrames));
+          const frameLoadCap = binding.sourceLengthStatic && Number.isFinite(sourceFrames) && sourceFrames > 0
+            ? sourceFrames
+            : Number(binding.frameLoadCap ?? 0);
           next[loadNodeId] = {
             class_type: "VHS_LoadVideo",
             inputs: {
@@ -244,8 +253,8 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
               force_rate: Number(binding.forceRate ?? 0),
               custom_width: 0,
               custom_height: 0,
-              frame_load_cap: 0,
-              skip_first_frames: 0,
+              frame_load_cap: frameLoadCap,
+              skip_first_frames: Number(context.sourceSkipFrames ?? 0),
               select_every_nth: 1,
               format: "AnimateDiff",
             },
@@ -264,13 +273,19 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
             _meta: { title: `Gateway Ref ${index + 1}` },
           };
         }
-        node.inputs[`${prefix}${indexBase + index}`] = [loadNodeId, 0];
-        if (isVideo && binding.audioPrefix) {
-          node.inputs[`${binding.audioPrefix}${indexBase + index}`] = [loadNodeId, 2];
+        node.inputs[inputKey] = [loadNodeId, 0];
+        if (isVideo && (binding.audioInput || binding.audioPrefix)) {
+          const audioKey = binding.audioInput ? String(binding.audioInput) : `${binding.audioPrefix}${indexBase + index}`;
+          node.inputs[audioKey] = [loadNodeId, 2];
         }
         if (isVideo && binding.sourceLengthInput) {
-          const sourceLengthOutput = Number.isInteger(binding.sourceLengthOutput) ? binding.sourceLengthOutput : 1;
-          node.inputs[binding.sourceLengthInput] = [loadNodeId, sourceLengthOutput];
+          if (binding.sourceLengthStatic) {
+            const frames = Math.round(Number(context.sourceVideoFrames));
+            if (Number.isFinite(frames) && frames > 0) node.inputs[binding.sourceLengthInput] = frames;
+          } else {
+            const sourceLengthOutput = Number.isInteger(binding.sourceLengthOutput) ? binding.sourceLengthOutput : 1;
+            node.inputs[binding.sourceLengthInput] = [loadNodeId, sourceLengthOutput];
+          }
         }
       });
       continue;

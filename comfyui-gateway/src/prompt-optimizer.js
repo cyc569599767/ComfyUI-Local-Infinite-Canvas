@@ -371,7 +371,7 @@ function cloudHttpError({ response, data, apiKey, maxTokens, temperatureSent, im
 
 // OpenAI 兼容协议在下面直接 fetch；其它协议才调用 requestAgentCloudJson。
 // 不要只修 agent-cloud transport，就假定覆盖到了这条调用路径。
-export async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096, timeoutMs = 120000 }) {
+export async function cloudChat({ system, userText, images = [], cloud = {}, signal, temperature = 0.6, maxTokens = 4096, timeoutMs = 120000, responseFormat = null }) {
   const baseUrl = String(cloud.baseUrl || "").trim();
   const apiKey = String(cloud.apiKey || "").trim();
   const model = String(cloud.model || "").trim();
@@ -427,6 +427,8 @@ export async function cloudChat({ system, userText, images = [], cloud = {}, sig
     };
     // 本机服务不传 temperature，交给模型自己的默认采样。
     if (!isLoopbackEndpoint) payload.temperature = requestTemperature;
+    // 只有明确要求结构化输出时才带 response_format，避免老服务端直接 400。
+    if (responseFormat) payload.response_format = responseFormat;
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },

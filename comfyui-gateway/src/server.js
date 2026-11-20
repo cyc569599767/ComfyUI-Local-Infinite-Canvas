@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import { probeVideoInfo } from "./video-probe.js";
+import { ensureSourceAudio, extractVideoFrames, fitViggleSourceCanvas, flattenViggleReferences, padSourceForSegment, planViggleSegments, runViggleLongVideo, scoreVideoFrames } from "./viggle-long.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -26,6 +28,10 @@ import { createSetupManager } from "./setup.js";
 import { pickWorkflowDir, workflowDirCandidates } from "./workflow-dir.js";
 import { createResourceManager } from "./resources.js";
 import { createPromptOptimizer } from "./prompt-optimizer.js";
+import { resolveVariantFallback } from "./variant-fallback.js";
+import { createLyricsOptimizer } from "./lyrics-optimizer.js";
+import { resolveYue2Precision, runYue2ComfySong, synthesizeSpeech, synthesizeSpeechH3 } from "./audio-local.js";
+import { autoSongDuration, buildSongStyle, lyricsDurationIssue } from "./audio-song.js";
 import { reorderQwenEditFiles, reorderQwenEditPrompt, stripImageLabelPreamble } from "./qwen-edit.js";
 import { createVideoInterpolator } from "./video-interpolation.js";
 import { MAX_MERGE_CLIPS, createVideoMerger, parseMergeTimeline } from "./video-merge.js";
@@ -51,7 +57,7 @@ import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
 import { createWorkflowLabelStore } from "./workflow-labels.js";
 import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWorkflowModelPatch, workflowModelFields } from "./workflow-model-overrides.js";
 import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
-import { alignH3Frames, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep } from "./util.js";
+import { alignH3Frames, alignViggleFramesUp, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep, VIGGLE_MAX_FRAMES, VIGGLE_MIN_FRAMES } from "./util.js";
 
 class HttpError extends Error {
   constructor(message, { status = 400, code = "bad_request", details } = {}) {
@@ -61,6 +67,31 @@ class HttpError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+// SageAttention 探测：复用资源中心的 pip 检测，5 分钟内只算一次，避免每个视频任务全量扫资源。
+const SAGE_PROBE_TTL_MS = 5 * 60 * 1000;
+let sageProbeCache = { at: 0, available: null, pending: null };
+function probeSageAvailability(resources) {
+  const now = Date.now();
+  if (now - sageProbeCache.at < SAGE_PROBE_TTL_MS && sageProbeCache.available !== null) {
+    return Promise.resolve(sageProbeCache.available);
+  }
+  if (!sageProbeCache.pending) {
+    sageProbeCache.pending = Promise.resolve()
+      .then(() => resources.status())
+      .then((result) => {
+        const item = (result.resources || []).find((entry) => entry.id === "sage_h3");
+        const available = item ? item.present !== false : null;
+        sageProbeCache = { at: Date.now(), available, pending: null };
+        return available;
+      })
+      .catch(() => {
+        sageProbeCache = { at: 0, available: null, pending: null };
+        return null;
+      });
+  }
+  return sageProbeCache.pending;
 }
 
 const uploadBudgetSymbol = Symbol("uploadBudget");
@@ -698,6 +729,8 @@ export async function createGatewayApp(overrides = {}) {
     modelAliasFor: setup.modelAliasFor,
     loaderSpecs: () => setup.modelLoaderSpecs?.(),
   });
+  // 歌词优化复用本机/云端文本 API（assistant/agent-provider.json），与写歌路由分开，互不影响。
+  const lyricsOptimizer = createLyricsOptimizer({ appRoot: config.appRoot });
   const videoInterpolator = createVideoInterpolator({ config, logger });
   const videoMerger = createVideoMerger({ config, logger });
 
@@ -2066,6 +2099,184 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ created: Math.floor(Date.now() / 1000), mime_type: file.mimeType || "audio/flac", data: [item] });
   });
 
+  // 上游 v0.25.3 新增的本地音频入口。刻意与下面的 /v1/audio/speech 分开：
+  // 老路由走「音色设计/克隆/音乐 + 注册表工作流」，行为完全不变；
+  // 这里只提供上游那套「直接拼 ComfyUI 节点图」的台词/写歌能力。
+  const sendAudioResult = (res, req, result) => {
+    const format = String(req.body?.response_format || "").toLowerCase();
+    if (format === "b64_json") {
+      return res.json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: result.buffer.toString("base64") }], mime_type: result.mimeType });
+    }
+    res.set("Content-Type", result.mimeType);
+    return res.send(result.buffer);
+  };
+
+  // 台词：IndexTTS-2 零样本克隆，必须有参考音色。
+  app.post("/v1/audio/speech-indextts", upload.any(), async (req, res) => {
+    const body = req.body || {};
+    const referenceFile = (req.files || []).find((f) => f?.buffer && /reference|audio/i.test(f.fieldname));
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    try {
+      const result = await synthesizeSpeech({
+        comfy, config, logger,
+        text: String(body.input || body.text || ""),
+        seed: body.seed != null ? Number(body.seed) : undefined,
+        speed: body.speed != null ? Number(body.speed) : undefined,
+        instructions: String(body.instructions || ""),
+        referenceFile,
+        signal: abort.signal, requestId: req.id,
+      });
+      return sendAudioResult(res, req, result);
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      throw error;
+    } finally { abort.cleanup(); }
+  });
+
+  // 台词：MiniMax H3 描述音色语音，不需要参考音频（单段约 15 秒上限）。
+  app.post("/v1/audio/speech-h3", async (req, res) => {
+    const body = req.body || {};
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    try {
+      const result = await synthesizeSpeechH3({
+        comfy, config, logger,
+        text: String(body.input || body.text || body.prompt || ""),
+        voiceDescription: String(body.voice_description || ""),
+        instructions: String(body.instructions || ""),
+        language: String(body.language || "zh"),
+        seed: body.seed != null ? Number(body.seed) : undefined,
+        signal: abort.signal, requestId: req.id,
+      });
+      return sendAudioResult(res, req, result);
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      throw error;
+    } finally { abort.cleanup(); }
+  });
+
+  // 写歌 / 纯音乐：ComfyUI 官方 YuE2 节点链。歌词为空即纯音乐（走 InstrumentalConvert 节点）。
+  let audioJobActive = null;
+  app.post("/v1/audio/song", upload.any(), async (req, res) => {
+    const body = req.body || {};
+    const files = req.files || [];
+    const reference = files.find((file) => file?.buffer && /reference|audio/i.test(file.fieldname || ""));
+    if (reference) {
+      throw new HttpError("YuE2 写歌不支持参考音色；参考音色仅用于换声", { status: 400, code: "unsupported_reference_audio" });
+    }
+    const rawPrecision = String(body.precision ?? "").trim().toLowerCase();
+    let bf16Installed = null;
+    if (rawPrecision === "quality") {
+      try {
+        const bf16 = resources.status()?.resources?.find((item) => item.id === "yue2_3b_bf16");
+        if (bf16) bf16Installed = Boolean(bf16.present);
+      } catch {
+        bf16Installed = null;
+      }
+    }
+    let yue2Precision;
+    try {
+      yue2Precision = resolveYue2Precision(body.precision, { envCheckpoint: process.env.YUE2_COMFY_CHECKPOINT, bf16Installed });
+    } catch (error) {
+      throw new HttpError(error.message, { status: error.status || 400, code: error.code || "invalid_precision", details: error.details });
+    }
+    const { precision, checkpoint } = yue2Precision;
+    const audioModelMissing = () => new HttpError(
+      precision === "quality"
+        ? "YuE2 质量档模型未就绪：请到资源中心安装 YuE2-3B BF16（yue2_3b_bf16.safetensors）后重试。"
+        : "YuE2 模型/节点未就绪：请确认 ComfyUI 0.44+ 已安装原生 YuE2 节点，并把 yue2_3b_int8_convrot.safetensors 放到 models/checkpoints（CC BY-NC 4.0，资源中心/官方下载）。",
+      { status: 503, code: "audio_model_missing", details: { engine: "comfyui", ...(precision === "quality" ? { resourceId: "yue2_3b_bf16" } : {}) } },
+    );
+    const lyrics = String(body.lyrics || body.input || body.prompt || "").trim();
+    const instrumentalFlag = body.instrumental;
+    const flagOff = instrumentalFlag === false || /^(false|0)$/i.test(String(instrumentalFlag ?? ""));
+    const instrumental = !flagOff && (/^(true|1)$/i.test(String(instrumentalFlag ?? "")) || !lyrics);
+    if (!instrumental) {
+      if (!lyrics) throw new HttpError("缺少歌词或主题", { status: 400, code: "missing_prompt" });
+      if (!/\[Verse\]/.test(lyrics) || !/\[Chorus\]/.test(lyrics)) {
+        throw new HttpError("YuE2 歌词需要 [Verse] 和 [Chorus] 段落；请先让 AI 写词或按官方格式补齐", { status: 400, code: "invalid_lyrics" });
+      }
+    }
+    const candidates = Math.min(2, Math.max(1, Math.trunc(Number(body.candidates ?? body.best_of ?? 1)) || 1));
+    if (candidates > 1) {
+      throw new HttpError("双候选 PER 选择尚未接入；本轮默认单候选（GPU 成本约 2 倍）", { status: 400, code: "best_of_unavailable", details: { candidates } });
+    }
+    const rawDuration = body.duration;
+    const durationText = String(rawDuration ?? "").trim().toLowerCase();
+    const durationAuto = rawDuration === undefined || rawDuration === null || durationText === "" || durationText === "auto" || Number(rawDuration) === 0 || !Number.isFinite(Number(rawDuration));
+    const resolvedDuration = durationAuto ? (instrumental ? 200 : autoSongDuration(lyrics)) : Math.min(300, Math.max(10, Math.round(Number(rawDuration))));
+    if (!durationAuto && !instrumental) {
+      const lyricsIssue = lyricsDurationIssue(lyrics, resolvedDuration);
+      if (lyricsIssue) {
+        throw new HttpError(lyricsIssue.message, { status: 400, code: "invalid_lyrics_duration", details: lyricsIssue });
+      }
+    }
+    const rawStyle = String(body.tags || body.style || body.input || body.prompt || "").trim();
+    const genderRaw = String(body.gender ?? body.vocalGender ?? "").trim().toLowerCase();
+    const genderMap = { male: "male", female: "female", 男: "male", 女: "female" };
+    if (genderRaw && !genderMap[genderRaw]) {
+      throw new HttpError("gender 只支持 male / female（男 / 女）", { status: 400, code: "invalid_gender" });
+    }
+    const gender = genderMap[genderRaw] || "";
+    const style = buildSongStyle({
+      tags: rawStyle,
+      gender,
+      bpm: body.bpm,
+      language: body.language,
+      keyscale: body.keyscale,
+      instrumental,
+    });
+    const seedValue = Number(body.seed);
+    if (audioJobActive) throw new HttpError("已有音频任务在跑，请稍后再试", { status: 409, code: "audio_busy" });
+    const abort = abortOnDisconnect(req, res, registerActiveRequest);
+    try {
+      // YuE2 走节点内动态 offload，不用显存余额硬拒。
+      if (abort.signal.aborted) return;
+      audioJobActive = "song";
+      let result;
+      try {
+        result = await runYue2ComfySong({
+          comfy,
+          config,
+          logger,
+          style,
+          lyrics,
+          seed: Number.isFinite(seedValue) ? seedValue : undefined,
+          cot: String(body.cot || "full"),
+          duration: resolvedDuration,
+          signal: abort.signal,
+          requestId: req.id,
+          checkpoint,
+          instrumental,
+        });
+      } catch (error) {
+        if (abort.signal.aborted) return;
+        const messageText = String(error?.message || error || "");
+        const nodeHint = /YuE2InstrumentalConvert|does not exist|node .*not|not found/i.test(messageText);
+        const modelHint = /yue2|checkpoint|value not in list|missing/i.test(messageText);
+        if (instrumental) {
+          if (nodeHint) {
+            throw new HttpError("纯音乐转换节点未加载：请重启 ComfyUI 让 YuE2 Instrumental Convert 节点生效（随应用安装）。", { status: 503, code: "audio_instrumental_node_missing", details: { engine: "comfyui" } });
+          }
+          if (modelHint) {
+            throw audioModelMissing();
+          }
+          throw error;
+        }
+        if (modelHint) {
+          throw audioModelMissing();
+        }
+        throw error;
+      }
+      return sendAudioResult(res, req, result);
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      throw error;
+    } finally {
+      audioJobActive = null;
+      abort.cleanup();
+    }
+  });
+
   // 音频三种子功能共用 /v1/audio/speech，由 body.mode 区分：
   //   voice-design 朗读文案 + 音色描述
   //   voice-clone  朗读文案 + 参考音频（ASR 自动转写参考文本）
@@ -2509,6 +2720,28 @@ export async function createGatewayApp(overrides = {}) {
 
   app.post("/v1/prompts/optimize", upload.any(), async (req, res) => {
     const body = req.body || {};
+    // 写歌歌词：task=lyrics 时走歌词专用优化，其余分支逻辑保持不变。
+    if (String(body.task || "").toLowerCase() === "lyrics") {
+      const abort = abortOnDisconnect(req, res, registerActiveRequest);
+      try {
+        const result = await lyricsOptimizer.optimize({
+          prompt: body.prompt,
+          style: body.style,
+          duration: body.duration ?? body.seconds,
+          signal: abort.signal,
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        if (abort.signal.aborted) {
+          logger.info(`lyrics optimize 请求被客户端中断 ${req.id}`);
+          return;
+        }
+        throw error;
+      } finally {
+        abort.cleanup();
+      }
+      return;
+    }
     const files = orderedPromptImages(req.files || []);
     const useCloud = String(body.engine || "").toLowerCase() === "cloud";
     const uploadedImages = !useCloud && files.length ? await uploadImages(comfy, files) : [];
@@ -2806,14 +3039,28 @@ export async function createGatewayApp(overrides = {}) {
     if (!["off", "2x", "3x"].includes(interpolation)) {
       throw new HttpError("插帧只支持 off、2x、3x", { status: 400, code: "invalid_interpolation" });
     }
+    if (params.segmentSeconds != null && params.segmentSeconds !== "") {
+      const rawSeconds = Number(params.segmentSeconds);
+      if (!Number.isFinite(rawSeconds) || rawSeconds < 3.75 || rawSeconds > 14.4) {
+        throw new HttpError("分段长度必须在 3.75–14.4 秒之间", { status: 400, code: "invalid_segment_seconds" });
+      }
+    }
+    const viggleSectionFrames = alignViggleFramesUp(Number(params.segmentFrames) || Number(params.segmentSeconds) * 24 || 277);
     // VDN and no-VDN variants share media contracts. Keep entry.id/name intact
     // for model selection and execution; normalize only for H3 validation.
     const h3WorkflowId = String(entry.id || "").replace(/-novdn$/, "");
+    const requestedViggleMode = String(body.mode || "").trim();
+    const viggleEditing = entry.id === "video-h3-viggle-swap" && /^(edit|edit-singularity)$/i.test(requestedViggleMode);
     let videoMode = String(body.mode || "").trim();
     if (h3WorkflowId === "video-h3-t2v") videoMode = "text";
     else if (h3WorkflowId === "video-h3-frames") videoMode = "frames";
     else if (h3WorkflowId === "video-h3-fast") videoMode = videoMode === "text" ? "text" : "frames";
     else if (h3WorkflowId === "video-h3-ref2va" || h3WorkflowId === "video-h3-character-swap") videoMode = "reference";
+    else if (h3WorkflowId === "video-h3-viggle-swap") {
+      // Viggle Remake：空 mode 走换人；编辑档在 pruned 底模缺失时自动回退 Singularity。
+      if (!videoMode) videoMode = "swap";
+      videoMode = resolveVariantFallback(setup, entry, videoMode);
+    }
     if (entry.variants) requireWorkflowMode(setup, entry, videoMode);
     let requiredImageCount = Object.values(entry.bindings || {}).reduce((max, binding) => {
       if (!binding) return max;
@@ -2843,6 +3090,25 @@ export async function createGatewayApp(overrides = {}) {
       }
       params.frameMode = frameMode;
       requiredImageCount = frameMode === "both" ? 2 : 1;
+    } else if (entry.id === "video-h3-viggle-swap") {
+      // Viggle Remake：1 段源视频 + 1–4 张参考图；音轨直接沿用源视频。
+      const allVideoRefs = (req.files || []).filter((file) => file?.buffer && /^videos?(\[\])?$/i.test(file.fieldname || ""));
+      const viggleLabel = viggleEditing ? "视频编辑" : "Viggle 角色替换";
+      if (allVideoRefs.length !== 1) {
+        throw new HttpError(`${viggleLabel}需要且仅需要 1 段源视频`, { status: 400, code: "missing_source_video" });
+      }
+      if (!files.length || files.length > 4) {
+        throw new HttpError(
+          viggleEditing
+            ? "视频编辑需要 1 张编辑参考图（最多 4 张）：从源视频抽一帧、用图像编辑改好后再上传（pins 填该帧号）"
+            : "Viggle 角色替换需要 1–4 张角色参考图",
+          { status: 400, code: "invalid_reference_images" },
+        );
+      }
+      if (audioFiles.length) {
+        throw new HttpError(`${viggleLabel}直接沿用源视频音轨，不需要单独上传音频`, { status: 400, code: "unsupported_audio" });
+      }
+      requiredImageCount = 0;
     }
     if (files.length < requiredImageCount) {
       const hint = h3WorkflowId === "video-h3-ref2va" ? "（H3 多参支持 1–6 图 / 0–2 音频 / 0–1 视频，至少一种媒体）" : (h3WorkflowId === "video-h3-frames" || h3WorkflowId === "video-h3-fast") ? "（首尾帧支持首帧、尾帧或首尾帧；首尾帧模式需要 2 张图）" : "";
@@ -2850,6 +3116,24 @@ export async function createGatewayApp(overrides = {}) {
     }
     if (entry.minMedia && files.length + videoFiles.length + audioFiles.length < Number(entry.minMedia)) {
       throw new HttpError(`工作流 ${entry.name} 需要至少 ${entry.minMedia} 个参考素材（图片/音频/视频）`, { status: 400, code: "missing_reference_media" });
+    }
+    if (entry.id === "video-h3-viggle-swap" && videoFiles.length === 1) {
+      // Remake 直接吃源视频音轨；没有音轨时补一条静音，并把画布按原比例缩到短边 480。
+      const patched = await ensureSourceAudio(videoFiles[0], { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" });
+      if (patched !== videoFiles[0]) {
+        videoFiles[0] = patched;
+        logger.info("Viggle 源视频没有音轨，已补静音音轨后上传");
+      }
+      const fitted = await fitViggleSourceCanvas(videoFiles[0], { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" });
+      if (fitted !== videoFiles[0]) {
+        videoFiles[0] = fitted;
+        logger.info("Viggle 源视频已按原比例缩放为短边 480（避免 Remake 画布拉伸）");
+      }
+    }
+    if (entry.id === "video-h3-viggle-swap") {
+      // 透明参考图先压到源片背景色上，避免透明像素被模型画成黑底。
+      const prepared = await flattenViggleReferences(files, videoFiles[0], { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" });
+      for (let index = 0; index < files.length; index += 1) files[index] = prepared[index] || files[index];
     }
     const uploadedImages = await uploadImages(comfy, files);
     const uploadedVideos = await uploadImages(comfy, videoFiles);
@@ -2874,6 +3158,8 @@ export async function createGatewayApp(overrides = {}) {
       },
     });
     let sourceVideoTruncated = false;
+    let sourceFps = 0;
+    let autoPins = null;
     if (videoFiles.length && !easyMedia) {
       // H3 统一按 24fps 出片：源视频用时长×24 换算帧数，30/60fps 素材不会算长。
       const sourceSeconds = Number(body.source_duration_seconds);
@@ -2882,19 +3168,118 @@ export async function createGatewayApp(overrides = {}) {
         ? [path.join(config.comfyDir, "ffprobe.exe"), path.join(config.comfyDir, "..", "ffprobe.exe"), path.join(config.comfyDir, "ffmpeg", "bin", "ffprobe.exe")]
         : [];
       const info = probeVideoInfo(videoFiles[0], probes);
+      sourceFps = info.fps || 0;
       const probedFrames = info.duration > 0 ? Math.round(info.duration * 24) : 0;
       const sourceFrames = probedFrames || fromDuration;
-      const aligned = alignH3Frames(sourceFrames);
-      // 官方 H3 参考视频单段上限 15 秒（24fps 下 362 帧 = 17×21+5）。
-      // 超过后模型不再按训练区间工作，会整段进内存并把 RAM 顶爆，必须截断。
-      const capped = capH3ReferenceFrames(aligned);
+      const viggle = entry.id === "video-h3-viggle-swap";
+      if (viggle && info.fps > 0 && Math.abs(info.fps - 24) > 0.01) {
+        logger.info(`源视频 ${info.fps.toFixed(2)}fps → 24fps（VHS force_rate=24 归一）`);
+      }
+      if (viggle && (!sourceFrames || sourceFrames < VIGGLE_MIN_FRAMES)) {
+        throw new HttpError(`Viggle 角色替换的源视频至少需要 3.75 秒（90 帧 @24fps），当前约 ${(Math.max(0, sourceFrames) / 24).toFixed(2)} 秒`, {
+          status: 400, code: "source_video_too_short", details: { sourceFrames, minimum: VIGGLE_MIN_FRAMES },
+        });
+      }
+      const longVideoEnabled = params.longVideo !== false;
+      const viggleLong = viggle && longVideoEnabled && sourceFrames > viggleSectionFrames;
+      const aligned = viggle ? (viggleLong ? viggleSectionFrames : alignViggleFramesUp(sourceFrames)) : alignH3Frames(sourceFrames);
+      // 官方 H3 参考视频单段上限 15 秒（24fps 下 362 帧 = 17×21+5）；
+      // Viggle Remake 单窗口上限 345 帧（14.375 秒），更长时由长视频编排器逐段生成。
+      const capped = viggle ? (viggleLong ? viggleSectionFrames : (longVideoEnabled ? aligned : Math.min(aligned, VIGGLE_MAX_FRAMES))) : capH3ReferenceFrames(aligned);
       context.sourceVideoFrames = capped;
-      sourceVideoTruncated = capped > 0 && aligned > capped;
-      if (aligned && sourceFrames && aligned !== sourceFrames) {
+      context.sourceTotalFrames = sourceFrames;
+      // Remake 只能接 17n+5：源片不足时补帧到下一档，生成后再裁回源时长，避免对齐丢帧。
+      if (viggle && !viggleLong && aligned > sourceFrames) {
+        const padDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "viggle-pad-"));
+        try {
+          const paddedBuffer = await padSourceForSegment(
+            videoFiles[0],
+            sourceFrames,
+            aligned,
+            { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" },
+            padDir,
+          );
+          videoFiles[0] = { ...videoFiles[0], buffer: paddedBuffer, size: paddedBuffer.length, originalname: "source-padded.mp4" };
+          const [paddedUpload] = await uploadImages(comfy, [videoFiles[0]]);
+          uploadedVideos[0] = paddedUpload;
+          context.uploadedVideos[0] = paddedUpload;
+          logger.info(`Viggle 源视频 ${sourceFrames} 帧补齐到 ${aligned} 帧后上传（frame_load_cap=${aligned}）`);
+        } finally {
+          await fs.promises.rm(padDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+      context.viggleSegmentFrames = viggleSectionFrames;
+      context.viggleLong = viggleLong;
+      context.viggleLongEnabled = longVideoEnabled;
+      sourceVideoTruncated = viggle ? (!viggleLong && sourceFrames > capped) : capped > 0 && aligned > capped;
+      if (viggleLong) logger.info(`源视频 ${sourceFrames} 帧 > 分段 ${viggleSectionFrames} 帧，将逐段生成并 RemakePrefix 接力`);
+      if (viggle && !longVideoEnabled && sourceFrames > capped) logger.info(`长视频分段已关闭：源视频 ${sourceFrames} 帧截断为 ${capped} 帧`);
+      if (viggle) {
+        // SageAttention 默认开（auto）；运行库/硬件不可用时静默回退并记日志。
+        const sageRaw = String(params.sage ?? "auto").trim().toLowerCase();
+        params.sage = ["disabled", "off", "false", "0"].includes(sageRaw) ? "disabled" : "auto";
+        if (params.sage !== "disabled") {
+          const sageAvailable = await probeSageAvailability(resources);
+          if (sageAvailable === false) {
+            params.sage = "disabled";
+            logger.warn("SageAttention 运行库不可用，已静默回退为 disabled（本次生成不加速）");
+          }
+        }
+        const ffmpegConfig = { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" };
+        // 长视频尾段不足 90 帧会被丢弃；pins 上限按实际生成的最后一段末帧算，避免「校验通过但被静默丢弃」。
+        const plannedEnd = viggleLong
+          ? planViggleSegments(sourceFrames, viggleSectionFrames).reduce((end, segment) => Math.max(end, segment.start + segment.frames), 0)
+          : 0;
+        const pinLimit = viggleLong ? (plannedEnd || sourceFrames) : (sourceFrames ? Math.min(capped, sourceFrames) : capped);
+        let pinsRaw = String(params.pins ?? "").trim();
+        if (!pinsRaw && !viggleEditing) {
+          // 一次产片：未显式给 pins 时自动选帧（laplacian+中心），每张角色图用同一个源帧。
+          const K = Math.min(8, Math.max(1, pinLimit - 1));
+          const indices = [];
+          for (let i = 0; i < K; i += 1) {
+            const value = K === 1 ? Math.max(1, Math.floor(pinLimit / 2)) : Math.round(1 + ((pinLimit - 2) * i) / (K - 1));
+            if (value > 0 && value < pinLimit && !indices.includes(value)) indices.push(value);
+          }
+          const candidates = await extractVideoFrames(videoFiles[0], { frames: indices, config: ffmpegConfig });
+          const scored = await scoreVideoFrames(candidates, { config: ffmpegConfig, references: files });
+          const usable = scored.filter((item) => item.score > 0 && !item.black).sort((a, b) => b.score - a.score);
+          if (!usable.length) {
+            throw new HttpError("源视频没有可用的候选帧（全黑或无法打分）；请显式填写 pins 或更换源视频", { status: 422, code: "no_usable_frame" });
+          }
+          const best = usable[0].frame;
+          pinsRaw = Array(files.length).fill(String(best)).join(", ");
+          params.pins = pinsRaw;
+          autoPins = { frame: best, source: "reference-similarity+heuristic", scores: scored.map((item) => ({ frame: item.frame, score: item.score, similarity: item.similarity, black: item.black })) };
+          logger.info(`Viggle 自动 pins：frame=${best}（${files.length} 张角色图，启发式）`);
+        }
+        if (!pinsRaw) {
+          throw new HttpError(
+            viggleEditing
+              ? "视频编辑需要填写 pins（源帧号）：每张编辑参考图一个，例如 96；pins 为空时不会注入关键帧，编辑不会生效"
+              : "Viggle 角色替换需要填写 pins（源帧号）：每张角色参考图一个，例如 96；pins 为空时不会注入关键帧，人物不会被替换",
+            { status: 400, code: "missing_pins", details: { referenceImages: files.length } },
+          );
+        }
+        const pins = pinsRaw.split(/[,\s]+/).filter(Boolean).map(Number);
+        if (pins.length !== files.length) {
+          throw new HttpError(`pins 数量必须等于${viggleEditing ? "编辑参考图" : "角色参考图"}数量（当前 ${pins.length} 个 pins / ${files.length} 张参考图）`, {
+            status: 400, code: "invalid_pins", details: { pins, referenceImages: files.length },
+          });
+        }
+        if (!pins.every((pin) => Number.isInteger(pin) && pin > 0 && pin < pinLimit)) {
+          throw new HttpError(`pins 必须是 1–${pinLimit - 1} 的整数，并且与参考图一一对应（0 会污染首帧，不允许）`, {
+            status: 400, code: "invalid_pins", details: { pins, frames: pinLimit },
+          });
+        }
+        params.pins = pins.join(", ");
+        context.params = { ...(context.params || {}), pins: params.pins, sage: params.sage };
+      }
+      if (aligned && sourceFrames && aligned !== sourceFrames && !(viggle && !viggleLong && aligned > sourceFrames)) {
         logger.info(`源视频 ${sourceFrames} 帧，按 17n+5 对齐为 ${aligned} 帧（约 ${(aligned / 24).toFixed(1)}s）`);
       }
       if (sourceVideoTruncated) {
-        logger.warn(`源视频约 ${(aligned / 24).toFixed(1)}s，超过 H3 单段 15s 上限，已截取前 ${(capped / 24).toFixed(1)}s`);
+        const limit = viggle ? `Viggle 单窗口 ${(VIGGLE_MAX_FRAMES / 24).toFixed(2)}s` : "H3 单段 15s";
+        logger.warn(`源视频约 ${(sourceFrames / 24).toFixed(1)}s，超过 ${limit} 上限，已截取前 ${(capped / 24).toFixed(1)}s`);
       }
       if (!probedFrames && fromDuration) logger.warn(`ffprobe 不可用，按上报时长 ${sourceSeconds}s 换算为 ${fromDuration} 帧`);
     }
@@ -2912,24 +3297,48 @@ export async function createGatewayApp(overrides = {}) {
         audios: uploadedAudios.map((file) => file.name),
         interpolation,
         source_video_truncated: sourceVideoTruncated,
+        source_fps: sourceFps,
+        segmented: context.viggleLong === true,
+        segment_frames: context.viggleSegmentFrames || 0,
+        ...(autoPins ? { meta: { mode: "viggle-one-shot", autoPins } } : {}),
       },
     });
     tasks.enqueue(task, async (_task, progress, signal) => {
-      const result = await runVideo({
-        entry,
-        context,
-        comfy,
-        timeoutMs: config.videoTimeoutMs,
-        pollIntervalMs: config.pollIntervalMs,
-        signal,
-        requestId: req.id,
-        onProgress: progress,
-        logger,
-        loraCatalog: setup.loraNames(),
-        modelAliasFor: setup.modelAliasFor,
-        loaderSpecs: setup.modelLoaderSpecs?.(),
-        readLocalOutput,
-      });
+      // 长源视频走分段接力：每段单独 Remake，再用 RemakePrefix 串起来。
+      const result = context.viggleLong
+        ? await runViggleLongVideo({
+            entry,
+            context,
+            comfy,
+            sourceFile: videoFiles[0],
+            segmentFrames: context.viggleSegmentFrames,
+            config: { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "", comfyRoot: resources.comfyRoot?.() || "" },
+            timeoutMs: config.videoTimeoutMs,
+            pollIntervalMs: config.pollIntervalMs,
+            signal,
+            requestId: req.id,
+            onProgress: progress,
+            logger,
+            loraCatalog: setup.loraNames(),
+            modelAliasFor: setup.modelAliasFor,
+            loaderSpecs: setup.modelLoaderSpecs?.(),
+            readLocalOutput,
+          })
+        : await runVideo({
+            entry,
+            context,
+            comfy,
+            timeoutMs: config.videoTimeoutMs,
+            pollIntervalMs: config.pollIntervalMs,
+            signal,
+            requestId: req.id,
+            onProgress: progress,
+            logger,
+            loraCatalog: setup.loraNames(),
+            modelAliasFor: setup.modelAliasFor,
+            loaderSpecs: setup.modelLoaderSpecs?.(),
+            readLocalOutput,
+          });
       let file = result.files[0];
       if (interpolation !== "off") {
         progress?.({ phase: "interpolating", progress: 0.97 });

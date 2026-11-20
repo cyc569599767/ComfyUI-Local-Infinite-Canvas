@@ -20,6 +20,7 @@
 - 接入本地 `comfyui-gateway` 渠道，增加本地模型同步、系统状态、清理显存/重启 ComfyUI。
 - 增加 LoRA 卡、ComfyUI 参数卡等本地插件（`web/public/plugins/`）。
 - 增加 MOSS 区域布局、Qwen 2.1 编辑/局部重绘/扩图、H3 三档视频、SeedVR2 视频超分等本地工作流入口。
+- 选择性合入上游 v0.25.0–v0.25.3 的 H3（HyperFlow 6+2）、H3-Image、Viggle Remake 角色替换/视频编辑、YuE2 写歌与本地台词生成；上游的图像档位重构、自选工作流重构、3D 全景 PNG 等未合入。
 - 修复若干交互/类型问题（IMEs、蒙版编辑器、扩图视口、视频超分参数链等）。
 
 `comfyui-gateway/`、`launcher/` 和根目录脚本为本地集成新增代码，不在上游仓库中。
@@ -33,6 +34,8 @@
 
 ## 第三方与模型
 
-ComfyUI 本体、模型权重、LoRA、FFmpeg 等不随本仓库分发。少量用于本地反推/本地提示词的第三方节点（Florence2、llama-cpp_vllm、TE_MAN）随工作台分发；Qwen/Florence 权重由资源卡按需下载。分别适用其各自许可证，详见 `THIRD_PARTY_NOTICES.md`。
+ComfyUI 本体、模型权重、LoRA、FFmpeg 等不随本仓库分发。少量用于本地反推/本地提示词的第三方节点（Florence2、llama-cpp_vllm、TE_MAN、HyperFlow、Viggle Remake、YuE2 纯音乐转换）随工作台分发；Qwen/Florence/YuE2/HyperFlow/Viggle 权重由资源卡按需下载。分别适用其各自许可证，详见 `THIRD_PARTY_NOTICES.md`。
+
+其中 **YuE2 写歌权重为 CC-BY-NC-4.0，仅限个人/非商业用途**；HyperFlow 与 Viggle Remake 权重适用 MiniMax H3 社区许可。
 
 本项目与 basketikun、ComfyUI、MiniMax、阿里云通义千问、MOSS、字节跳动 SeedVR2 等项目的维护方无隶属关系；相关名称仅用于说明兼容性或技术来源。

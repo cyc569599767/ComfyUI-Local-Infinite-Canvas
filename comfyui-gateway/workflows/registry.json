@@ -5139,6 +5139,690 @@
         "kind": "path",
         "path": "C:\\Users\\admin\\AppData\\Local\\Temp\\free-cfg-e2e-Q5h0sX\\workflows\\cfg-e2e.json"
       }
+    },
+    {
+      "id": "video-hyperflow-ref2va-6p2",
+      "name": "video-hyperflow-ref2va-6p2",
+      "type": "video",
+      "file": "video-hyperflow-ref2va-6p2.json",
+      "description": "HyperFlow H3 Flash INT8 · 文生 / 首尾帧 / 多参三模式 · 8 步 schedule（6 低清 / 2 高清 SelfLift）· 画布 Sage/Sol/TRT VAE/T8；模式内切换，不换模型。",
+      "defaults": {
+        "76.strict_prompt_tags": false
+      },
+      "bindings": {
+        "width": {
+          "node": "76",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32",
+          "default": 1344
+        },
+        "height": {
+          "node": "76",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32",
+          "default": 768
+        },
+        "length": {
+          "node": "76",
+          "input": "length",
+          "from": "seconds",
+          "transform": "secondsToFrames17",
+          "fps": 24,
+          "default": 124
+        },
+        "prompt": {
+          "node": "76",
+          "input": "prompt"
+        },
+        "seed": {
+          "node": "78",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "steps": {
+          "node": "74",
+          "input": "steps",
+          "from": "params.steps",
+          "transform": "int",
+          "default": 8
+        },
+        "cfg": {
+          "node": "78",
+          "input": "cfg",
+          "from": "params.cfg",
+          "default": 1
+        },
+        "transition_step": {
+          "node": "78",
+          "input": "transition_step",
+          "from": "params.transition_step",
+          "transform": "int",
+          "default": 6
+        },
+        "lowres_scale": {
+          "node": "78",
+          "input": "lowres_scale",
+          "from": "params.lowres_scale",
+          "default": 0.6
+        },
+        "rho": {
+          "node": "78",
+          "input": "rho",
+          "from": "params.rho",
+          "default": 0
+        },
+        "w_min": {
+          "node": "78",
+          "input": "w_min",
+          "from": "params.w_min",
+          "default": 0.3
+        },
+        "w_max": {
+          "node": "78",
+          "input": "w_max",
+          "from": "params.w_max",
+          "default": 1
+        },
+        "task_type_text": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "text"
+          ],
+          "default": "auto"
+        },
+        "task_type_frames": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "frames"
+          ],
+          "from": "params.frameMode",
+          "map": {
+            "first": "I2VA",
+            "last": "L2VA",
+            "both": "FL2VA"
+          },
+          "default": "FL2VA"
+        },
+        "task_type_reference": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "reference"
+          ],
+          "default": "Ref2VA"
+        },
+        "frames": {
+          "node": "76",
+          "input": "first_frame",
+          "from": "image",
+          "frameMode": true,
+          "firstInput": "first_frame",
+          "lastInput": "last_frame",
+          "max": 2,
+          "modes": [
+            "frames"
+          ]
+        },
+        "refs": {
+          "node": "76",
+          "input": "ref_images",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "ref_images.ref_image_",
+          "min": 0,
+          "max": 6,
+          "modes": [
+            "reference"
+          ]
+        },
+        "videos": {
+          "node": "76",
+          "input": "ref_videos",
+          "from": "video",
+          "array": true,
+          "inputPrefix": "ref_videos.ref_video_",
+          "audioPrefix": "ref_video_audios.ref_video_audio_",
+          "min": 0,
+          "max": 1,
+          "loadType": "video",
+          "modes": [
+            "reference"
+          ]
+        },
+        "audios": {
+          "node": "76",
+          "input": "ref_audios",
+          "from": "audio",
+          "array": true,
+          "inputPrefix": "ref_audios.ref_audio_",
+          "min": 0,
+          "max": 2,
+          "loadType": "audio",
+          "modes": [
+            "reference"
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        },
+        {
+          "key": "steps",
+          "label": "步数",
+          "type": "number",
+          "min": 4,
+          "max": 8,
+          "step": 2,
+          "default": 8,
+          "description": "HyperFlow 仅支持 4/6/8；8 = 6 低清 + 2 高清"
+        },
+        {
+          "key": "cfg",
+          "label": "CFG",
+          "type": "number",
+          "min": 1,
+          "max": 10,
+          "step": 0.1,
+          "default": 1
+        },
+        {
+          "key": "transition_step",
+          "label": "SelfLift 低清步数",
+          "type": "number",
+          "min": 1,
+          "max": 7,
+          "step": 1,
+          "default": 6,
+          "description": "8 步时最大 7"
+        },
+        {
+          "key": "lowres_scale",
+          "label": "SelfLift 低清比例",
+          "type": "number",
+          "min": 0.25,
+          "max": 1,
+          "step": 0.05,
+          "default": 0.6
+        },
+        {
+          "key": "rho",
+          "label": "SelfLift 锚点校正",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 0
+        },
+        {
+          "key": "w_min",
+          "label": "SelfLift w_min",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 0.3
+        },
+        {
+          "key": "w_max",
+          "label": "SelfLift w_max",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 1
+        }
+      ],
+      "label": "H3（HyperFlow 6+2）",
+      "lora": null
+    },
+    {
+      "id": "image-h3image",
+      "name": "image-h3image",
+      "label": "MiniMax H3-Image",
+      "type": "image",
+      "description": "MiniMax H3-Image：文生图 / 多图编辑；4 步、CFG1、原生约 16MP，最多 16 张参考图。",
+      "file": "image-h3image-t2i.json",
+      "variantLabels": {
+        "t2i": "文生图",
+        "edit": "多图编辑"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "11",
+          "input": "value"
+        },
+        "seed": {
+          "node": "6",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "width": {
+          "node": "4",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32",
+          "default": 2048
+        },
+        "height": {
+          "node": "4",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32",
+          "default": 2048
+        },
+        "refs": {
+          "node": "4",
+          "input": "images",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "images.image_",
+          "indexBase": 1,
+          "min": 1,
+          "max": 16
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空每次随机"
+        }
+      ],
+      "resolutionTiers": [
+        {
+          "label": "4MP",
+          "pixels": 4194304
+        },
+        {
+          "label": "8MP",
+          "pixels": 8388608
+        },
+        {
+          "label": "16MP",
+          "pixels": 16777216
+        }
+      ],
+      "defaultTier": "16MP",
+      "variants": {
+        "t2i": {
+          "file": "image-h3image-t2i.json",
+          "label": "文生图",
+          "description": "官方 T2I：2048² 起，4 步 / CFG1（无 PE 扩写）",
+          "bindings": {
+            "prompt": {
+              "node": "11",
+              "input": "value"
+            },
+            "seed": {
+              "node": "6",
+              "input": "seed",
+              "from": "params.seed",
+              "transform": "int",
+              "random": true
+            },
+            "width": {
+              "node": "4",
+              "input": "width",
+              "from": "size.width",
+              "transform": "snap32",
+              "default": 2048
+            },
+            "height": {
+              "node": "4",
+              "input": "height",
+              "from": "size.height",
+              "transform": "snap32",
+              "default": 2048
+            }
+          }
+        },
+        "edit": {
+          "file": "image-h3image-edit.json",
+          "label": "多图编辑",
+          "description": "1–16 张参考图；第一张为目标图，prompt 用 <Picture N>",
+          "bindings": {
+            "prompt": {
+              "node": "11",
+              "input": "value"
+            },
+            "seed": {
+              "node": "6",
+              "input": "seed",
+              "from": "params.seed",
+              "transform": "int",
+              "random": true
+            },
+            "width": {
+              "node": "4",
+              "input": "width",
+              "from": "size.width",
+              "transform": "snap32",
+              "default": 4096
+            },
+            "height": {
+              "node": "4",
+              "input": "height",
+              "from": "size.height",
+              "transform": "snap32",
+              "default": 4096
+            },
+            "refs": {
+              "node": "4",
+              "input": "images",
+              "from": "image",
+              "array": true,
+              "inputPrefix": "images.image_",
+              "indexBase": 1,
+              "min": 1,
+              "max": 16
+            },
+            "refsPe": {
+              "node": "14",
+              "input": "images",
+              "from": "image",
+              "array": true,
+              "inputPrefix": "images.image",
+              "indexBase": 1,
+              "min": 1,
+              "max": 16
+            }
+          }
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "lora": null,
+      "importedAt": "2026-11-11T00:00:00.000Z",
+      "source": {
+        "kind": "json"
+      }
+    },
+    {
+      "id": "image-ph3image",
+      "name": "image-ph3image",
+      "label": "P-H3-Image（旧版）",
+      "type": "image",
+      "description": "旧版 P-H3-Image：8 步、4MP/8MP；文生图 / 多图编辑（最多 9 张参考图）。",
+      "file": "image-ph3-image-t2i.json",
+      "variantLabels": {
+        "t2i": "文生图",
+        "edit": "多图编辑"
+      },
+      "variantDescriptions": {
+        "t2i": "旧版 8 步文生图",
+        "edit": "第一张为目标图，参考图最多 9 张"
+      },
+      "bindings": {
+        "prompt": {
+          "node": "5",
+          "input": "prompt"
+        },
+        "seed": {
+          "node": "9",
+          "input": "noise_seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "width": {
+          "node": "5",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32",
+          "default": 2048
+        },
+        "height": {
+          "node": "5",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32",
+          "default": 2048
+        },
+        "refs": {
+          "node": "5",
+          "input": "images",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "images.image_",
+          "indexBase": 1,
+          "min": 1,
+          "max": 9
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空每次随机"
+        }
+      ],
+      "resolutionTiers": [
+        {
+          "label": "4MP",
+          "pixels": 4194304
+        },
+        {
+          "label": "8MP",
+          "pixels": 8388608
+        }
+      ],
+      "defaultTier": "4MP",
+      "variants": {
+        "t2i": {
+          "file": "image-ph3-image-t2i.json",
+          "label": "文生图",
+          "description": "旧版 8 步文生图",
+          "bindings": {
+            "prompt": {
+              "node": "5",
+              "input": "prompt"
+            },
+            "seed": {
+              "node": "9",
+              "input": "noise_seed",
+              "from": "params.seed",
+              "transform": "int",
+              "random": true
+            },
+            "width": {
+              "node": "5",
+              "input": "width",
+              "from": "size.width",
+              "transform": "snap32",
+              "default": 2048
+            },
+            "height": {
+              "node": "5",
+              "input": "height",
+              "from": "size.height",
+              "transform": "snap32",
+              "default": 2048
+            }
+          }
+        },
+        "edit": {
+          "file": "image-ph3-image-edit.json",
+          "label": "多图编辑",
+          "description": "第一张为目标图，参考图最多 9 张",
+          "bindings": {
+            "prompt": {
+              "node": "5",
+              "input": "prompt"
+            },
+            "seed": {
+              "node": "9",
+              "input": "noise_seed",
+              "from": "params.seed",
+              "transform": "int",
+              "random": true
+            },
+            "refs": {
+              "node": "5",
+              "input": "images",
+              "from": "image",
+              "array": true,
+              "inputPrefix": "images.image_",
+              "indexBase": 1,
+              "min": 1,
+              "max": 9
+            }
+          }
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "lora": null,
+      "importedAt": "2026-11-11T00:00:00.000Z",
+      "source": {
+        "kind": "json"
+      }
+    },
+    {
+      "id": "video-h3-viggle-swap",
+      "name": "video-h3-viggle-swap",
+      "type": "video",
+      "file": "h3-viggle-swap.json",
+      "description": "Viggle Remake, rebuilt from the official comfyui/workflows/remake_swap_ui.json and remake_edit_ui.json. Swap replaces 1–4 characters; edit changes objects, background, weather, light, costume or style. Source video supplies motion, camera, framing and the soundtrack; 1–4 reference images define the target. Six forwards at 24 fps, no CFG, 17n+5 frames from 90 to 345; SageAttention is an optional toggle.",
+      "bindings": {
+        "prompt": {
+          "node": "6",
+          "input": "prompt"
+        },
+        "refs": {
+          "node": "6",
+          "input": "ref_1",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "ref_",
+          "indexBase": 1,
+          "min": 1,
+          "max": 4
+        },
+        "videos": {
+          "node": "6",
+          "input": "source",
+          "from": "video",
+          "array": true,
+          "inputPrefix": "source",
+          "singleInput": "source",
+          "min": 1,
+          "max": 1,
+          "loadType": "video",
+          "loader": "vhs",
+          "forceRate": 24,
+          "frameLoadCap": 345,
+          "audioInput": "audio",
+          "sourceLengthInput": "frames",
+          "sourceLengthStatic": true
+        },
+        "seed": {
+          "node": "7",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "short_edge": {
+          "node": "6",
+          "input": "short_edge",
+          "from": "params.short_edge",
+          "transform": "int",
+          "default": 480
+        },
+        "sage": {
+          "node": "30",
+          "input": "sage_attention",
+          "from": "params.sage",
+          "default": "auto"
+        },
+        "pins": {
+          "node": "6",
+          "input": "pins",
+          "from": "params.pins",
+          "default": ""
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        },
+        {
+          "key": "sage",
+          "label": "SageAttention 加速",
+          "type": "select",
+          "options": [
+            "auto",
+            "disabled"
+          ],
+          "default": "auto",
+          "description": "auto=启用 SageAttention（124 帧 832×480 实测 106s，SSIM 0.974）；disabled=官方原速"
+        },
+        {
+          "key": "pins",
+          "label": "钉源帧（pins）",
+          "type": "string",
+          "default": "",
+          "description": "留空=不钉；每张参考图一个源帧号，用逗号分隔，例如 96；数量必须等于参考图数量"
+        },
+        {
+          "key": "short_edge",
+          "label": "短边分辨率",
+          "type": "number",
+          "min": 480,
+          "max": 736,
+          "step": 256,
+          "default": 480,
+          "description": "480=832×480；736=1280×736，显存不足时保持 480"
+        }
+      ],
+      "variants": {
+        "edit": {
+          "file": "h3-viggle-edit-pruned.json",
+          "label": "视频编辑",
+          "description": "源视频 + 1–4 张编辑参考图；改景/改物/天气/光照/服装/风格，保留人物动作、镜头、构图和源音轨。默认用 H3 pruned INT8 底模 + 官方 edit LoRA，6 步官方 edit sigmas，24GB 显存可跑，Sage 可关。"
+        },
+        "edit-singularity": {
+          "file": "h3-viggle-edit.json",
+          "label": "视频编辑（Singularity 高质量）",
+          "description": "同一套 edit LoRA 与 6 步官方 sigmas，底模换成 Singularity 未剪枝 INT8（34GB）；画质与 pruned 近乎同图，需要 32GB+ 显存并依赖 ComfyUI offload。pruned 底模缺失时自动回退到这条。"
+        }
+      },
+      "variantLabels": {
+        "edit": "视频编辑（pruned INT8 默认）",
+        "edit-singularity": "视频编辑（Singularity 未剪枝）"
+      },
+      "label": "H3 角色替换（Viggle Remake）",
+      "minMedia": 2,
+      "hidden": false
     }
   ]
 }

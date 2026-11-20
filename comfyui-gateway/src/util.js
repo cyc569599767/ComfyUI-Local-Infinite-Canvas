@@ -182,3 +182,22 @@ export function capH3ReferenceFrames(frames) {
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.min(value, H3_MAX_REFERENCE_FRAMES);
 }
+
+// Viggle Remake 单窗口是 17n+5，范围 90–345 帧（24fps 下 3.75–14.375s）。
+export const VIGGLE_MIN_FRAMES = 90;
+export const VIGGLE_MAX_FRAMES = 345;
+
+export function alignViggleFrames(frames) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const n = Math.max(5, Math.floor((value - 5) / 17));
+  return Math.min(17 * n + 5, VIGGLE_MAX_FRAMES);
+}
+
+// Remake 只能接 17n+5；源片取下一档并补帧，生成后再裁回源时长，避免对齐时丢帧。
+export function alignViggleFramesUp(frames) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const n = Math.max(5, Math.ceil((value - 5) / 17));
+  return Math.min(17 * n + 5, VIGGLE_MAX_FRAMES);
+}

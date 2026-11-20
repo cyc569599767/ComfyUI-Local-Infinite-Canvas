@@ -18,7 +18,10 @@ test("fork fast-draft public copy matches its shipped FL2VA four-step graph", ()
     assert.ok(!Object.values(workflow).some(node => node?.class_type === "FastH3BenchmarkSampler"));
     assert.match(fast.description, /FL2VA Turbo 4 步/);
     const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
-    const forkNote = changelog.split("## Fork 同步说明")[1]?.split("## v0.24.13")[0] || "";
+    // 顶部可能有多段「Fork 同步说明」；4 步草稿的口径记录在 v0.24.13 那段，按标题精确定位。
+    const forkNote = changelog
+        .split(/^## Fork 同步说明/m)
+        .find((section) => section.includes("v0.24.13")) || "";
     assert.match(forkNote, /FL2VA Turbo \*\*4 步\*\*/);
     assert.match(forkNote, /上游历史/);
 });
