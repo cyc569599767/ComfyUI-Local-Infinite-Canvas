@@ -47,8 +47,7 @@ import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasOnboarding } from "@/components/onboarding/canvas-onboarding";
-import { CanvasFreeCardPanel } from "@/components/canvas/canvas-free-card-panel";
-import { freeCardInfoFromSummary } from "@/lib/canvas/free-card-workflow";
+import { CanvasFreeCardPanel, freeCardInfoFromSummary } from "@/components/canvas/canvas-free-card-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
 import type { InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
@@ -4961,7 +4960,7 @@ function InfiniteCanvasPage() {
                     connectedNodes={connectedNodesByNodeId.get(panelNode.id) || []}
                     isRunning={hasActiveGeneration(panelNode.id)}
                     onChange={(patch) => handleConfigNodeChange(panelNode.id, patch)}
-                    onGenerate={(nodeId, prompt) => void generateFreeCard(nodeId, prompt)}
+                    onGenerate={(nodeId, prompt, texts, values) => void generateFreeCard(nodeId, prompt, texts, values)}
                     onStop={confirmStopGeneration}
                     onDisconnectReference={disconnectNodeReference}
                     onStartReferenceSelection={startNodeReferenceSelection}

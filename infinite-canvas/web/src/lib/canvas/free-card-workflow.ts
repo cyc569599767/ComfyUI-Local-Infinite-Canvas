@@ -1,7 +1,7 @@
 import { localForageStorage } from "@/lib/localforage-storage";
-import type { FreeWorkflowOutputType, FreeWorkflowSummary } from "@/services/api/free-workflow";
+import type { FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { customWorkflowModelValue, normalizeCustomWorkflow, useCustomWorkflowStore, type CustomWorkflowAddOptions } from "@/stores/use-custom-workflow-store";
-import type { CanvasFreeCardInfo, CanvasFreeCardOutputType, CanvasNodeData } from "@/types/canvas";
+import type { CanvasFreeCardInfo, CanvasNodeData } from "@/types/canvas";
 
 const STORE_KEY = "infinite-canvas:custom_workflow_store";
 
@@ -17,29 +17,15 @@ async function persistedWorkflows() {
     }
 }
 
-const FREE_CARD_OUTPUT_LABEL_KEY: Record<CanvasFreeCardOutputType, string> = {
-    image: "canvas.freeCard.imageWorkflow",
-    video: "canvas.freeCard.videoWorkflow",
-    audio: "canvas.freeCard.audioWorkflow",
-    other: "canvas.freeCard.otherWorkflow",
-};
-
-/** 自由卡片输出类型对应的 i18n key；各处显示类型都走这里，避免漏掉新增类型。 */
-export function freeCardOutputLabelKey(outputType: CanvasFreeCardOutputType | FreeWorkflowOutputType | null | undefined): string {
-    return (outputType && FREE_CARD_OUTPUT_LABEL_KEY[outputType as CanvasFreeCardOutputType]) || FREE_CARD_OUTPUT_LABEL_KEY.other;
-}
 export function freeCardInfoFromSummary(summary: FreeWorkflowSummary): CanvasFreeCardInfo {
     return {
         id: summary.id,
         name: summary.name,
         sourceRel: summary.sourceRel,
         sourceFormat: summary.sourceFormat,
-        // 本地音频自由卡（音色克隆/音乐）必须保留 audio，不能被上游的二元归一化塌成 other。
-        outputType: summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : summary.outputType === "audio" ? "audio" : "other",
+        outputType: summary.outputType === "video" ? "video" : summary.outputType === "image" ? "image" : "other",
         prompt: summary.prompt,
         imageInputs: summary.imageInputs,
-        // 音频自由卡需要知道是否要连参考音频（音色克隆=1）；旧数据缺省按 0，不误报。
-        audioInputs: Number(summary.audioInputs) || 0,
         size: summary.size,
         aspectRatio: summary.aspectRatio,
         aspectRatios: summary.aspectRatios,
