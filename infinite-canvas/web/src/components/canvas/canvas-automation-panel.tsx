@@ -110,7 +110,31 @@ export function CanvasAutomationPanel({ node, isRunning, onChange, onStart, onSt
     const patchSource = (nextText: string, nextUrl = sourceUrl) => {
         setSourceText(nextText);
         setSourceUrl(nextUrl);
-        onChange({ automation: { ...(automation || emptyAutomation()), sourceText: nextText, sourceUrl: nextUrl, settings, script: undefined, scriptText: undefined } });
+        const base = automation || emptyAutomation();
+        // 源文真变了才作废已拆解的剧本；只是重复输入同样内容时保留（避免无谓丢失）。
+        const textChanged = nextText !== (base.sourceText || "");
+        if (!textChanged) {
+            onChange({ automation: { ...base, sourceText: nextText, sourceUrl: nextUrl, settings } });
+            return;
+        }
+        // 剧本和页面必须一起作废：只清 script 而留下旧 pages，下次「继续生成」会用新剧本
+        // 续旧页面，出现「节拍对不上页」的错乱。已出的图/视频也一并清掉，避免新剧本沿用旧画面。
+        const hadRun = Boolean(base.pages?.length || base.script);
+        onChange({
+            automation: {
+                ...base,
+                sourceText: nextText,
+                sourceUrl: nextUrl,
+                settings,
+                script: undefined,
+                scriptText: undefined,
+                pages: undefined,
+                stage: "idle",
+                progress: undefined,
+                startedAt: undefined,
+            },
+        });
+        if (hadRun) message.info(t("canvas.automation.sourceChangedReset"));
     };
 
     const readUrl = async () => {
@@ -232,6 +256,8 @@ export function CanvasAutomationPanel({ node, isRunning, onChange, onStart, onSt
                             disabled={isRunning}
                             onChange={(value) => patchSettings({ segmentation: value as "short" | "long" })}
                         />
+                        {/* 说明必须紧跟「剧情划分」下拉：放到网格末尾会落到「分镜用白模」之后，跟解释的控件隔了十行。 */}
+                        <span className="text-[10px] leading-4 opacity-50">{t("canvas.automation.segmentationHint")}</span>
                     </label>
                     <label className="grid gap-1 text-[11px] opacity-70">
                         {t("canvas.automation.grid")}
@@ -307,7 +333,6 @@ export function CanvasAutomationPanel({ node, isRunning, onChange, onStart, onSt
                         {t("canvas.automation.storyboardWhiteModel")}
                         <Switch size="small" checked={settings.storyboardWhiteModel !== false} disabled={isRunning} onChange={(checked) => patchSettings({ storyboardWhiteModel: checked })} />
                     </label>
-                    <div className="col-span-2 text-[10px] leading-4 opacity-50">{t("canvas.automation.segmentationHint")}</div>
                 </div>
                 <div className="text-[11px] opacity-55">{t("canvas.automation.modelRouting")}</div>
 

@@ -32,6 +32,8 @@ export function automationImageSize(aspect: string): { width: number; height: nu
 
 const CARD_MAX_WIDTH = 300;
 const CARD_MAX_HEIGHT = 420;
+// 宫格卡片的最小可读宽度：竖屏多行组合不能把内容压成一列。
+const CARD_MIN_WIDTH = 220;
 
 function cellRatio(aspect: string) {
     switch (aspect) {
@@ -58,6 +60,12 @@ export function automationPageCardSize(grid: "2x2" | "2x3" | "3x3", aspect: stri
     if (height > CARD_MAX_HEIGHT) {
         height = CARD_MAX_HEIGHT;
         width = height * ratio;
+    }
+    // 竖屏 + 多行（如 2x3 配 3:4 / 9:16）会把宽度压到 158–210px，宫格里的对话框和动作描述
+    // 会挤成一列。这里给一个最小宽度兜底，宁可让卡片略高于 420，也不把内容压扁。
+    if (width < CARD_MIN_WIDTH) {
+        width = CARD_MIN_WIDTH;
+        height = width / ratio;
     }
     return { width: Math.round(width), height: Math.round(height) };
 }

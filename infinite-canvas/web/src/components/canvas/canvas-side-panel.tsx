@@ -259,8 +259,24 @@ function SubTabButton({ label, active, theme, onClick }: { label: string; active
 
 const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.VoiceDesign, CanvasNodeType.Config, CanvasNodeType.FreeCard, CanvasNodeType.Group];
 
-function nodePreviewText(node: CanvasNodeData) {
+function nodePreviewText(node: CanvasNodeData, t: (key: string) => string) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
+    // 自动化卡片：标题已经是「自动化」，副标题再回一遍类型名等于同一行写两遍，
+    // 还看不出跑到哪一步了。这里改为显示阶段 + 进度。
+    if (node.type === CanvasNodeType.Automation) {
+        const automation = node.metadata?.automation;
+        const stage = automation?.stage || "idle";
+        if (stage !== "idle") {
+            const label = t(`canvas.automation.stage.${stage}`);
+            const total = automation?.pages?.length || 0;
+            const done = automation?.pages?.filter((page) => page.imageState === "done" || page.videoState === "done").length || 0;
+            return total ? `${label} · ${done}/${total}` : label;
+        }
+        // 还没开始跑时，用源文开头做摘要，比再写一遍「自动化」有用；
+        // 连源文都没有就显示阶段（待开始），无论如何都不重复标题。
+        const source = (automation?.sourceText || "").trim().replace(/\s+/g, " ");
+        return source ? source.slice(0, 40) : t("canvas.automation.stage.idle");
+    }
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
@@ -459,7 +475,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, on
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
-                                            <span className="block truncate text-xs leading-snug opacity-50">{nodePreviewText(node)}</span>
+                                            <span className="block truncate text-xs leading-snug opacity-50">{nodePreviewText(node, t)}</span>
                                         </span>
                                         {node.metadata?.generationDurationMs ? <span className="shrink-0 text-[10px] tabular-nums opacity-45">{formatElapsedDuration(node.metadata.generationDurationMs)}</span> : null}
                                         {node.metadata?.status && node.metadata.status !== "idle" ? <span className="size-1.5 shrink-0 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
