@@ -204,6 +204,8 @@ export type CanvasNodeMetadata = {
     seedFixed?: string;
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
+    /** 「3D 场景」全景背景的产物来源，便于回溯是哪张图、什么描述生成的。 */
+    panoramaSource?: { nodeId: string; prompt: string; offset?: { x: number; y: number } };
     /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台，novel = 网文卷轴，agent-creation = Agent 无限创作。 */
     workbenchKind?: "storyboard" | "digital-human" | "video-editor" | "novel" | "agent-creation";
     /** 该工作台绑定的故事分镜项目 id（存在网关）。 */

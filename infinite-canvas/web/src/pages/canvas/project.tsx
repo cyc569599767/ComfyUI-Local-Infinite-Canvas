@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Box, ChevronLeft, ChevronRight, Group, Mountain, Video } from "lucide-react";
+import { Box, ChevronLeft, ChevronRight, Globe, Group, Mountain, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
+import { requestScene3DPanorama, type Scene3DOffset } from "@/services/api/scene3d-panorama";
 import { createFreeWorkflowVideoTask, fetchFreeWorkflow, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
 import { generateCanvasAudio, resolveReferenceAudioBlob, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
@@ -32,7 +33,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
-import { App, Button, Modal } from "antd";
+import { App, Button, Input, Modal, Slider } from "antd";
 import { CONFIG_COMPOSER_ENABLED, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -439,6 +440,11 @@ function InfiniteCanvasPage() {
     const [onboardingOpen, setOnboardingOpen] = useState(false);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [to3dChoiceNodeId, setTo3dChoiceNodeId] = useState<string | null>(null);
+    // 「3D 场景」全景背景：画布上的目标图片卡 + 生成中状态（进度/取消）。
+    const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
+    const [panoramaPrompt, setPanoramaPrompt] = useState("");
+    // 主体在展开图里的水平位置，0–1。0.5 = 居中；落在接缝上时左右挪开。
+    const [panoramaOffset, setPanoramaOffset] = useState(0.5);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
@@ -3540,6 +3546,93 @@ function InfiniteCanvasPage() {
             void runSceneTo3D(childId, node);
         },
         [message, runSceneTo3D, t],
+    );
+
+    // 「3D 场景」全景背景：图片卡 → 5664×2832 等距柱状 PNG。
+    // 产物是一张新图片卡（不是 3D 模型），带来源连线，便于回溯。
+    const panoramaAbortRef = useRef<AbortController | null>(null);
+    const runScene3DPanorama = useCallback(
+        async (sourceNode: CanvasNodeData, options: { prompt?: string; offset?: Scene3DOffset } = {}) => {
+            if (!sourceNode.metadata?.content) {
+                message.warning(t("canvas.model3d.panoramaMissingImage"));
+                return;
+            }
+            const childId = nanoid();
+            setNodes((prev) => [
+                ...prev,
+                {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.model3d.panoramaTitle"),
+                    position: { x: sourceNode.position.x + sourceNode.width + 96, y: sourceNode.position.y },
+                    width: 420,
+                    height: 236,
+                    metadata: { status: NODE_STATUS_LOADING, prompt: options.prompt },
+                },
+            ]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            window.setTimeout(() => focusNodeRef.current?.(childId), 120);
+
+            const controller = new AbortController();
+            panoramaAbortRef.current = controller;
+            const patchChild = (patch: Partial<CanvasNodeData["metadata"]>) =>
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, ...patch } } : item)));
+            try {
+                const dataUrl = await imageToDataUrl({ url: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey });
+                const file = dataUrlToFile({
+                    id: sourceNode.id,
+                    name: `${sourceNode.title || sourceNode.id}.png`,
+                    type: sourceNode.metadata.mimeType || "image/png",
+                    dataUrl,
+                });
+                if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                const result = await requestScene3DPanorama(file, options.prompt || "", {
+                    offset: options.offset,
+                    signal: controller.signal,
+                    onProgress: (state) => patchChild({ stepProgress: { step: Math.round((state.progress || 0) * 100), total: 100, complete: state.status === "completed" } }),
+                });
+                const stored = await uploadImage(result.url, { signal: controller.signal });
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === childId
+                            ? {
+                                  ...item,
+                                  metadata: {
+                                      ...item.metadata,
+                                      content: stored.url,
+                                      storageKey: stored.storageKey,
+                                      mimeType: stored.mimeType,
+                                      bytes: stored.bytes || result.bytes,
+                                      naturalWidth: stored.width,
+                                      naturalHeight: stored.height,
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                      stepProgress: undefined,
+                                      panoramaSource: { nodeId: sourceNode.id, prompt: options.prompt || "", offset: options.offset },
+                                  },
+                              }
+                            : item,
+                    ),
+                );
+                message.success(t("canvas.model3d.panoramaDone"));
+            } catch (error) {
+                if (isGenerationCanceled(error)) {
+                    // 取消：撤掉占位卡，不留一张永远转圈的僵尸卡。
+                    setNodes((prev) => prev.filter((item) => item.id !== childId));
+                    setConnections((prev) => prev.filter((item) => item.toNodeId !== childId));
+                    message.info(t("canvas.model3d.panoramaCancelled"));
+                    return;
+                }
+                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                message.error(errorDetails);
+                patchChild({ status: NODE_STATUS_ERROR, errorDetails, stepProgress: undefined });
+            } finally {
+                if (panoramaAbortRef.current === controller) panoramaAbortRef.current = null;
+            }
+        },
+        [message, t],
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
@@ -8184,6 +8277,9 @@ function InfiniteCanvasPage() {
                         {([
                             { kind: "object" as const, icon: <Box className="mt-0.5 size-5 shrink-0" />, title: t("canvas.model3d.chooseObject"), desc: t("canvas.model3d.chooseObjectDesc") },
                             { kind: "scene" as const, icon: <Mountain className="mt-0.5 size-5 shrink-0" />, title: t("canvas.model3d.chooseScene"), desc: t("canvas.model3d.chooseSceneDesc") },
+                            // 「全景背景」不是 3D 模型，产物是 2:1 等距柱状 PNG。放在这里是因为
+                            // 它同属「拿一张图派生新资产」的操作，用户找 3D 场景时会顺带看到。
+                            { kind: "panorama" as const, icon: <Globe className="mt-0.5 size-5 shrink-0" />, title: t("canvas.model3d.choosePanorama"), desc: t("canvas.model3d.choosePanoramaDesc") },
                         ]).map((option) => (
                             <button
                                 key={option.kind}
@@ -8195,6 +8291,7 @@ function InfiniteCanvasPage() {
                                     setTo3dChoiceNodeId(null);
                                     if (!node) return;
                                     if (option.kind === "scene") void sceneTo3DImageNode(node);
+                                    else if (option.kind === "panorama") setPanoramaNodeId(node.id);
                                     else void to3DImageNode(node);
                                 }}
                             >
@@ -8207,6 +8304,45 @@ function InfiniteCanvasPage() {
                         ))}
                     </div>
                     <p className="mt-3 text-xs opacity-50">{t("canvas.model3d.chooseAutoHint")}</p>
+                </Modal>
+
+                {/* 全景背景：先选主体位置与描述，再提交。默认 0.5 居中，主体落在接缝上时左右挪。 */}
+                <Modal
+                    open={Boolean(panoramaNodeId)}
+                    title={t("canvas.model3d.panoramaTitle")}
+                    onCancel={() => setPanoramaNodeId(null)}
+                    footer={null}
+                    width={520}
+                    centered
+                >
+                    <div className="flex flex-col gap-4">
+                        <p className="text-xs opacity-60">{t("canvas.model3d.panoramaHint")}</p>
+                        <label className="grid gap-1 text-xs">
+                            {t("canvas.model3d.panoramaOffset")}
+                            <Slider defaultValue={50} min={0} max={100} onChange={(value) => setPanoramaOffset(Number(Array.isArray(value) ? value[0] : value) / 100)} />
+                            <span className="text-[10px] opacity-50">{t("canvas.model3d.panoramaOffsetHint")}</span>
+                        </label>
+                        <Input.TextArea
+                            value={panoramaPrompt}
+                            onChange={(event) => setPanoramaPrompt(event.target.value)}
+                            placeholder={t("canvas.model3d.panoramaPromptPlaceholder")}
+                            autoSize={{ minRows: 2, maxRows: 5 }}
+                        />
+                        <div className="flex justify-end gap-2">
+                            <Button onClick={() => setPanoramaNodeId(null)}>{t("common.cancel")}</Button>
+                            <Button
+                                type="primary"
+                                icon={<Globe className="size-4" />}
+                                onClick={() => {
+                                    const node = panoramaNodeId ? nodesRef.current.find((item) => item.id === panoramaNodeId) : null;
+                                    setPanoramaNodeId(null);
+                                    if (node) void runScene3DPanorama(node, { prompt: panoramaPrompt.trim(), offset: { x: panoramaOffset, y: 0.5 } });
+                                }}
+                            >
+                                {t("canvas.model3d.panoramaStart")}
+                            </Button>
+                        </div>
+                    </div>
                 </Modal>
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
