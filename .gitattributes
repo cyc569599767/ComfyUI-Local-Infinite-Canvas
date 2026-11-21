@@ -1,6 +1,9 @@
 * text=auto
 *.bat text eol=crlf
 *.cmd text eol=crlf
+# ComfyUI 启动器备份：还原后必须能直接当 .bat 用，行尾不能变。
+docs/environment/launchers/*.original text eol=crlf
+docs/environment/launchers/*.current text eol=crlf
 *.png binary
 *.jpg binary
 *.jpeg binary

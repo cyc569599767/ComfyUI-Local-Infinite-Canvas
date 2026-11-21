@@ -1,0 +1,7 @@
+@echo off
+REM 2026-11-21: RTX 5060 Ti (sm_120) 上 cuDNN/Flash SDPA 不可用。
+REM 由 custom_nodes/ComfyUI-SdpaCompat 在启动时切换到 memory-efficient 后端；
+REM --reserve-vram 1.5 用于降低显存碎片导致的执行失败概率。
+.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --reserve-vram 1.5
+echo If you see this and ComfyUI did not start try updating your Nvidia Drivers to the latest. If you get a c10.dll error you need to install vc redist that you can find: https://aka.ms/vc14/vc_redist.x64.exe
+pause
