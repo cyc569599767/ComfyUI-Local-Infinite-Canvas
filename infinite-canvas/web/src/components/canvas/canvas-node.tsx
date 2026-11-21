@@ -15,11 +15,11 @@ import { nodeInteractionState } from "@/lib/canvas/node-interaction";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeProgressRing } from "./canvas-node-progress-ring";
-import { freeCardOutputLabelKey } from "./canvas-free-card-panel";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position, isAudioNodeType } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
+import { freeCardOutputLabelKey } from "@/lib/canvas/free-card-workflow";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";

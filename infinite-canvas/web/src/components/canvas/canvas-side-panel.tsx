@@ -10,6 +10,7 @@ import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { CANVAS_ASSET_MIME, encodeCanvasAssetDrag } from "@/lib/canvas/asset-drag";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { freeCardOutputLabelKey } from "@/lib/canvas/free-card-workflow";
 import { cn } from "@/lib/utils";
 import { formatElapsedDuration } from "@/lib/media-size";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
@@ -29,7 +30,6 @@ import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import type { StyleRecipe } from "@/stores/use-style-recipe-store";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
-import { freeCardOutputLabelKey } from "./canvas-free-card-panel";
 import { CanvasStyleRecipesTab } from "./canvas-style-recipes-tab";
 import { useBundleTransfer } from "./use-bundle-transfer";
 import { WorkflowBundleImportModal } from "./workflow-bundle-import-modal";
