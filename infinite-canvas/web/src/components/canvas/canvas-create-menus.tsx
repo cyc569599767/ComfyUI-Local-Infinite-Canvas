@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Clapperboard, ImageIcon, List, Mic, Music2, Scissors, Scroll, Settings2, Sparkles, User, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -14,6 +14,15 @@ export type PendingConnectionCreate = {
     connection: ConnectionHandle;
     position: Position;
 };
+
+/**
+ * 「选择节点」主菜单里只显示名称、不显示描述的条目。
+ *
+ * 自动化与短剧是多环节编排入口，一句话描述说不清它们做什么，反而会把 240px 宽的
+ * 菜单撑成两行、挤压后面的条目。详细说明放在节点面板里，菜单保持一眼可扫。
+ * 注意：工作台子菜单不受影响，那里必须保留描述来区分几个工作台。
+ */
+const CREATE_MENU_WITHOUT_DESCRIPTION = new Set<string>([CanvasNodeType.Automation, CanvasNodeType.Drama]);
 
 const MENU_ICONS: Record<string, React.ReactNode> = {
     [CanvasNodeType.Text]: <List className="size-4" />,
@@ -161,7 +170,14 @@ export function NodeCreateMenu({ position, scale = 1, onCreate, onClose }: { pos
             </div>
             <div className="grid gap-0.5">
                 {plainDefinitions.map((def) => (
-                    <ConnectionCreateOption key={def.type} theme={theme} icon={def.icon} title={getNodeSpec(def.type).title} description={def.description} onClick={() => onCreate(def.type)} />
+                    <ConnectionCreateOption
+                        key={def.type}
+                        theme={theme}
+                        icon={def.icon}
+                        title={getNodeSpec(def.type).title}
+                        description={CREATE_MENU_WITHOUT_DESCRIPTION.has(def.type) ? undefined : def.description}
+                        onClick={() => onCreate(def.type)}
+                    />
                 ))}
                 {workbenches.length ? (
                     <WorkbenchSubmenu
@@ -215,6 +231,7 @@ function WorkbenchSubmenu({
     const { t } = useTranslation();
     const closeTimer = useRef<number | null>(null);
     const triggerRef = useRef<HTMLButtonElement>(null);
+    const submenuRef = useRef<HTMLDivElement>(null);
     // 子菜单必须 Portal 到 body：主菜单是 overflow-y-auto，子菜单留在里面会被裁掉，
     // 用户只能看到一条横向滚动条、菜单不出现（实测就是这样）。
     const [anchor, setAnchor] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
@@ -236,12 +253,37 @@ function WorkbenchSubmenu({
         const gap = 4;
         // 要放得下「故事分镜导演台」和完整的一行说明：230 会把说明截成「…」。
         const width = 320;
-        // 右侧放不下就翻到左边，避免贴边时整个子菜单跑出屏幕。
-        const flip = rect.right + gap + width > window.innerWidth - 8;
-        const left = flip ? Math.max(8, rect.left - gap - width) : rect.right + gap;
-        // 高度受视口剩余空间约束，超长时自身滚动而不是被裁。
-        setAnchor({ left, top: Math.max(8, Math.min(rect.top, window.innerHeight - 120)), maxHeight: Math.max(160, window.innerHeight - rect.top - 16) });
+        const margin = 8;
+
+        // 水平：优先贴触发项右侧。右侧装不下时不要翻到左边（那样会横跨主菜单、
+        // 压住画布内容，视觉上像是飘到了别的地方），而是把子菜单右对齐到窗口边缘，
+        // 让它始终紧贴在触发项所在的这一侧。
+        const fitsRight = rect.right + gap + width <= window.innerWidth - margin;
+        const left = fitsRight
+            ? rect.right + gap
+            : Math.max(margin, Math.min(rect.left - gap - width, window.innerWidth - width - margin));
+
+        // 垂直：先与触发项顶部对齐，渲染后再用真实高度校正（见下方 layout 副作用），
+        // 这里只给一个宽松的上界，避免用估算高度把位置提前压偏。
+        setAnchor({ left, top: Math.max(margin, rect.top), maxHeight: Math.max(160, window.innerHeight - margin * 2) });
     }, []);
+
+    // 渲染后用真实高度校正垂直位置：保证整块留在视口内，且仍尽量贴近触发项顶部。
+    useLayoutEffect(() => {
+        if (!open || !anchor) return;
+        const element = submenuRef.current;
+        const rect = triggerRef.current?.getBoundingClientRect();
+        if (!element || !rect) return;
+        const margin = 8;
+        const height = element.offsetHeight;
+        const maxTop = Math.max(margin, window.innerHeight - height - margin);
+        const top = Math.max(margin, Math.min(rect.top, maxTop));
+        const maxHeight = Math.max(160, window.innerHeight - top - margin);
+        // 位置没变化就不要 setState，否则会在同一帧里反复触发 layout 循环。
+        setAnchor((previous) =>
+            previous && previous.top === top && previous.left === anchor.left && previous.maxHeight === maxHeight ? previous : { left: anchor.left, top, maxHeight },
+        );
+    }, [open, anchor]);
     useEffect(() => {
         if (!open) return;
         place();
@@ -284,6 +326,7 @@ function WorkbenchSubmenu({
             {open && anchor
                 ? createPortal(
                       <div
+                          ref={submenuRef}
                           className="fixed z-[140] w-[320px] overflow-y-auto rounded-xl border p-1 shadow-2xl backdrop-blur thin-scrollbar"
                           style={{ left: anchor.left, top: anchor.top, maxHeight: anchor.maxHeight, background: theme.node.panel, borderColor: theme.node.stroke }}
                           role="menu"
