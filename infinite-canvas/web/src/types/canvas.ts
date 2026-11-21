@@ -59,6 +59,11 @@ export type CanvasFreeCardInfo = {
     seed?: string | null;
     warnings?: string[];
     archived?: boolean;
+    // ── 上游 v0.25.x 追加（可选）──
+    healthWarnings?: string[];
+    snapshot?: boolean;
+    snapshotPageLabel?: string;
+    pageCount?: number;
 };
 
 export type CanvasNodeImage = {
@@ -125,6 +130,14 @@ export type CanvasNodeMetadata = {
     videoMode?: string;
     videoInterpolation?: string;
     videoSelfLiftMode?: string;
+    // ── 上游 v0.25.x 追加：自定义文本与 Viggle ──
+    customTexts?: Record<string, string>;
+    customTextActive?: string;
+    videoPins?: string;
+    videoSegmentSeconds?: string;
+    videoSage?: string;
+    videoViggleMode?: string;
+    videoSwapTarget?: string;
     frameMode?: "first" | "last" | "both";
     imageMode?: "t2i" | "edit" | "inpaint" | "outpaint" | "layout" | "remove";
     captionEngine?: "qwen35" | "florence" | "cloud";

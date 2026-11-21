@@ -190,3 +190,18 @@ export function isCustomVideoSize(size: string, resolution: string) {
 function evenRound(value: number) {
     return Math.max(2, Math.round(value / 2) * 2);
 }
+
+// ── 上游 v0.25.x 追加：按像素预算算尺寸（自定义工作流模板用）──
+export const MEDIA_STEP_MULTIPLE = 32;
+export const MEDIA_MAX_EDGE = 3840;
+export const MEDIA_MAX_PIXELS = 8294400;
+
+/** 按像素预算 + 画布比例等比算尺寸，再向下取整到 32 的倍数，保证不越上限也不歪比例。 */
+export function sizeForPixelBudget(pixels: number, ratio: string, fallbackPixels = 4194304, limits?: { maxPixels?: number; maxEdge?: number }) {
+    const parts = parseAspectRatio(ratio) || parsePixelSize(ratio) || { width: 1, height: 1 };
+    const budget = Math.min(pixels || fallbackPixels, limits?.maxPixels ?? MEDIA_MAX_PIXELS);
+    let scale = Math.sqrt(budget / (parts.width * parts.height));
+    scale = Math.min(scale, (limits?.maxEdge ?? MEDIA_MAX_EDGE) / Math.max(parts.width, parts.height));
+    const floorStep = (value: number) => Math.max(MEDIA_STEP_MULTIPLE, Math.floor(value / MEDIA_STEP_MULTIPLE) * MEDIA_STEP_MULTIPLE);
+    return `${floorStep(parts.width * scale)}x${floorStep(parts.height * scale)}`;
+}

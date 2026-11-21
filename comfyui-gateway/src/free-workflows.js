@@ -3,9 +3,12 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { isApiWorkflow, isUiWorkflow } from "./registry.js";
-import { bindingSummary, canonicalAspectRatio, convertUiWorkflow, detectFreeBindings, pruneUnreachableNodes } from "./ui-workflow.js";
+import { bindingSummary, buildWorkflowGraph, canonicalAspectRatio, convertUiWorkflow, detectFlowComponents, detectFreeBindings, detectWorkflowProblems, flattenSubgraphs, pruneUnreachableNodes, stabilizeFlowIds } from "./ui-workflow.js";
 import { deepClone, nowIso, randomId, writeJsonAtomic } from "./util.js";
 
+// G9：按「页 + 分组」转换的结果缓存。object_info 很大、转换也重，同一组合只算一次。
+const RESOLVED_CACHE_MAX = 64;
+const resolvedCache = new Map();
 const FILE_NAME = "free-workflows.json";
 const SOURCE_CACHE_MS = 60 * 1000;
 const OBJECT_INFO_MS = 30 * 1000;
@@ -39,6 +42,31 @@ const BINDING_SURFACES = new Set(["card", "settings"]);
  * 一律走这里再返回给前端，避免「保存时带 surface、读取时又漏掉」这种两处不同步的错：
  * 那样用户切到生成设置、刷新后它又跳回卡片上，看起来像没保存。
  */
+const FIELD_TYPES = new Set(["number", "select", "boolean", "string"]);
+
+// G9 参数披露项：卡片上要展示/可编辑的参数（节点+输入+标签+类型+取值）。
+function normalizeField(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const node = String(raw.node || "").trim();
+  const input = String(raw.input || "").trim();
+  if (!node || !input) return null;
+  const type = FIELD_TYPES.has(String(raw.type)) ? String(raw.type) : "string";
+  const value = raw.value === undefined || raw.value === null ? "" : raw.value;
+  const field = {
+    key: String(raw.key || `f_${node}_${input}`).trim().slice(0, 160),
+    node,
+    input,
+    label: String(raw.label || input).trim().slice(0, 80),
+    group: String(raw.group || "参数").trim().slice(0, 80),
+    type,
+    value: typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : "",
+    options: Array.isArray(raw.options) ? raw.options.map(String).slice(0, 200) : [],
+  };
+  for (const key of ["min", "max", "step"]) {
+    if (Number.isFinite(Number(raw[key]))) field[key] = Number(raw[key]);
+  }
+  return field;
+}
 export function publicBinding(item) {
   return {
     node: String(item?.node ?? ""),
@@ -154,6 +182,10 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
   let objectInfoCache = null;
   let objectInfoAt = 0;
   let persistQueue = Promise.resolve();
+  // G1 源目录自动监听：定时轮询源签名，变了就防抖同步；同一卡片只挂一个待执行同步。
+  let watchTimer = null;
+  let watchBusy = false;
+  const pendingSync = new Map();
 
   async function load() {
     try {
@@ -322,12 +354,12 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return entry;
   }
 
-  async function sync(id) {
+  async function sync(id, force = false) {
     const entry = entries.get(id);
     if (!entry) throw new Error("自由卡片不存在");
     const state = await sourceState(entry);
     if (!state.exists) throw new Error("源工作流文件已不存在，可能已在 ComfyUI 中删除");
-    if (!state.changed) return { changed: false, entry };
+    if (!state.changed && !force) return { changed: false, entry };
     const source = await readSource(entry.sourceRel);
     const bindings = detectFreeBindings(source.workflow, await getObjectInfo());
     entry.workflow = source.workflow;
@@ -573,5 +605,325 @@ export function createFreeWorkflowStore({ dataDir, comfyWorkflowsDir = "", getCo
     return result;
   }
 
-  return { load, listSources, importSource, sync, setArchived, duplicate, setCustomBindings, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings, executionBindings };
+  // G9 流程分页：一张 UI 工作流可能被切成多页（detectFlowComponents），
+  // 生成/体检/图描述都要按「当前页」重新转换，否则会跑到别的页的图上。
+  function pageChangedError() {
+    const error = new Error("所选工作流页已变化，请重新选择页签后再生成");
+    error.status = 409;
+    error.code = "free_workflow_page_changed";
+    return error;
+  }
+
+  function mainOutputs(entry) {
+    const flows = Array.isArray(entry?.bindings?.flows) ? entry.bindings.flows : [];
+    const main = flows.find((flow) => flow.main);
+    return Array.isArray(main?.outputs) ? main.outputs.map(String) : [];
+  }
+
+  function seedPageIds(entry) {
+    if (!Array.isArray(entry.pageIds)) {
+      const signature = (flow) => (Array.isArray(flow?.outputs) ? flow.outputs : []).map(String).sort((a, b) => Number(a) - Number(b)).join(",");
+      entry.pageIds = (Array.isArray(entry.bindings?.flows) ? entry.bindings.flows : []).map((flow) => ({
+        id: flow.id,
+        signature: signature(flow),
+        label: String(flow.label || ""),
+        outputs: (Array.isArray(flow.outputs) ? flow.outputs : []).map(String),
+        nodeIds: (Array.isArray(flow.nodeIds) ? flow.nodeIds : []).map(String),
+        main: Boolean(flow.main),
+        active: true,
+      }));
+    }
+    return entry.pageIds;
+  }
+
+  async function resolveFlow(entry, groupIds, flowId = "") {
+    const wanted = String(flowId || "");
+    const titles = (Array.isArray(groupIds) ? groupIds : []).map((id) => String(id).replace(/^group:/, ""));
+    const fallback = { workflow: entry.workflow, bindings: entry.bindings, page: "", outputs: mainOutputs(entry) };
+    if (!titles.length && !wanted) return fallback;
+    if (entry.sourceFormat !== "ui") {
+      if (wanted) throw pageChangedError();
+      return fallback;
+    }
+    try {
+      const raw = await readRawWorkflow(entry);
+      if (raw.format !== "ui") {
+        if (wanted) throw pageChangedError();
+        return fallback;
+      }
+      // 页/分组转换依赖源文件与选择项；同一组合只转一次，重复生成直接复用。
+      const cacheKey = [entry.id, raw.signature || entry.sourceSignature || "", wanted, [...titles].sort().join("|")].join("\u0000");
+      const cached = resolvedCache.get(cacheKey);
+      if (cached) return cached;
+      const objectInfo = await getObjectInfo();
+      const stable = stabilizeFlowIds(detectFlowComponents(flattenSubgraphs(raw.workflow)), seedPageIds(entry));
+      entry.pageIds = stable.pageIds;
+      const selected = wanted ? stable.flows.find((flow) => flow.id === wanted) : stable.flows.find((flow) => flow.main);
+      if (wanted && !selected) throw pageChangedError();
+      const page = selected && !selected.main ? selected.id : "";
+      const workflow = convertUiWorkflow(raw.workflow, objectInfo, { enableGroups: titles, flowId: selected?.internalId || "" }).workflow;
+      const resolved = { workflow, bindings: detectFreeBindings(workflow, objectInfo), page, outputs: selected?.outputs?.map(String) || mainOutputs(entry) };
+      if (resolvedCache.size >= RESOLVED_CACHE_MAX) resolvedCache.delete(resolvedCache.keys().next().value);
+      resolvedCache.set(cacheKey, resolved);
+      return resolved;
+    } catch (error) {
+      logger?.warn?.(`按页重新转换失败 ${entry.id}: ${error.message}`);
+      if (wanted) {
+        if (error.status) throw error;
+        throw new Error(`切换的工作流页无法读取：${error.message}`);
+      }
+      return fallback;
+    }
+  }
+
+  async function graph(entry, flowId = "") {
+    let uiWorkflow = null;
+    const warnings = [...(entry.warnings || [])];
+    if (entry.sourceFormat === "ui") {
+      try {
+        const raw = await readRawWorkflow(entry);
+        if (raw.format === "ui") uiWorkflow = raw.workflow;
+      } catch (error) {
+        warnings.push(`读取节点布局失败：${error.message}`);
+      }
+    }
+    let objectInfo = null;
+    try {
+      objectInfo = await getObjectInfo();
+    } catch {
+      // 节点标题/选项回退到 class_type 和当前值。
+    }
+    const workflow = flowId ? (await resolveFlow(entry, [], flowId)).workflow : entry.workflow;
+    return {
+      id: entry.id,
+      name: entry.name,
+      sourceFormat: entry.sourceFormat,
+      ...buildWorkflowGraph(workflow, uiWorkflow ? flattenSubgraphs(uiWorkflow) : null, objectInfo || {}),
+      params: entry.params || [],
+      warnings: [...new Set(warnings)],
+      problems: objectInfo && Object.keys(objectInfo).length ? detectWorkflowProblems(workflow, objectInfo) : [],
+    };
+  }
+
+  async function setParams(id, params) {
+    const entry = entries.get(String(id || "").trim());
+    if (!entry) {
+      const error = new Error("自由卡片不存在");
+      error.status = 404;
+      error.code = "free_workflow_not_found";
+      throw error;
+    }
+    entry.params = (Array.isArray(params) ? params : []).map(normalizeField).filter(Boolean).slice(0, 200);
+    entry.updatedAt = nowIso();
+    await persist();
+    return entry;
+  }
+
+  // G10 快照：把卡片当前的图/绑定/页/参数冻结一份独立副本，供「回到某个版本」使用。
+  async function createSnapshot(id, payload = {}) {
+    const original = entries.get(String(id || "").trim());
+    if (!original) {
+      const error = new Error("自由卡片不存在");
+      error.status = 404;
+      error.code = "free_workflow_not_found";
+      throw error;
+    }
+    const raw = await readRawWorkflow(original);
+    const now = nowIso();
+    const snapshot = {
+      id: randomId("snap_"),
+      name: String(payload.name || original.name || "").trim().slice(0, 80) || original.name,
+      sourceRel: original.sourceRel,
+      sourceFormat: raw.format,
+      sourceSignature: original.sourceSignature,
+      sourceUpdatedAt: original.sourceUpdatedAt,
+      workflow: original.workflow,
+      bindings: original.bindings,
+      pageIds: Array.isArray(original.pageIds) ? original.pageIds : [],
+      params: Array.isArray(payload.config?.params) ? payload.config.params : original.params || [],
+      preset: original.preset || null,
+      warnings: original.warnings || [],
+      snapshot: true,
+      frozen: true,
+      snapshotOf: original.snapshotOf || original.id,
+      snapshotAt: now,
+      snapshotWorkflow: raw.workflow,
+      snapshotFormat: raw.format,
+      snapshotConfig: payload.config && typeof payload.config === "object" ? payload.config : null,
+      snapshotCard: payload.card && typeof payload.card === "object" ? payload.card : null,
+      archivedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    entries.set(snapshot.id, snapshot);
+    await persist();
+    logger?.info?.(`snapshot free workflow ${snapshot.name} (${snapshot.id}) from ${original.id}`);
+    return snapshot;
+  }
+
+  function getSnapshot(id) {
+    const entry = entries.get(String(id || "").trim());
+    if (!entry?.snapshot) return null;
+    return {
+      id: entry.id,
+      snapshotOf: entry.snapshotOf || null,
+      snapshotAt: entry.snapshotAt || null,
+      pageId: String(entry.snapshotConfig?.flowId || ""),
+      config: entry.snapshotConfig || null,
+      card: entry.snapshotCard || null,
+    };
+  }
+
+  // G7 干跑校验：按提示词/文本/尺寸/种子/参考图组装请求体，静态校验必填输入与可达输出。
+  // 不提交 ComfyUI、不跑 GPU，用于生成前的快速失败与参数披露自检。
+  async function validate(entry, body = {}) {
+    const errors = [];
+    const texts = Array.isArray(body.texts)
+      ? body.texts.map((item) => ({ node: String(item?.node || ""), input: String(item?.input || ""), value: String(item?.value ?? "") })).filter((item) => item.node && item.input)
+      : [];
+    const primaryText = body.primaryText && typeof body.primaryText === "object" && body.primaryText.node && body.primaryText.input
+      ? { node: String(body.primaryText.node), input: String(body.primaryText.input) }
+      : null;
+    const flow = await resolveFlow(entry, Array.isArray(body.enableGroups) ? body.enableGroups.map(String) : [], String(body.flowId || ""));
+    const prompt = String(body.prompt || "");
+    const promptBinding = primaryText || flow.bindings?.prompt || null;
+    const promptText = promptBinding ? texts.find((item) => item.node === promptBinding.node && item.input === promptBinding.input)?.value : undefined;
+    const effectivePrompt = promptText !== undefined ? promptText : prompt;
+    if (promptBinding && !String(effectivePrompt).trim()) errors.push({ node: promptBinding.node, input: promptBinding.input, reason: "需要正向提示词" });
+    const allowed = new Set((flow.bindings?.textInputs || []).map((item) => `${item.node}\u0000${item.input}`));
+    for (const item of texts) if (!allowed.has(`${item.node}\u0000${item.input}`)) errors.push({ node: item.node, input: item.input, reason: "文本输入不在工作流声明中" });
+    const sizeMatch = /^(\d+)x(\d+)$/.exec(String(body.size || ""));
+    const size = sizeMatch ? { width: Number(sizeMatch[1]), height: Number(sizeMatch[2]) } : undefined;
+    let workflow = null;
+    try {
+      workflow = applyFreeInputs(flow.workflow, flow.bindings, {
+        prompt: effectivePrompt,
+        texts,
+        uploadedImages: Array.isArray(body.images) ? body.images.map((name) => ({ name: String(name) })) : [],
+        size,
+        count: body.count,
+        seed: body.seed,
+        seedFixed: body.seedFixed,
+        ratio: body.ratio,
+        keepOutputs: flow.outputs,
+        primaryText: promptBinding,
+      });
+    } catch (error) {
+      errors.push({ node: "", input: "", reason: error.message });
+    }
+    let objectInfo = {};
+    try {
+      objectInfo = await getObjectInfo();
+    } catch {
+      // 没有 object_info 时只做结构性校验。
+    }
+    if (workflow) {
+      for (const [nodeId, node] of Object.entries(workflow)) {
+        const info = objectInfo[node.class_type];
+        if (!info) {
+          errors.push({ node: String(nodeId), input: "", reason: `节点类型不在 object_info：${node.class_type}` });
+          continue;
+        }
+        for (const [key, spec] of Object.entries(info.input?.required || {})) {
+          if (key.includes(".") || /^(image|video|audio)$/i.test(key)) continue;
+          if (node.inputs?.[key] !== undefined) continue;
+          // COMFY_AUTOGROW 这类动态组在 API 图里是 values.a / values.b 展开的，不能按组名判缺。
+          const dynamic = Array.isArray(spec) && String(spec[0] || "").startsWith("COMFY_AUTOGROW");
+          const hasFlattened = Object.keys(node.inputs || {}).some((input) => input.startsWith(`${key}.`));
+          if (dynamic || hasFlattened) continue;
+          errors.push({ node: String(nodeId), input: key, reason: "缺少必填输入" });
+        }
+      }
+    }
+    const outputs = [];
+    for (const [nodeId, node] of Object.entries(workflow || {})) {
+      if (!/save|preview|output|combine/i.test(String(node?.class_type || ""))) continue;
+      if (!Object.values(node?.inputs || {}).some((value) => Array.isArray(value))) continue;
+      outputs.push({ node: String(nodeId), title: String(node?._meta?.title || node?.class_type || ""), classType: String(node?.class_type || "") });
+    }
+    if (!outputs.length) errors.push({ node: "", input: "", reason: "没有可达输出" });
+    return {
+      valid: errors.length === 0,
+      errors,
+      request: {
+        entryId: entry.id,
+        flowId: flow.page || String(body.flowId || ""),
+        nodeCount: Object.keys(workflow || {}).length,
+        outputs,
+        prompt: String(effectivePrompt),
+        texts,
+        primaryText: promptBinding,
+        size: String(body.size || ""),
+        seed: body.seed ?? "",
+        count: body.count ?? null,
+        images: Array.isArray(body.images) ? body.images.map(String) : [],
+      },
+    };
+  }
+
+  // 直接上传 JSON 导入：写到 ComfyUI 工作流目录后复用 importSource，
+  // 这样源文件仍在目录里，后续可继续 watch/sync，不是一次性快照。
+  async function importUploaded(name, content) {
+    const raw = String(content || "").trim();
+    if (!raw) throw new Error("工作流内容为空");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    } catch {
+      throw new Error("工作流 JSON 无法解析");
+    }
+    if (!isApiWorkflow(parsed) && !isUiWorkflow(parsed)) throw new Error("不是 ComfyUI UI 或 API 工作流");
+    const dir = comfyWorkflowsDir || getComfyWorkflowsDir?.() || "";
+    if (!dir) throw new Error("未设置 ComfyUI 工作流目录，无法导入");
+    const safe = String(name || "uploaded").replace(/[\\/:*?"<>|]/g, "_").replace(/\.json$/i, "");
+    const fileName = `${safe || "uploaded"}-${Date.now().toString(36)}.json`;
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, fileName), JSON.stringify(parsed, null, 2), "utf8");
+    return importSource(fileName);
+  }
+  // G1：源目录轮询。只对「绑定了源文件且没有快照」的卡片做比对，避免覆盖用户手动改过的卡片。
+  async function pollSources(onSynced, debounceMs) {
+    if (watchBusy) return;
+    watchBusy = true;
+    try {
+      for (const entry of entries.values()) {
+        if (!entry?.sourceRel || entry.snapshot) continue;
+        const state = await sourceState(entry);
+        if (!state.exists || !state.changed) continue;
+        scheduleSourceSync(entry.id, onSynced, debounceMs);
+      }
+    } finally {
+      watchBusy = false;
+    }
+  }
+
+  function scheduleSourceSync(id, onSynced, debounceMs) {
+    if (pendingSync.has(id)) return;
+    const timer = setTimeout(async () => {
+      pendingSync.delete(id);
+      try {
+        const result = await sync(id, true);
+        if (result.changed) onSynced?.(result.entry);
+      } catch (error) {
+        logger?.warn?.(`自选工作流自动同步失败 ${id}: ${error.message}`);
+      }
+    }, Math.max(100, Number(debounceMs) || 1200));
+    timer.unref?.();
+    pendingSync.set(id, timer);
+  }
+
+  function startWatching({ intervalMs = 3000, debounceMs = 1200, onSynced } = {}) {
+    if (watchTimer) return () => {};
+    const tick = () => { void pollSources(onSynced, debounceMs); };
+    watchTimer = setInterval(tick, Math.max(500, Number(intervalMs) || 3000));
+    watchTimer.unref?.();
+    tick();
+    return () => {
+      if (watchTimer) clearInterval(watchTimer);
+      watchTimer = null;
+      for (const timer of pendingSync.values()) clearTimeout(timer);
+      pendingSync.clear();
+    };
+  }
+  return { load, listSources, importSource, sync, setArchived, duplicate, setCustomBindings, get, remove, rename, publicEntry, list, applyFreeInputs, readRawWorkflow, sourceState, ensureBindings, executionBindings, startWatching, resolveFlow, graph, setParams, createSnapshot, getSnapshot, validate, importUploaded };
 }

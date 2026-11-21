@@ -27,6 +27,7 @@ import {
     type ResourceStatus,
 } from "@/services/api/resources";
 import { isGatewayDown } from "@/services/api/gateway-status";
+import { CustomWorkflowImportDialog } from "@/components/layout/custom-workflow-import-dialog";
 import { LOCAL_ONLY } from "@/constant/app-mode";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useConfigStore } from "@/stores/use-config-store";
@@ -618,7 +619,10 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
     const { i18n } = useTranslation();
     const copy = i18n.language.startsWith("zh") ? copyByLocale.zh : copyByLocale.en;
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
+    const config = useConfigStore((state) => state.config);
     const [status, setStatus] = useState<ResourceStatus | null>(null);
+    // 自选工作流导入弹窗（G12）：列出 ComfyUI 目录可导入源并生成自由卡。
+    const [customWorkflowOpen, setCustomWorkflowOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const [workflowError, setWorkflowError] = useState("");
     const [refreshing, setRefreshing] = useState(false);
@@ -1095,6 +1099,9 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
                         </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
+                        <Button size="small" data-onboarding="custom-workflow-import" onClick={() => setCustomWorkflowOpen(true)}>
+                            自选工作流
+                        </Button>
                         <Button size="small" data-onboarding="resource-refresh" icon={<RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />} loading={refreshing} onClick={() => void load(true)}>
                             {copy.refresh}
                         </Button>
@@ -1583,6 +1590,7 @@ export function ResourceCenterPanel({ compact = false, footer }: { compact?: boo
                 />
                 <div className="mt-2 text-xs text-stone-500 dark:text-stone-400">{copy.editLabelHint}</div>
             </Modal>
+            <CustomWorkflowImportDialog open={customWorkflowOpen} config={config} onClose={() => setCustomWorkflowOpen(false)} />
         </div>
     );
 }

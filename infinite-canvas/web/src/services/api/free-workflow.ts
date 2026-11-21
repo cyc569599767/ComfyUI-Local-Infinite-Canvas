@@ -60,6 +60,36 @@ export type FreeWorkflowSummary = {
     seed: string | null;
     preset?: FreeWorkflowPreset | null;
     customBindings?: FreeWorkflowCustomBinding[];
+    // ── 上游 v0.25.x 追加字段（均可选，缺省时行为与本地旧版一致）──
+    kind?: "image" | "video" | "other";
+    mode?: "t2i" | "i2i" | "edit" | "text" | "frames" | "reference" | "generic";
+    primaryText?: FreeWorkflowTextBinding | null;
+    maskInputs?: number;
+    maskMode?: "separate" | "alpha" | null;
+    maskRequired?: boolean;
+    snapshot?: boolean;
+    snapshotOf?: string | null;
+    snapshotAt?: string | null;
+    snapshotPageId?: string;
+    snapshotPageLabel?: string;
+    pageCount?: number;
+    textLabels?: string[];
+    snapshotCard?: {
+        prompt?: string;
+        customTexts?: Record<string, string>;
+        customTextActive?: string;
+        size?: string;
+        aspectRatio?: string;
+        count?: number;
+        seed?: string;
+        seedFixed?: string;
+    } | null;
+    params?: FreeWorkflowParam[];
+    selfLift?: FreeWorkflowSelfLift | null;
+    passes?: FreeWorkflowPass[];
+    stages?: Array<{ id: string; label: string; nodes: string[]; defaultOff?: boolean }>;
+    flows?: Array<{ id: string; label?: string; nodeIds: string[]; outputs: string[]; main: boolean; maskInputs?: number; stages?: Array<{ id: string; label: string; nodes: string[]; defaultOff?: boolean }>; problems?: FreeWorkflowProblem[]; textInputs?: FreeWorkflowTextInput[]; primaryText?: FreeWorkflowTextBinding | null }>;
+    problems?: FreeWorkflowProblem[];
     warnings: string[];
 };
 
@@ -98,6 +128,68 @@ export type FreeWorkflowGraphNode = {
 export type FreeWorkflowGraph = {
     nodes: FreeWorkflowGraphNode[];
     links: Array<{ from: string; to: string; input: string }>;
+};
+
+
+// ── 上游 v0.25.x 新增类型（纯追加，不改动本地既有类型）────────────────────
+/** 参数披露项：卡片上可展示/编辑的节点输入。 */
+export type FreeWorkflowParam = {
+    key: string;
+    node: string;
+    input: string;
+    label: string;
+    group: string;
+    type: "number" | "select" | "boolean" | "string";
+    value: string | number | boolean;
+    options?: string[];
+    min?: number;
+    max?: number;
+    step?: number;
+};
+
+export type FreeWorkflowPass = { index: number; node: string; label: string; steps: number | null };
+export type FreeWorkflowSelfLift = { node: string; lowSteps: number | null; totalSteps: number | null; highSteps: number | null };
+/** 工作流体检问题项。 */
+export type FreeWorkflowProblem = { node: string; title: string; input: string; reason: string };
+export type FreeWorkflowTextBinding = { node: string; input: string; label?: string };
+
+/** 只读体检结果（GET /api/free-workflows/:id/health）。 */
+export type FreeWorkflowHealth = {
+    issues: FreeWorkflowProblem[];
+    missingNodes: string[];
+    /** 缺失的模型/选项（combo 值不在 object_info 选项里）。 */
+    missingModels?: Array<{ node: string; input: string; value: string; classType: string; options: string[] }>;
+    flowId?: string;
+    warnings?: string[];
+    objectInfoReady?: boolean;
+};
+
+/** 干跑校验结果（POST /api/free-workflows/:id/validate）。 */
+export type FreeWorkflowValidation = {
+    valid: boolean;
+    errors: Array<{ node?: string; input?: string; reason: string }>;
+    request: {
+        entryId: string;
+        flowId: string;
+        nodeCount: number;
+        outputs: Array<{ node: string; title: string; classType: string }>;
+        prompt: string;
+        texts: Array<{ node: string; input: string; value: string }>;
+        primaryText: FreeWorkflowTextBinding | null;
+        size: string;
+        seed: unknown;
+        count: unknown;
+        images: string[];
+    };
+};
+
+export type FreeWorkflowSnapshotDetail = {
+    id: string;
+    snapshotOf: string | null;
+    snapshotAt: string | null;
+    pageId: string;
+    config: unknown;
+    card: unknown;
 };
 
 export type FreeWorkflowRequest = {
@@ -160,10 +252,10 @@ export async function importFreeWorkflow(config: AiConfig, relative: string): Pr
     }
 }
 
-export async function syncFreeWorkflow(config: AiConfig, id: string): Promise<{ changed: boolean; workflow: FreeWorkflowSummary }> {
+export async function syncFreeWorkflow(config: AiConfig, id: string, force = false): Promise<{ changed: boolean; workflow: FreeWorkflowSummary }> {
     const root = gatewayRoot(config);
     try {
-        const response = await axios.post<{ changed?: boolean; workflow?: FreeWorkflowSummary }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/sync`, {}, { timeout: 120000 });
+        const response = await axios.post<{ changed?: boolean; workflow?: FreeWorkflowSummary }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/sync`, { force }, { timeout: 120000 });
         if (!response.data?.workflow) throw new Error("同步工作流失败");
         return { changed: Boolean(response.data.changed), workflow: response.data.workflow };
     } catch (error) {
@@ -371,5 +463,138 @@ export async function createFreeWorkflowVideoTask(config: AiConfig, id: string, 
         return response.data.id;
     } catch (error) {
         throw new Error(readError(error, "自由工作流视频任务创建失败"));
+    }
+}
+
+
+// ── G8 完整图类型（上游结构，与本地 FreeWorkflowGraph 并存）─────────────────
+// 本地 FreeWorkflowGraph 是「简化可绑定视图」（kind/classType），
+// 这里的 FreeWorkflowFullGraph 是「完整图」（type/class_type/位置/连线），
+// 两者用途不同，互不替代。
+export type FreeWorkflowFullGraphInput = {
+    name: string;
+    label: string;
+    linked: boolean;
+    literal: boolean;
+    value: string | number | boolean | null;
+    type: "number" | "select" | "boolean" | "string" | "json" | "linked";
+    options: string[];
+};
+
+export type FreeWorkflowFullGraphNode = {
+    id: string;
+    class_type: string;
+    title: string;
+    pos: { x: number; y: number } | null;
+    size: { width: number; height: number } | null;
+    inputs: FreeWorkflowFullGraphInput[];
+};
+
+export type FreeWorkflowFullGraph = {
+    id?: string;
+    comfyUrl?: string;
+    name?: string;
+    sourceFormat?: "ui" | "api";
+    nodes: FreeWorkflowFullGraphNode[];
+    links: Array<{ from: string; to: string; toInput: string }>;
+    params?: FreeWorkflowParam[];
+    warnings?: string[];
+    problems?: FreeWorkflowProblem[];
+};
+
+// ── 上游 v0.25.x 新增接口（流程分页 / 参数披露 / 体检 / 干跑 / 快照）──────────
+
+/** G8：完整图描述（节点位置 + 连线 + 参数 + 体检问题）。 */
+export async function fetchFreeWorkflowFullGraph(config: AiConfig, id: string, flowId = ""): Promise<FreeWorkflowFullGraph> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.get<{ graph: FreeWorkflowFullGraph }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/full-graph`, { params: flowId ? { flowId } : undefined });
+        return response.data?.graph || { nodes: [], links: [] };
+    } catch (error) {
+        throw new Error(readError(error, "读取工作流完整图失败"));
+    }
+}
+
+/** G9：写入参数披露项。 */
+export async function saveFreeWorkflowParams(config: AiConfig, id: string, params: FreeWorkflowParam[]): Promise<FreeWorkflowSummary> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.post<{ workflow: FreeWorkflowSummary }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/params`, { params });
+        return response.data.workflow;
+    } catch (error) {
+        throw new Error(readError(error, "保存参数披露项失败"));
+    }
+}
+
+/** G5：只读体检。 */
+export async function fetchFreeWorkflowHealth(config: AiConfig, id: string, flowId = ""): Promise<FreeWorkflowHealth> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.get<FreeWorkflowHealth>(`${root}/api/free-workflows/${encodeURIComponent(id)}/health`, { params: flowId ? { flowId } : undefined });
+        return response.data;
+    } catch (error) {
+        throw new Error(readError(error, "工作流体检失败"));
+    }
+}
+
+/** G7：干跑校验（不提交、不跑 GPU）。 */
+export async function validateFreeWorkflow(config: AiConfig, id: string, request: Partial<FreeWorkflowRequest> & { flowId?: string; texts?: unknown[] } = {}): Promise<FreeWorkflowValidation> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.post<FreeWorkflowValidation>(`${root}/api/free-workflows/${encodeURIComponent(id)}/validate`, request);
+        return response.data;
+    } catch (error) {
+        throw new Error(readError(error, "工作流校验失败"));
+    }
+}
+
+/** G10：创建快照。 */
+export async function createFreeWorkflowSnapshot(config: AiConfig, id: string, payload: { name?: string; config?: unknown; card?: unknown; mode?: string; flowId?: string } = {}): Promise<FreeWorkflowSummary> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.post<{ snapshot: FreeWorkflowSummary }>(`${root}/api/free-workflows/${encodeURIComponent(id)}/snapshots`, payload);
+        return response.data.snapshot;
+    } catch (error) {
+        throw new Error(readError(error, "创建快照失败"));
+    }
+}
+
+/** G10：读取快照详情。 */
+export async function fetchFreeWorkflowSnapshot(config: AiConfig, snapshotId: string): Promise<FreeWorkflowSnapshotDetail> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.get<{ snapshot: FreeWorkflowSnapshotDetail }>(`${root}/api/free-workflows/${encodeURIComponent(snapshotId)}/snapshot`);
+        return response.data.snapshot;
+    } catch (error) {
+        throw new Error(readError(error, "读取快照失败"));
+    }
+}
+
+/** 打开目标：兼容上游命名，结构与本地 freeWorkflowComfyUrl 一致。 */
+export type FreeWorkflowOpenTarget = {
+    url: string;
+    name: string;
+    sourceRel: string;
+    sourceFormat: "ui" | "api";
+    bridge: boolean;
+    bridgeReason?: string;
+};
+
+/** 取得在 ComfyUI 中打开该工作流的地址。 */
+export async function openFreeWorkflow(config: AiConfig, id: string): Promise<FreeWorkflowOpenTarget> {
+    const target = await freeWorkflowComfyUrl(config, id);
+    if (!target?.url) throw new Error("无法获取 ComfyUI 工作流地址");
+    return target;
+}
+
+/** 上传本地 JSON 直接导入为自由卡（不走 ComfyUI 工作流目录）。 */
+export async function importUploadedFreeWorkflow(config: AiConfig, name: string, content: string): Promise<FreeWorkflowSummary> {
+    const root = gatewayRoot(config);
+    try {
+        const response = await axios.post<{ workflow?: FreeWorkflowSummary }>(`${root}/api/free-workflows/import-upload`, { name, content }, { timeout: 120000 });
+        if (!response.data?.workflow) throw new Error("工作流导入失败");
+        return response.data.workflow;
+    } catch (error) {
+        throw new Error(readError(error, "工作流导入失败"));
     }
 }

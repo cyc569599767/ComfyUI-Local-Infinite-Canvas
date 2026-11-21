@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { ImageSettingsTheme, SeedSetting } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { videoWorkflowId, baseVideoWorkflowId } from "@/lib/canvas/video-model-mode";
+import { videoWorkflowId, baseVideoWorkflowId, isMultiModeVideoWorkflow } from "@/lib/canvas/video-model-mode";
 import { clampVideoSeconds, computeVideoSize, draftLongSideSize, draftShortSideSize, inferVideoRatio, isCustomVideoSize, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
 import { type AiConfig } from "@/stores/use-config-store";
 
@@ -433,4 +433,186 @@ function SizePreview({ width, height, color }: { width: number; height: number; 
     const previewWidth = Math.max(10, Math.round((width / longSide) * 26));
     const previewHeight = Math.max(10, Math.round((height / longSide) * 26));
     return <span className="rounded-[3px] border-2" style={{ width: previewWidth, height: previewHeight, borderColor: color }} />;
+}
+
+// ── 上游 v0.25.x 追加：设置块复用的独立控件 ──
+// 本地 VideoSettingsPanel 保持原样，这里额外暴露拆分的单控件，供自定义工作流块编辑器组合。
+type VideoControlProps = {
+    config: AiConfig;
+    onConfigChange: VideoSettingsPanelProps["onConfigChange"];
+    theme: CanvasTheme;
+};
+function videoPanelContext(config: AiConfig) {
+    const workflowId = baseVideoWorkflowId(videoWorkflowId(config, config.model));
+    const multiModeEntry = isMultiModeVideoWorkflow(workflowId);
+    const videoMode = normalizeVideoModeValue(config.videoMode);
+    const isViggleSwap = workflowId === "video-h3-viggle-swap";
+    const viggleMode = String(config.videoViggleMode || "swap") === "edit" ? "edit" : "swap";
+    const isH3Reference = workflowId === "video-h3-character-swap" || isViggleSwap || (multiModeEntry && videoMode === "reference");
+    const isFastH3 = workflowId === "video-h3-fast";
+    const isH3Frames = isFastH3 || (multiModeEntry && videoMode === "frames");
+    const isH3Text = multiModeEntry && videoMode === "text";
+    const isH3 = multiModeEntry || isFastH3 || workflowId === "video-h3-character-swap";
+    const h3ModeOptions = [
+        { value: "text" as const, labelKey: "textH3" },
+        { value: "frames" as const, labelKey: "framesH3" },
+        { value: "reference" as const, labelKey: "referenceH3" },
+    ];
+    const modeOptions = isViggleSwap ? h3ModeOptions.filter((item) => item.value === "reference") : isH3 ? h3ModeOptions : videoModeOptions;
+    return { isH3, isFastH3, isH3Frames, isH3Text, isH3Reference, isViggleSwap, viggleMode, multiModeEntry, videoMode, modeOptions };
+}
+
+export function VideoResolutionControl({ config, onConfigChange, theme }: VideoControlProps) {
+    const resolution = parseVideoResolution(config.vquality);
+    const ratio = inferVideoRatio(config.size || "auto");
+    const select = (next: string) => {
+        onConfigChange("vquality", next);
+        if (ratio !== "auto") onConfigChange("size", computeVideoSize(next, ratio));
+    };
+    return (
+        <div className="grid grid-cols-4 gap-2.5">
+            {resolutionOptions.map((item) => (
+                <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => select(item.value)}>
+                    {item.label}
+                </OptionPill>
+            ))}
+            <ResolutionInput value={resolution} theme={theme} onChange={select} />
+        </div>
+    );
+}
+
+export function VideoSizeControl({ config, onConfigChange, theme }: VideoControlProps) {
+    const resolution = parseVideoResolution(config.vquality);
+    const ratio = inferVideoRatio(config.size || "auto");
+    const dimensions = readVideoDimensions(config.size || "auto", resolution, ratio);
+    return (
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
+            <DimensionInput prefix="W" value={dimensions.width} disabled={ratio === "auto"} theme={theme} onChange={(value) => updateDimension("width", value, dimensions, onConfigChange)} />
+            <span className="text-lg opacity-45">↔</span>
+            <DimensionInput prefix="H" value={dimensions.height} disabled={ratio === "auto"} theme={theme} onChange={(value) => updateDimension("height", value, dimensions, onConfigChange)} />
+        </div>
+    );
+}
+
+export function VideoRatioControl({ config, onConfigChange, theme }: VideoControlProps) {
+    const { t } = useTranslation();
+    const resolution = parseVideoResolution(config.vquality);
+    const ratio = inferVideoRatio(config.size || "auto");
+    return (
+        <div className="grid grid-cols-4 gap-2.5">
+            {videoRatioOptions.map((item) => (
+                <button
+                    key={item.value}
+                    type="button"
+                    className="flex h-[64px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent text-xs transition hover:opacity-80"
+                    style={{ borderColor: ratio === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                        onConfigChange("vquality", resolution);
+                        onConfigChange("size", computeVideoSize(resolution, item.value));
+                    }}
+                >
+                    <SizePreview width={item.width} height={item.height} color={theme.node.text} />
+                    <span>{item.value === "auto" ? t("settingsPanels.common.auto") : item.value}</span>
+                </button>
+            ))}
+        </div>
+    );
+}
+
+export function VideoSecondsControl({ config, onConfigChange, theme, durationLocked = false, sourceDurationSeconds }: VideoControlProps & { durationLocked?: boolean; sourceDurationSeconds?: number }) {
+    const { t } = useTranslation();
+    const seconds = Number(clampVideoSeconds(config.videoSeconds || "6"));
+    if (durationLocked) {
+        return (
+            <div className="flex h-8 items-center gap-1.5 text-xs" style={{ color: theme.node.muted }}>
+                <Lock className="size-3.5" />
+                <span>{t("settingsPanels.video.followSource")}{sourceDurationSeconds != null ? ` · ${sourceDurationSeconds.toFixed(1)}s` : ""}</span>
+            </div>
+        );
+    }
+    return (
+        <div className="flex items-center gap-3" onMouseDown={(event) => event.stopPropagation()}>
+            <Slider className="min-w-0 flex-1" min={VIDEO_SECONDS_MIN} max={VIDEO_SECONDS_MAX} step={1} value={seconds} onChange={(value) => onConfigChange("videoSeconds", String(Array.isArray(value) ? value[0] : value))} />
+            <SecondsInput value={seconds} theme={theme} onCommit={(value) => onConfigChange("videoSeconds", String(value))} />
+            <span className="shrink-0 text-sm" style={{ color: theme.node.muted }}>s</span>
+        </div>
+    );
+}
+
+export function VideoInterpolationControl({ config, onConfigChange, theme }: VideoControlProps) {
+    const { t } = useTranslation();
+    return (
+        <div className="grid grid-cols-3 gap-2.5">
+            {[
+                { value: "off", labelKey: "interpolationOff" },
+                { value: "2x", labelKey: "interpolation2x" },
+                { value: "3x", labelKey: "interpolation3x" },
+            ].map((item) => (
+                <OptionPill key={item.value} selected={(config.videoInterpolation || "off") === item.value} theme={theme} onClick={() => onConfigChange("videoInterpolation", item.value)}>
+                    {t(`settingsPanels.video.${item.labelKey}`)}
+                </OptionPill>
+            ))}
+        </div>
+    );
+}
+
+export function VideoSelfLiftControl({ config, onConfigChange, theme }: VideoControlProps) {
+    const { t } = useTranslation();
+    return (
+        <div className="space-y-2.5">
+            <div className="grid grid-cols-2 gap-2.5">
+                {[
+                    { value: "fast", labelKey: "selfLiftFast" },
+                    { value: "quality", labelKey: "selfLiftQuality" },
+                ].map((item) => (
+                    <OptionPill key={item.value} selected={(config.videoSelfLiftMode || "fast") === item.value} theme={theme} onClick={() => onConfigChange("videoSelfLiftMode", item.value)}>
+                        {t(`settingsPanels.video.${item.labelKey}`)}
+                    </OptionPill>
+                ))}
+            </div>
+            <div className="text-xs leading-4" style={{ color: theme.node.muted }}>{t("settingsPanels.video.selfLiftHint")}</div>
+        </div>
+    );
+}
+
+export function VideoModeControl({ config, onConfigChange, theme, frameMode = "both", onFrameModeChange, onModeChange }: VideoControlProps & { frameMode?: "first" | "last" | "both"; onFrameModeChange?: (value: "first" | "last" | "both") => void; onModeChange?: (value: "text" | "frames" | "reference") => void }) {
+    const { t } = useTranslation();
+    const { isH3, isFastH3, isH3Frames, videoMode, modeOptions } = videoPanelContext(config);
+    return (
+        <div className="space-y-2.5">
+            <div className={modeOptions.length > 1 ? "grid grid-cols-2 gap-2.5" : "grid grid-cols-1 gap-2.5"}>
+                {modeOptions.map((item) => (
+                    <OptionPill
+                        key={item.value}
+                        selected={videoMode === item.value}
+                        theme={theme}
+                        onClick={() => {
+                            onConfigChange("videoMode", item.value);
+                            if (isH3) onModeChange?.(item.value as "text" | "frames" | "reference");
+                        }}
+                    >
+                        {t(`settingsPanels.video.modes.${item.labelKey}`)}
+                    </OptionPill>
+                ))}
+            </div>
+            {isH3 ? (
+                <div className="text-xs leading-4" style={{ color: theme.node.muted }}>
+                    {t(`settingsPanels.video.modes.${isFastH3 && videoMode === "reference" ? "fastReferenceHint" : videoMode === "text" ? "textHint" : videoMode === "frames" ? "framesHint" : "referenceHint"}`)}
+                </div>
+            ) : null}
+            {isH3Frames && videoMode === "frames" && onFrameModeChange ? (
+                <div className="space-y-2 pt-1">
+                    <div className="text-xs font-medium" style={{ color: theme.node.muted }}>{t("settingsPanels.video.modes.framePosition")}</div>
+                    <div className="grid grid-cols-3 gap-2">
+                        {h3FrameModeOptions.map((item) => (
+                            <OptionPill key={item.value} selected={frameMode === item.value} theme={theme} onClick={() => onFrameModeChange(item.value)}>
+                                {t(`settingsPanels.video.modes.${item.labelKey}`)}
+                            </OptionPill>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+        </div>
+    );
 }

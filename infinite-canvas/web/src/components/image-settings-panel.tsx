@@ -27,6 +27,10 @@ type ImageSettingsPanelProps = {
     theme: CanvasTheme;
     showTitle?: boolean;
     showSize?: boolean;
+    // 上游把「尺寸/分辨率」「比例」拆成独立开关；本地用 showSize 统一控制，
+    // 这里保留字段以兼容调用方，undefined 时回落到 showSize。
+    showResolution?: boolean;
+    showRatio?: boolean;
     showTransparent?: boolean;
     showCount?: boolean;
     showSeed?: boolean;

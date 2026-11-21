@@ -76,6 +76,13 @@ export type AiConfig = {
     videoMode: string;
     videoInterpolation?: string;
     videoSelfLiftMode?: string;
+    // ── 上游 v0.25.x 追加：Viggle Remake 参数 ──
+    videoPins?: string;
+    videoSegmentSeconds?: string;
+    videoSage?: string;
+    videoViggleMode?: string;
+    videoSwapTarget?: string;
+    videoSwapTargetBox?: string;
     promptApiEngine?: string;
     promptOptimizeLanguage?: "zh" | "en";
     promptCloudBaseUrl?: string;
@@ -188,6 +195,12 @@ const cloudDefaultConfig: AiConfig = {
     videoMode: "frames",
     videoInterpolation: "off",
     videoSelfLiftMode: "fast",
+    videoPins: "",
+    videoSegmentSeconds: "12",
+    videoSage: "auto",
+    videoViggleMode: "swap",
+    videoSwapTarget: "",
+    videoSwapTargetBox: "",
     promptApiEngine: "local",
     promptOptimizeLanguage: "zh",
     promptCloudBaseUrl: "",

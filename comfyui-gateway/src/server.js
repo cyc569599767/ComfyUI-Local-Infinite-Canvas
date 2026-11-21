@@ -45,7 +45,7 @@ import { createStoryboardAi } from "./storyboard-ai.js";
 import { createNovelStore } from "./novel-projects.js";
 import { createNovelAi } from "./novel-ai.js";
 import { createBundleManager } from "./workflow-bundle-manager.js";
-import { describeWorkflowGraph } from "./ui-workflow.js";
+import { buildWorkflowGraph, describeWorkflowGraph, detectWorkflowProblems } from "./ui-workflow.js";
 import { applyMossLayoutPrompt } from "./layout-prompt.js";
 import { collectOutputFiles, runAudio, runImage, runVideo, runWorkflow } from "./runner.js";
 import { createSkinUnlockStore } from "./skin-unlocks.js";
@@ -589,6 +589,13 @@ export async function createGatewayApp(overrides = {}) {
     maxWorkflowBytes: config.maxWorkflowBytes,
   });
   await freeWorkflows.load();
+  // G1：后台轮询 ComfyUI 工作流目录，源文件改了就防抖同步（不阻塞启动）。
+  // 定时器 unref，退出时不需要额外清理；sync 失败只记 warn。
+  freeWorkflows.startWatching({
+    intervalMs: config.freeWorkflowWatchMs ?? 3000,
+    debounceMs: config.freeWorkflowSyncDebounceMs ?? 1200,
+    onSynced: (entry) => logger.info(`free workflow auto-synced ${entry?.name || entry?.id || ""}`),
+  });
   const workflowApps = createWorkflowAppStore({ dataDir: config.dataDir, logger });
   await workflowApps.load();
   const storyboards = createStoryboardStore({ dataDir: config.dataDir, logger });
@@ -1798,6 +1805,15 @@ export async function createGatewayApp(overrides = {}) {
     }
   });
 
+  // 直接上传 JSON 导入自由卡（前端「导入对话框」用）。
+  app.post("/api/free-workflows/import-upload", express.json({ limit: "8mb" }), async (req, res) => {
+    try {
+      const entry = await freeWorkflows.importUploaded(req.body?.name, req.body?.content);
+      res.json({ workflow: await freeWorkflows.publicEntry(entry) });
+    } catch (error) {
+      throw new HttpError(`工作流导入失败：${error.message}`, { status: 400, code: "free_workflow_import_failed" });
+    }
+  });
   app.get("/api/free-workflows/:id", async (req, res) => {
     const entry = requireFreeWorkflow(req.params.id);
     res.json({ workflow: await freeWorkflows.publicEntry(entry) });
@@ -1829,9 +1845,58 @@ export async function createGatewayApp(overrides = {}) {
     });
   });
 
-  // 固定到卡片上的配置项。只接受工作流里真实存在且未被连线的输入。
-  app.patch("/api/free-workflows/:id/bindings", async (req, res) => {
+  // G8/G9：完整图描述（节点位置+连线+参数），供「流程分页 + 参数披露」使用。
+  // flowId 为空时用主流程；与上面的简化图并存，互不影响。
+  app.get("/api/free-workflows/:id/full-graph", async (req, res) => {
     const entry = requireFreeWorkflow(req.params.id);
+    await freeWorkflows.ensureBindings(entry);
+    res.json({ graph: await freeWorkflows.graph(entry, String(req.query.flowId || "")) });
+  });
+
+  // G9：写入参数披露项（保留用户已有的值，不覆盖同 key 的已改值）。
+  app.post("/api/free-workflows/:id/params", async (req, res) => {
+    const entry = await freeWorkflows.setParams(req.params.id, req.body?.params);
+    res.json({ workflow: await freeWorkflows.publicEntry(entry) });
+  });
+
+  // G7：干跑校验（不提交、不跑 GPU）。
+  app.post("/api/free-workflows/:id/validate", async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    await freeWorkflows.ensureBindings(entry);
+    res.json(await freeWorkflows.validate(entry, req.body || {}));
+  });
+
+  // G10：快照列表 / 创建 / 读取。
+  app.post("/api/free-workflows/:id/snapshots", async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    const raw = await freeWorkflows.readRawWorkflow(entry).catch(() => null);
+    if (!raw) throw new HttpError("源工作流文件不可读，无法创建快照", { status: 409, code: "free_workflow_read_failed" });
+    const snapshot = await freeWorkflows.createSnapshot(req.params.id, req.body || {});
+    res.json({ snapshot: await freeWorkflows.publicEntry(snapshot) });
+  });
+
+  app.get("/api/free-workflows/:id/snapshot", async (req, res) => {
+    const snapshot = freeWorkflows.getSnapshot(req.params.id);
+    if (!snapshot) throw new HttpError("快照不存在", { status: 404, code: "snapshot_not_found" });
+    res.json({ snapshot });
+  });
+  // 工作流体检（只读）：缺自定义节点 / combo 值不在选项 / 必填为空 / 不可达输出。
+  // 不提交 ComfyUI，不跑 GPU；用于导入后与生成前的静态诊断。
+  app.get("/api/free-workflows/:id/health", async (req, res) => {
+    const entry = requireFreeWorkflow(req.params.id);
+    await freeWorkflows.ensureBindings(entry);
+    const objectInfo = await comfy.objectInfo().catch(() => ({}));
+    const problems = detectWorkflowProblems(entry.workflow, objectInfo);
+    const missingNodes = [...new Set(problems.filter((item) => !item.input).map((item) => item.title))];
+    res.json({
+      issues: problems,
+      missingNodes,
+      flowId: String(req.query.flowId || ""),
+    });
+  });
+
+  // 固定到卡片上的配置项。只接受工作流里真实存在且未被连线的输入。
+  app.patch("/api/free-workflows/:id/bindings", async (req, res) => {    const entry = requireFreeWorkflow(req.params.id);
     try {
       const updated = await freeWorkflows.setCustomBindings(entry.id, req.body?.bindings);
       res.json({ workflow: await freeWorkflows.publicEntry(updated) });
@@ -1860,7 +1925,8 @@ export async function createGatewayApp(overrides = {}) {
 
   app.post("/api/free-workflows/:id/sync", async (req, res) => {
     try {
-      const result = await freeWorkflows.sync(req.params.id);
+      // force：源文件签名没变也重新转换（前端重新扫描时用）。
+      const result = await freeWorkflows.sync(req.params.id, Boolean(req.body?.force));
       res.json({ changed: result.changed, workflow: await freeWorkflows.publicEntry(result.entry) });
     } catch (error) {
       throw new HttpError(`同步工作流失败：${error.message}`, { status: 409, code: "free_workflow_sync_failed" });

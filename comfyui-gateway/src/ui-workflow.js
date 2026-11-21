@@ -14,6 +14,18 @@ const REROUTE_TYPE = "Reroute";
 const PRIMITIVE_TYPE = "PrimitiveNode";
 const SET_NODE_TYPE = "SetNode";
 const GET_NODE_TYPE = "GetNode";
+// 社区包的前端虚拟节点：easy 的存取节点与 ComfyUI 自带 Set/Get 同构；
+// 孤海滑块是把控件值喂给下游输入的「值节点」，本体不执行。
+const EASY_SET_TYPE = "easy setNode";
+const EASY_GET_TYPE = "easy getNode";
+const isSetNode = (node) => node?.type === SET_NODE_TYPE || node?.type === EASY_SET_TYPE;
+const isGetNode = (node) => node?.type === GET_NODE_TYPE || node?.type === EASY_GET_TYPE;
+const isValueNode = (node) => node?.type === "GoohaiUniversalSlider";
+const valueNodeValue = (node) => {
+  const named = node?.widgets_values_named;
+  if (isPlainObject(named) && named["值"] !== undefined) return named["值"];
+  return Array.isArray(node?.widgets_values) ? node.widgets_values[0] : undefined;
+};
 const BYPASS_MODE = 4;
 const MUTE_MODE = 2;
 
@@ -121,6 +133,25 @@ function inputSpecs(objectInfo, classType) {
   return specs;
 }
 
+// API 形态的连线固定是 [源节点id, 输出槽位]，用于区分「连线」和「字面值」。
+export function isInputLink(value) {
+  return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && Number.isInteger(value[1]);
+}
+
+// 只取某个输入的声明类型（不解析 opts），体检与可选阶段识别都要用。
+function inputTypeOf(objectInfo, classType, name) {
+  const info = objectInfo?.[classType]?.input;
+  const spec = info?.required?.[name] ?? info?.optional?.[name];
+  if (!spec) return "";
+  const t = Array.isArray(spec) ? spec[0] : spec?.type;
+  return Array.isArray(t) ? "COMBO" : String(t || "");
+}
+
+function outputTypesOf(objectInfo, classType) {
+  const outputs = objectInfo?.[classType]?.output;
+  return Array.isArray(outputs) ? outputs.map((item) => normalizeType(item)) : [];
+}
+
 const TEXTISH_INPUT_NAMES = new Set(["text", "prompt", "value", "string", "content", "caption", "instruction"]);
 const NON_TEXT_INPUT_NAMES = new Set([
   "filename_prefix",
@@ -215,10 +246,13 @@ function setGetName(node) {
   return typeof values[0] === "string" ? values[0].trim() : "";
 }
 
-export function convertUiWorkflow(ui, objectInfo = {}) {
+export function convertUiWorkflow(ui, objectInfo = {}, options = {}) {
   if (!isUiWorkflow(ui)) throw new Error("不是 ComfyUI UI 工作流（需要 nodes + links）");
+  // G2：先用 flattenSubgraphs 把 definitions.subgraphs 展开成主图节点，再走原有转换。
+  // 这样本地转换核心（Set/Get、Primitive、Reroute、组开关）行为完全不变，
+  // 只是不再因为「有子图」就直接拒绝。
   if (Array.isArray(ui.definitions?.subgraphs) && ui.definitions.subgraphs.length) {
-    throw new Error("暂不支持包含 Subgraph 的工作流；请在 ComfyUI 里展开子图后保存，或导出 API 格式");
+    ui = flattenSubgraphs(ui);
   }
   if ((ui.nodes || []).some((node) => /^workflow>|^Subgraph/i.test(String(node.type || "")))) {
     throw new Error("暂不支持子图/组节点工作流；请展开后保存，或导出 API 格式");
@@ -592,8 +626,465 @@ export function detectFreeBindings(workflow, objectInfo = {}) {
     ratios,
     batches,
     seeds,
+    // G4：可选阶段（超分/插帧/音频等可关闭分支），前端据此渲染阶段开关。
+    // 只增字段，不改动上面的既有字段与 audios（本地绑定链依赖它）。
+    stages: detectOptionalStages(workflow, objectInfo),
     warnings,
   };
+}
+
+// 坐标/尺寸/标签的三个宽容解析：UI 工作流里 pos 可能是 [x,y] 也可能是 {x,y}。
+function graphPoint(value) {
+  if (Array.isArray(value) && value.length >= 2) return { x: Number(value[0]) || 0, y: Number(value[1]) || 0 };
+  if (value && typeof value === "object") return { x: Number(value.x ?? value[0]) || 0, y: Number(value.y ?? value[1]) || 0 };
+  return null;
+}
+
+function graphSize(value) {
+  if (Array.isArray(value) && value.length >= 2) return { width: Number(value[0]) || 0, height: Number(value[1]) || 0 };
+  if (value && typeof value === "object") return { width: Number(value.width ?? value[0]) || 0, height: Number(value.height ?? value[1]) || 0 };
+  return null;
+}
+
+function graphInputLabel(name) {
+  return String(name || "").replace(/_/g, " ");
+}
+// 上游 v0.25.x 的完整图描述：同时给出节点位置/尺寸与连线，供自由卡「流程分页 + 参数披露」使用。
+// 与下面的 describeWorkflowGraph 并存：后者是画布内嵌可视化用的简化视图，行为保持不变。
+export function buildWorkflowGraph(workflow, uiWorkflow = null, objectInfo = {}) {
+  const uiNodes = new Map((uiWorkflow?.nodes || []).map((node) => [String(node.id), node]));
+  const nodes = [];
+  const links = [];
+  for (const [id, node] of Object.entries(workflow || {})) {
+    if (!node || typeof node !== "object" || typeof node.class_type !== "string") continue;
+    const uiNode = uiNodes.get(String(id));
+    const info = objectInfo?.[node.class_type];
+    const inputs = [];
+    for (const [name, value] of Object.entries(node.inputs || {})) {
+      const linked = isInputLink(value);
+      if (linked) {
+        links.push({ from: String(value[0]), to: String(id), toInput: name });
+        inputs.push({ name, label: graphInputLabel(name), linked: true, literal: false, value: null, type: "linked", options: [] });
+        continue;
+      }
+      const options = comboOptions(objectInfo, node.class_type, name).map(String);
+      const scalar = value === null || ["string", "number", "boolean"].includes(typeof value);
+      inputs.push({
+        name,
+        label: graphInputLabel(name),
+        linked: false,
+        literal: scalar,
+        value: scalar ? value : null,
+        type: options.length ? "select" : typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : scalar ? "string" : "json",
+        options,
+      });
+    }
+    nodes.push({
+      id: String(id),
+      class_type: node.class_type,
+      title: String(uiNode?.title || node._meta?.title || info?.display_name || node.class_type),
+      pos: graphPoint(uiNode?.pos),
+      size: graphSize(uiNode?.size),
+      inputs,
+    });
+  }
+  return { nodes, links };
+}
+
+export function flattenSubgraphs(ui, depth = 0) {
+  const defs = new Map((ui.definitions?.subgraphs || []).map((def) => [String(def.id), def]));
+  if (!defs.size || depth > 8) return ui;
+  const parseLink = (raw) =>
+    Array.isArray(raw)
+      ? { id: raw[0], from: raw[1], fromSlot: raw[2], to: raw[3], toSlot: raw[4], type: raw[5] }
+      : { id: raw?.id, from: raw?.origin_id, fromSlot: raw?.origin_slot, to: raw?.target_id, toSlot: raw?.target_slot, type: raw?.type };
+  const linkById = new Map();
+  const collect = (links) => {
+    for (const raw of links || []) {
+      const link = parseLink(raw);
+      if (link.id === undefined || link.id === null) continue;
+      linkById.set(String(link.id), link);
+    }
+  };
+  collect(ui.links);
+  for (const def of defs.values()) collect(def.links);
+
+  const outNodes = [];
+  const connectors = [];
+  const widgetBindings = [];
+  const instances = new Map();
+
+  const renameScope = (node, prefix) => {
+    if (!prefix || (!isSetNode(node) && !isGetNode(node))) return;
+    const name = setGetName(node);
+    if (!name || name.startsWith(prefix)) return;
+    const next = prefix + name;
+    if (isPlainObject(node.widgets_values_named)) {
+      for (const key of ["name", "variable", "value", "text"]) {
+        if (typeof node.widgets_values_named[key] === "string") node.widgets_values_named[key] = next;
+      }
+    }
+    if (Array.isArray(node.widgets_values) && typeof node.widgets_values[0] === "string") node.widgets_values[0] = next;
+  };
+
+  const expand = (scopeNodes, prefix) => {
+    for (const raw of scopeNodes || []) {
+      const id = prefix + String(raw.id);
+      const type = String(raw.type || "");
+      const clone = {
+        ...raw,
+        id,
+        inputs: (raw.inputs || []).map((input) => ({ ...input })),
+        outputs: (raw.outputs || []).map((output) => ({ ...output })),
+        widgets_values_named: isPlainObject(raw.widgets_values_named) ? { ...raw.widgets_values_named } : raw.widgets_values_named,
+        widgets_values: Array.isArray(raw.widgets_values) ? [...raw.widgets_values] : raw.widgets_values,
+      };
+      renameScope(clone, prefix);
+      outNodes.push(clone);
+      const def = defs.get(type);
+      if (!def) continue;
+      const innerPrefix = id + ":";
+      const instance = { node: clone, outputMap: new Map() };
+      instances.set(id, instance);
+      const inputIndexOfLink = new Map();
+      (def.inputs || []).forEach((input, index) => {
+        for (const linkId of input.linkIds || []) inputIndexOfLink.set(String(linkId), index);
+      });
+      expand(def.nodes || [], innerPrefix);
+      const inId = String(def.inputNode?.id ?? -10);
+      const outId = String(def.outputNode?.id ?? -20);
+      for (const rawLink of def.links || []) {
+        const link = parseLink(rawLink);
+        if (link.id === undefined || link.id === null) continue;
+        if (String(link.from) === inId) {
+          connectors.push({ fromInput: { instanceId: id, index: inputIndexOfLink.get(String(link.id)) ?? Number(link.fromSlot) }, to: { id: innerPrefix + String(link.to), slot: Number(link.toSlot) }, type: link.type });
+        } else if (String(link.to) === outId) {
+          instance.outputMap.set(Number(link.toSlot), { id: innerPrefix + String(link.from), slot: Number(link.fromSlot) });
+        } else {
+          connectors.push({ from: { id: innerPrefix + String(link.from), slot: Number(link.fromSlot) }, to: { id: innerPrefix + String(link.to), slot: Number(link.toSlot) }, type: link.type });
+        }
+      }
+    }
+  };
+  expand(ui.nodes || [], "");
+
+  for (const raw of ui.links || []) {
+    const link = parseLink(raw);
+    if (link.id === undefined || link.id === null) continue;
+    // 外→实例输入的连线由边界处理，其他照常保留。
+    if (instances.has(String(link.to))) continue;
+    connectors.push({ from: { id: String(link.from), slot: Number(link.fromSlot) }, to: { id: String(link.to), slot: Number(link.toSlot) }, type: link.type });
+  }
+
+  const resolve = (ref) => {
+    let current = ref;
+    for (let guard = 0; guard < 32 && instances.has(current.id); guard += 1) {
+      const next = instances.get(current.id).outputMap.get(current.slot);
+      if (!next) return null;
+      current = next;
+    }
+    return instances.has(current.id) ? null : current;
+  };
+  const widgetSlots = (node) => {
+    const slots = [];
+    (node.inputs || []).forEach((input, index) => {
+      if (input.widget) slots.push(index);
+    });
+    return slots;
+  };
+
+  let linkSeq = 0;
+  const links = [];
+  for (const connector of connectors) {
+    if (connector.fromInput) {
+      const instance = instances.get(connector.fromInput.instanceId);
+      const input = instance?.node.inputs?.[connector.fromInput.index];
+      if (!input) continue;
+      if (input.link === null || input.link === undefined) {
+        widgetBindings.push({ instanceId: connector.fromInput.instanceId, index: connector.fromInput.index, to: connector.to });
+        continue;
+      }
+      const outer = linkById.get(String(input.link));
+      if (!outer) continue;
+      const from = resolve({ id: String(outer.from), slot: Number(outer.fromSlot) });
+      if (!from) continue;
+      links.push({ id: `sg_${++linkSeq}`, from: from.id, fromSlot: from.slot, to: connector.to.id, toSlot: connector.to.slot, type: connector.type });
+      continue;
+    }
+    const from = resolve(connector.from);
+    if (!from) continue;
+    links.push({ id: `sg_${++linkSeq}`, from: from.id, fromSlot: from.slot, to: connector.to.id, toSlot: connector.to.slot, type: connector.type });
+  }
+
+  const kept = outNodes.filter((node) => !instances.has(node.id));
+  const nodeById = new Map(kept.map((node) => [node.id, node]));
+  for (const binding of widgetBindings) {
+    const instance = instances.get(binding.instanceId);
+    const position = widgetSlots(instance.node).indexOf(binding.index);
+    const value = position >= 0 && Array.isArray(instance.node.widgets_values) ? instance.node.widgets_values[position] : undefined;
+    if (value === undefined) continue;
+    const target = nodeById.get(binding.to.id);
+    if (!target) continue;
+    const targetPosition = widgetSlots(target).indexOf(binding.to.slot);
+    if (targetPosition < 0) continue;
+    if (!Array.isArray(target.widgets_values)) target.widgets_values = [];
+    target.widgets_values[targetPosition] = value;
+  }
+
+  const byTarget = new Map();
+  for (const link of links) byTarget.set(`${link.to}\u0000${link.toSlot}`, link.id);
+  for (const node of kept) {
+    (node.inputs || []).forEach((input, index) => {
+      input.link = byTarget.get(`${node.id}\u0000${index}`) ?? null;
+    });
+  }
+  return { ...ui, nodes: kept, links: links.map((link) => [link.id, link.from, link.fromSlot, link.to, link.toSlot, link.type]), definitions: undefined };
+}
+
+// G3 流程分页：把一张 UI 工作流按「连通分量」切成多个流程页，
+// 并用 Jaccard 相似度把新扫描到的页对回旧的页 ID，避免用户配置在重扫后丢失。
+
+export function detectFlowComponents(ui) {
+  const nodes = (ui.nodes || []).filter((node) => !isUiOnlyNode(node) && !NOTE_TYPES.has(node.type));
+  const parent = new Map(nodes.map((node) => [String(node.id), String(node.id)]));
+  const find = (id) => {
+    while (parent.get(id) !== id) {
+      parent.set(id, parent.get(parent.get(id)));
+      id = parent.get(id);
+    }
+    return id;
+  };
+  const union = (a, b) => {
+    if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b));
+  };
+  const links = normalizeLinks(ui.links);
+  for (const node of nodes) {
+    for (const input of node.inputs || []) {
+      if (input.link === null || input.link === undefined) continue;
+      const link = links.get(String(input.link));
+      if (link) union(String(node.id), link.from);
+    }
+  }
+  const named = new Map();
+  for (const node of nodes) {
+    if (!isSetNode(node) && !isGetNode(node)) continue;
+    const name = setGetName(node);
+    if (!name) continue;
+    if (named.has(name)) union(String(node.id), named.get(name));
+    else named.set(name, String(node.id));
+  }
+  const groups = new Map();
+  for (const node of nodes) {
+    const root = find(String(node.id));
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(node);
+  }
+  const list = [...groups.values()]
+    .map((members) => {
+      const outputs = members.filter((node) => (isImageOutputClass(String(node.type)) || isVideoOutputClass(String(node.type))) && (node.inputs || []).some((input) => input.link !== null && input.link !== undefined));
+      const active = members.filter((node) => ![MUTE_MODE, BYPASS_MODE].includes(Number(node.mode || 0))).length;
+      const nodeIds = members.map((node) => String(node.id));
+      return { id: `flow:${[...nodeIds].sort((a, b) => Number(a) - Number(b))[0]}`, nodeIds, outputs: outputs.map((node) => String(node.id)), active };
+    })
+    .filter((item) => item.outputs.length)
+    .sort((a, b) => b.active - a.active || b.nodeIds.length - a.nodeIds.length);
+  const uiGroups = (ui.groups || []).filter((group) => Array.isArray(group.bounding));
+  const nodeById = new Map((ui.nodes || []).map((node) => [String(node.id), node]));
+  const labelOf = (item, index) => {
+    let best = null;
+    for (const group of uiGroups) {
+      const [x, y, w, h] = group.bounding;
+      const count = item.nodeIds.filter((id) => {
+        const pos = nodeById.get(id)?.pos;
+        return Array.isArray(pos) && pos[0] >= x && pos[1] >= y && pos[0] <= x + w && pos[1] <= y + h;
+      }).length;
+      if (count > 0 && (!best || count > best.count)) best = { title: String(group.title || ""), count };
+    }
+    if (best?.title) return best.title;
+    const outputTitle = item.outputs.map((id) => String(nodeById.get(id)?.title || "").trim()).find(Boolean);
+    if (outputTitle) return outputTitle;
+    return index === 0 ? "主流程" : `流程 ${index + 1}`;
+  };
+  const labeled = list.map((item, index) => ({ ...item, main: index === 0, label: labelOf(item, index) }));
+  const counts = new Map();
+  for (const item of labeled) counts.set(item.label, (counts.get(item.label) || 0) + 1);
+  const used = new Map();
+  return labeled.map((item) => {
+    if (counts.get(item.label) === 1) return item;
+    const count = (used.get(item.label) || 0) + 1;
+    used.set(item.label, count);
+    return count === 1 ? item : { ...item, label: `${item.label} · ${count}` };
+  });
+}
+
+export function stabilizeFlowIds(flows, previous = []) {
+  const prev = (Array.isArray(previous) ? previous : []).filter((item) => item && item.id);
+  const nodeIdsOf = (item) => (Array.isArray(item?.nodeIds) ? item.nodeIds : []).map(String);
+  const outputsOf = (item) => (Array.isArray(item?.outputs) ? item.outputs : []).map(String);
+  const signatureOf = (item) => outputsOf(item).sort((a, b) => Number(a) - Number(b)).join(",");
+  const jaccard = (a, b) => {
+    if (!a.length || !b.length) return 0;
+    const left = new Set(a);
+    const right = new Set(b);
+    let common = 0;
+    for (const id of left) if (right.has(id)) common += 1;
+    return common / (left.size + right.size - common);
+  };
+  const used = new Set();
+  const pages = flows.map((flow, index) => {
+    const signature = signatureOf(flow);
+    const nodeIds = nodeIdsOf(flow);
+    const label = String(flow.label || "");
+    const candidates = prev.filter((item) => !used.has(item.id));
+    let match = candidates.find((item) => item.signature && item.signature === signature);
+    if (!match && flow.main) match = candidates.find((item) => item.main);
+    if (!match && label && !/^(主流程|流程 \d+)$/.test(label)) {
+      const byLabel = candidates.filter((item) => String(item.label || "") === label);
+      if (byLabel.length === 1) match = byLabel[0];
+    }
+    if (!match) {
+      const scored = candidates
+        .map((item) => ({ item, score: jaccard(nodeIds, nodeIdsOf(item)) }))
+        .sort((a, b) => b.score - a.score);
+      if (scored[0]?.score >= 0.5) match = scored[0].item;
+    }
+    let id = match?.id;
+    if (!id) {
+      const base = `flow:${[...nodeIds].sort((a, b) => Number(a) - Number(b))[0]}`;
+      id = used.has(base) ? `${base}:${index + 1}` : base;
+    }
+    used.add(id);
+    return { ...flow, internalId: flow.id, id };
+  });
+  const currentIds = new Set(pages.map((flow) => flow.id));
+  const activePages = pages.map((flow) => ({
+    id: flow.id,
+    signature: signatureOf(flow),
+    label: String(flow.label || ""),
+    outputs: outputsOf(flow),
+    nodeIds: nodeIdsOf(flow),
+    main: Boolean(flow.main),
+    active: true,
+  }));
+  const inactive = prev
+    .filter((item) => !currentIds.has(item.id))
+    .map((item) => ({ ...item, active: false }));
+  return { flows: pages, pageIds: [...activePages, ...inactive].slice(0, 80) };
+}
+
+// G4 可选阶段：组被整体 bypass/mute、且组内自带 LoadImage/LoadVideo 的独立分支不参与可选阶段推断。
+export function detectBypassGroups(ui) {
+  const titles = new Set((ui.nodes || []).filter((node) => /fast.*groups.*(bypasser|muter)/i.test(String(node.type || ""))).map((node) => String(node.properties?.matchTitle || "")).filter(Boolean));
+  return (ui.groups || []).filter((group) => titles.has(String(group.title))).map((group) => {
+    const [x, y, w, h] = group.bounding || [];
+    const nodeIds = (ui.nodes || []).filter((node) => Array.isArray(node.pos) && node.pos[0] >= x && node.pos[1] >= y && node.pos[0] <= x + w && node.pos[1] <= y + h).map((node) => String(node.id));
+    const idSet = new Set(nodeIds);
+    const work = (ui.nodes || []).filter((node) => idSet.has(String(node.id)) && !isUiOnlyNode(node) && !NOTE_TYPES.has(node.type) && node.type !== PRIMITIVE_TYPE && node.type !== REROUTE_TYPE && !isSetNode(node) && !isGetNode(node) && !isValueNode(node));
+    const classes = work.map((node) => String(node.type));
+    const off = work.length > 0 && work.every((node) => [MUTE_MODE, BYPASS_MODE].includes(Number(node.mode || 0)));
+    // 组内自带 LoadImage/LoadVideo 的是独立分支，不是主流程的可选阶段；拿不准就不推。
+    const standalone = classes.some((type) => /^Load(Image|Video)/i.test(type));
+    return { title: String(group.title), nodeIds, classes, optional: off && !standalone };
+  });
+}
+
+const CORE_STAGE_CLASSES = /KSampler|SamplerCustom|SelfLift|VAEDecode|VAEEncode|LoadImage|LoadVideo|EmptyLatent|CLIPTextEncode|Loader|Checkpoint|ModelSampling|Conditioning|SaveImage|PreviewImage|SaveVideo|VHS_|ControlNet|SetLatent|Rebatch|JoinImage|ImageBatch/i;
+
+// G4 可选阶段（API 图口径）：从输出节点回溯，找「无下游、可关闭」的预处理分支。
+export function detectOptionalStages(workflow, objectInfo = {}) {
+  const stages = [];
+  const seen = new Set();
+  const entries = Object.entries(workflow || {});
+  const imageInputOf = (node) => {
+    for (const [name, value] of Object.entries(node?.inputs || {})) {
+      const t = inputTypeOf(objectInfo, node.class_type, name);
+      if (isInputLink(value) && (t === "IMAGE" || t === "*")) return { name, link: value };
+    }
+    return null;
+  };
+  for (const [outId, outNode] of entries) {
+    if (!/SaveImage|PreviewImage/i.test(outNode?.class_type || "")) continue;
+    const outImage = Object.entries(outNode.inputs || {}).find(([name, value]) => isInputLink(value) && inputTypeOf(objectInfo, outNode.class_type, name) === "IMAGE");
+    if (!outImage) continue;
+    let producerId = String(outImage[1][0]);
+    const chain = [];
+    const guard = new Set();
+    while (producerId && !guard.has(producerId)) {
+      guard.add(producerId);
+      const node = workflow[producerId];
+      if (!node || CORE_STAGE_CLASSES.test(node.class_type || "")) break;
+      const outs = outputTypesOf(objectInfo, node.class_type);
+      if (!outs.includes("IMAGE") && !outs.includes("*")) break;
+      const imgIn = imageInputOf(node);
+      if (!imgIn) break;
+      chain.push({ id: producerId, node });
+      producerId = String(imgIn.link[0]);
+    }
+    if (!chain.length) continue;
+    const chainIds = new Set(chain.map((c) => c.id));
+    const shared = entries.some(([nodeId, other]) => nodeId !== outId && !chainIds.has(nodeId) && Object.values(other?.inputs || {}).some((value) => isInputLink(value) && chainIds.has(String(value[0]))));
+    if (shared) continue;
+    chain.reverse();
+    const first = chain[0];
+    const entryLink = imageInputOf(first.node).link;
+    const id = chain.map((c) => c.id).join("-");
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const classes = chain.map((c) => c.node.class_type).join(" ");
+    const label = /upscale/i.test(classes) ? "超分 / 精修" : /refine|detail|face/i.test(classes) ? "精修" : "后处理";
+    stages.push({
+      id,
+      label,
+      nodes: chain.map((c) => c.id),
+      entryLink,
+      exit: { node: outId, input: outImage[0] },
+    });
+  }
+  return stages;
+}
+
+// G5 工作流体检（只读）：报缺自定义节点、combo 值不在选项列表、必填输入为空等。
+// 完全不提交 ComfyUI，只读 object_info 做静态比对。
+const PROBLEM_IGNORED_TYPES = /^(Note|MarkdownNote|Reroute|PrimitiveNode|SetNode|GetNode|easy setNode|easy getNode|GoohaiUniversalSlider|Label\b|Fast Groups\b|Image ?Compare|ImageAndMaskPreview|PreviewImage|easy showAnything|Get ?Image ?Size)/i;
+const PROBLEM_DYNAMIC_INPUT = /^COMFY_AUTOGROW/i;
+const PROBLEM_UPLOAD_NODE = /^Load(Image|Video|Audio|Mask)/i;
+
+export function detectWorkflowProblems(workflow, objectInfo = {}) {
+  const problems = [];
+  for (const [nodeId, node] of Object.entries(workflow || {})) {
+    const classType = String(node?.class_type || "");
+    if (!classType || PROBLEM_IGNORED_TYPES.test(classType)) continue;
+    const info = objectInfo?.[classType];
+    const title = String(node?._meta?.title || info?.display_name || classType);
+    if (!info?.input) {
+      problems.push({ node: String(nodeId), title, input: "", reason: "节点类型不在 object_info（缺少自定义节点）" });
+      continue;
+    }
+    const uploadNode = PROBLEM_UPLOAD_NODE.test(classType);
+    for (const spec of inputSpecs(objectInfo, classType)) {
+      const value = node?.inputs?.[spec.name];
+      const type = normalizeType(spec.type);
+      if (type === "COMBO") {
+        if (uploadNode || value === undefined || isInputLink(value)) continue;
+        const options = comboOptions(objectInfo, classType, spec.name).map(String);
+        if (!options.length) {
+          problems.push({ node: String(nodeId), title, input: spec.name, reason: "允许列表为空" });
+        } else if (!options.includes(String(value))) {
+          problems.push({ node: String(nodeId), title, input: spec.name, reason: `当前值「${value}」不在允许列表` });
+        }
+        continue;
+      }
+      if (!spec.required || PROBLEM_DYNAMIC_INPUT.test(type) || value !== undefined) continue;
+      if (isWidgetType(type) && spec.opts?.default !== undefined) continue;
+      problems.push({
+        node: String(nodeId),
+        title,
+        input: spec.name,
+        reason: isWidgetType(type) ? "必需输入未连线且无默认值" : spec.opts?.default !== undefined ? "必需输入缺失（自定义控件）" : "必需输入未连线且无默认值",
+      });
+    }
+  }
+  return problems;
 }
 
 /**
