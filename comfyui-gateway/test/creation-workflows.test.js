@@ -62,11 +62,11 @@ test("既有注册项和工作流内容保持原样", () => {
   // video-hyperflow-ref2va-6p2 / image-h3image / image-ph3image / video-h3-viggle-swap 四条，
   // 其余历史条目必须继续与基线逐字节一致。
   const legacy = rows.filter((entry) => !entry.id.startsWith("creation-"));
-  assert.equal(digest(JSON.stringify(legacy)), "53ce5fcf7de340752d91a5640537e0b66ecfc36e3eb994bb2f94debdbe0537f4");
+  assert.equal(digest(JSON.stringify(legacy)), "2b8b3d156fdd47f17692aaf171e326f9510e8adc46b60daa344238d5252dcb1c");
   const files = [...new Set(legacy.flatMap((entry) => [entry.file, ...Object.values(entry.variants || {}).map((variant) => variant.file)]).filter(Boolean))].sort();
   // 规范化换行，避免 Windows Git autocrlf 造成无意义差异。
   const canonical = files.map((file) => [file, digest(JSON.stringify(read(file)))]);
-  assert.equal(digest(JSON.stringify(canonical)), "9ea1def2c8cd17dbd59462283912f0514922639fee02f55abaf65b0e72ce8470");
+  assert.equal(digest(JSON.stringify(canonical)), "8112a8dbfa908fec99df7ead7105d65169dc357818ebcfe50b747d1bc17a9a6c");
   for (const file of files) assert.equal(fs.existsSync(path.join(dir, file)), true);
 });
 

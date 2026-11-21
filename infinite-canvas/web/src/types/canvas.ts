@@ -1,3 +1,5 @@
+import type { DramaRun } from "@/lib/short-drama/run-manifest";
+import type { DramaScreenplay } from "@/lib/short-drama/storyboard";
 export type Position = {
     x: number;
     y: number;
@@ -18,6 +20,10 @@ export enum CanvasNodeType {
     /** 音色设计：与空音频节点完全同构，仅默认 audioMode 为 voice-design。 */
     VoiceDesign = "voice-design",
     FreeCard = "free-card",
+    /** 短剧：分镜导演台，承载角色/场景/道具与逐集出图出片。 */
+    Drama = "short-drama",
+    /** 自动化：长文改编与批量出图出片流水线。 */
+    Automation = "automation",
     /** 工作台：承载独立的专业编辑面板（故事分镜导演台等），本身不产出媒体。 */
     Workbench = "workbench",
     Group = "group",
@@ -132,6 +138,10 @@ export type CanvasNodeMetadata = {
     videoSelfLiftMode?: string;
     // ── 上游 v0.25.x 追加：自定义文本与 Viggle ──
     customTexts?: Record<string, string>;
+    // 上游 v0.25.x：短剧卡片数据
+    dramaCard?: CanvasDramaCardData;
+    // 上游 v0.25.x：自动化（automation）节点状态
+    automation?: CanvasAutomationState;
     customTextActive?: string;
     videoPins?: string;
     videoSegmentSeconds?: string;
@@ -318,3 +328,278 @@ export type ContextMenuState =
           y: number;
           connectionId: string;
       };
+
+// ── 上游 v0.25.x 自动化（automation）类型 ──
+export type CanvasAutomationStage = "idle" | "script" | "planning" | "characters" | "scenes" | "images" | "videoPrompts" | "videos" | "done" | "error" | "stopped";
+
+export type CanvasAutomationScene = {
+    id: string;
+    name: string;
+    description?: string;
+};
+
+export type CanvasAutomationSceneSheet = {
+    sceneId: string;
+    name: string;
+    nodeId: string;
+    state: "pending" | "loading" | "done" | "error";
+    error?: string;
+};
+
+export type CanvasAutomationGrid = {
+    rows: number;
+    cols: number;
+    panelCount: number;
+};
+
+export type CanvasAutomationCharacter = {
+    id: string;
+    name: string;
+    species?: "human" | "animal";
+    speciesLabel?: string;
+    description?: string;
+    appearanceLock?: string;
+    outfitLock?: string;
+    negativeLock?: string;
+};
+
+export type CanvasAutomationPanelSpec = {
+    index: number;
+    time?: string;
+    description: string;
+    storyboardDescription?: string;
+    background?: string;
+    beat?: "key" | "support";
+    camera?: string;
+    dialogue?: string[];
+    characters?: string[];
+};
+
+export type CanvasAutomationShotGroup = {
+    panels: number[];
+    mode: "long_take" | "cut" | "insert";
+    template?: string;
+    reason?: string;
+};
+
+export type CanvasAutomationScriptLine = {
+    speaker: string;
+    text: string;
+    performance?: string;
+    channel?: "spoken" | "inner" | "system";
+};
+
+export type CanvasAutomationScriptBeat = {
+    id: string;
+    sceneId: string;
+    action: string;
+    dialogue?: CanvasAutomationScriptLine[];
+};
+
+export type CanvasAutomationScriptScene = {
+    id: string;
+    heading: string;
+    description?: string;
+};
+
+export type CanvasAutomationScript = {
+    level: "locked" | "performance" | "structural";
+    logline?: string;
+    scenes: CanvasAutomationScriptScene[];
+    beats: CanvasAutomationScriptBeat[];
+};
+
+export type CanvasAutomationVideoSegment = {
+    index: number;
+    prompt?: string;
+    promptVersion?: number;
+    seconds: string;
+    panelRange?: [number, number];
+    nodeId?: string;
+    state: "pending" | "loading" | "done" | "error";
+    error?: string;
+};
+
+export type CanvasAutomationPage = {
+    index: number;
+    title: string;
+    narration?: string;
+    sceneId?: string;
+    scene?: string;
+    sceneDescription?: string;
+    dialogue?: string[];
+    focus?: string;
+    eventIds?: string[];
+    shotGroups?: CanvasAutomationShotGroup[];
+    videoHint?: string;
+    videoPrompt?: string;
+    videoPromptVersion?: number;
+    videoTitle?: string;
+    videoSegments?: CanvasAutomationVideoSegment[];
+    segmentIndex?: number;
+    segmentCount?: number;
+    panelRange?: [number, number];
+    grid?: CanvasAutomationGrid;
+    panels?: CanvasAutomationPanelSpec[];
+    style?: string;
+    styleLock?: string;
+    styleNegative?: string;
+    videoSeconds?: string;
+    characters?: CanvasAutomationCharacter[];
+    layout: CanvasMossLayout;
+    textNodeId?: string;
+    imageNodeId?: string;
+    videoNodeId?: string;
+    imageState: "pending" | "loading" | "done" | "error";
+    videoState: "pending" | "loading" | "done" | "error";
+    error?: string;
+};
+
+export type CanvasAutomationCharacterSheet = {
+    characterId: string;
+    nodeId: string;
+    state: "pending" | "loading" | "done" | "error";
+    error?: string;
+};
+
+export type CanvasAutomationSettings = {
+    pageCount: number;
+    pageCountAuto?: boolean;
+    segmentation?: "short" | "long";
+    grid: "2x2" | "2x3" | "3x3";
+    style: string;
+    aspect: string;
+    mossSteps: "8" | "50";
+    videoSeconds: string;
+    videoVariant?: "auto" | "vdn" | "novdn";
+    vquality: string;
+    generateAudio: boolean;
+    generateCharacterSheets?: boolean;
+    generateSceneSheets?: boolean;
+    storyboardWhiteModel?: boolean;
+    textModel?: string;
+};
+
+export type CanvasAutomationState = {
+    template: "novel-comic-video";
+    stage: CanvasAutomationStage;
+    sourceText: string;
+    sourceUrl?: string;
+    settings: CanvasAutomationSettings;
+    script?: CanvasAutomationScript;
+    scriptText?: string;
+    style?: string;
+    styleLock?: string;
+    styleNegative?: string;
+    characters?: CanvasAutomationCharacter[];
+    characterSheets?: CanvasAutomationCharacterSheet[];
+    scenes?: CanvasAutomationScene[];
+    sceneSheets?: CanvasAutomationSceneSheet[];
+    pages?: CanvasAutomationPage[];
+    videoPromptVersion?: number;
+    progress?: string;
+    warnings?: string[];
+    errors?: string[];
+    fallbackNotice?: string;
+    startedAt?: number;
+    finishedAt?: number;
+    updatedAt?: number;
+};
+
+
+// ── 上游 v0.25.x 短剧（short-drama）类型 ──
+export type CanvasDramaCardEpisode = {
+    id: string;
+    title: string;
+    synopsis: string;
+    shots: number;
+    draft: boolean;
+    script?: string;
+    screenplay?: DramaScreenplay;
+};
+
+export type CanvasDramaAssetStage = {
+    id: string;
+    name: string;
+    description: string;
+    polishedPrompt?: string;
+    prompt?: string;
+    nodeId?: string;
+    imageUrl?: string;
+    state: "pending" | "loading" | "done" | "error";
+    error?: string;
+};
+
+export type CanvasDramaAssetRecord = {
+    id: string;
+    kind: "character" | "scene" | "prop";
+    name: string;
+    nameEn?: string;
+    role?: string;
+    description: string;
+    polishedPrompt?: string;
+    prompt?: string;
+    nodeId?: string;
+    imageUrl?: string;
+    state: "pending" | "loading" | "done" | "error";
+    error?: string;
+    stages?: CanvasDramaAssetStage[];
+    location?: string;
+    time?: string;
+    variant?: string;
+    locationKey?: string;
+    refMode?: "auto" | "off";
+    baseNodeId?: string;
+    usedReference?: boolean;
+};
+
+export type CanvasDramaAssetLibrary = {
+    characters: CanvasDramaAssetRecord[];
+    scenes: CanvasDramaAssetRecord[];
+    props: CanvasDramaAssetRecord[];
+};
+
+export type CanvasDramaStoryboardShot = {
+    id?: string;
+    shotNumber: number;
+    title: string;
+    segmentIndex: number;
+    segmentTitle: string;
+    location: string;
+    time: string;
+    shotType: string;
+    cameraAngle: string;
+    cameraMovement: string;
+    lightingStyle: string;
+    depthOfField: string;
+    action: string;
+    result: string;
+    dialogue: string;
+    emotion: string;
+    emotionIntensity: number;
+    duration?: number;
+    beatIds?: string[];
+    cutPoints?: string[];
+    splitReason?: string;
+    entryState?: string;
+    exitState?: string;
+    cameraPurpose?: string;
+};
+
+export type CanvasDramaCardData = {
+    title: string;
+    style: string;
+    aspect: string;
+    imageWorkflow?: string;
+    videoWorkflow?: string;
+    videoMode?: "frames" | "reference";
+    vquality?: string;
+    segmentSeconds?: number;
+    paused?: boolean;
+    activeTab: "characters" | "scenes" | "props";
+    episodes: CanvasDramaCardEpisode[];
+    assets?: CanvasDramaAssetLibrary;
+    storyboards?: Record<string, CanvasDramaStoryboardShot[]>;
+    runs?: Record<string, DramaRun>;
+    progress?: { stage: string; current: number; total: number };
+};

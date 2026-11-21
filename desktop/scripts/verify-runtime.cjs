@@ -110,6 +110,9 @@ function assertAllowedRuntimeFile(relative) {
   const canvasLegal = relative.startsWith('infinite-canvas/') && relative.split('/').length === 2 && LEGAL_NAME.test(path.posix.basename(relative));
   const allowed = rootLegal || canvasLegal || ['VERSION', 'infinite-canvas/VERSION', MANIFEST, 'DEPENDENCY-LICENSES.txt'].includes(relative)
     || relative === 'launcher/desktop-comfy-bootstrap.py'
+    // 3D 场景扩全景的 Python 辅助脚本：由 scene3d.js 固定从 tools/ 加载，
+    // 不是模型权重，按「脚本」而非「二进制」处理。
+    || relative === `${GATEWAY}/tools/scene3d_pano.py`
     || /^launcher\/(?:start|bootstrap-nodes|desktop-protocol)\.mjs$/.test(relative)
     || relative.startsWith(`${RENDERER}/`)
     || [`${GATEWAY}/package.json`, `${GATEWAY}/package-lock.json`, `${GATEWAY}/workflow-baseline.json`, `${GATEWAY}/resources/index.json`].includes(relative)

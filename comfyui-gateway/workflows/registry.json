@@ -5823,6 +5823,112 @@
       "label": "H3 角色替换（Viggle Remake）",
       "minMedia": 2,
       "hidden": false
+    },
+    {
+      "id": "image-scene3d-pano",
+      "name": "image-scene3d-pano",
+      "label": "H3 全景扩图（内部）",
+      "type": "image",
+      "description": "H3-Image Edit 无 PE，4 步/CFG1/euler/simple，5664×2832 等距柱状扩图。",
+      "file": "image-scene3d-pano.json",
+      "hidden": true,
+      "bindings": {
+        "image": {
+          "node": "17",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0,
+          "required": true
+        },
+        "prompt": {
+          "node": "11",
+          "input": "value",
+          "from": "prompt",
+          "required": true
+        },
+        "seed": {
+          "node": "6",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null
+    },
+    {
+      "id": "image-scene3d-seam",
+      "name": "image-scene3d-seam",
+      "label": "Qwen 接缝带修复（内部）",
+      "type": "image",
+      "description": "QwenImage 2.1 turbo int8，6 步/CFG1，修 1536×2816 接缝带。",
+      "file": "image-scene3d-seam.json",
+      "hidden": true,
+      "bindings": {
+        "strip": {
+          "node": "4",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0,
+          "required": true
+        },
+        "mask": {
+          "node": "5",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 1,
+          "required": true
+        },
+        "seed": {
+          "node": "14",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null
+    },
+    {
+      "id": "image-scene-3d",
+      "name": "image-scene-3d",
+      "label": "3D 场景",
+      "type": "image",
+      "description": "普通图片 → 2:1 等距柱状全景 → Qwen 修接缝；用于 TE 导演台全景背景，不是可走入的 3D mesh。",
+      "file": "image-scene3d-pano.json",
+      "hidden": false,
+      "bindings": {
+        "image": {
+          "node": "17",
+          "input": "image",
+          "from": "image",
+          "imageIndex": 0,
+          "required": true
+        },
+        "prompt": {
+          "node": "11",
+          "input": "value",
+          "from": "prompt",
+          "required": true
+        },
+        "seed": {
+          "node": "6",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        }
+      },
+      "defaults": {},
+      "presets": {},
+      "parameters": [],
+      "lora": null
     }
   ]
 }

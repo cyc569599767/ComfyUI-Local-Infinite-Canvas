@@ -26,7 +26,7 @@ import { createRegistry } from "./registry.js";
 import { createSessionTracker } from "./sessions.js";
 import { createSetupManager } from "./setup.js";
 import { pickWorkflowDir, workflowDirCandidates } from "./workflow-dir.js";
-import { createResourceManager } from "./resources.js";
+import { createResourceManager, inferComfyRootFromFolderPaths } from "./resources.js";
 import { createPromptOptimizer } from "./prompt-optimizer.js";
 import { resolveVariantFallback } from "./variant-fallback.js";
 import { createLyricsOptimizer } from "./lyrics-optimizer.js";
@@ -53,6 +53,8 @@ import { readSystemStats } from "./system-stats.js";
 import { createTaskStore } from "./tasks.js";
 import { applyUpdate, checkForUpdate, detectInterruptedUpdate, getUpdateProgress, recoverWorkflowBackups, restoreInterruptedUpdate } from "./update.js";
 import { uploadImages } from "./uploads.js";
+import { buildScene3dPrompt, evaluateScene3dMetrics, placeSource, prepareSeamAssets, resolveScene3dPython, scene3dScriptPath, SCENE3D_PANO_ID, SCENE3D_SEAM_ID, stitchPanorama } from "./scene3d.js";
+import { createSwapChain } from "./swap-chain.js";
 import { createWorkflowVisibilityStore } from "./workflow-visibility.js";
 import { createWorkflowLabelStore } from "./workflow-labels.js";
 import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWorkflowModelPatch, workflowModelFields } from "./workflow-model-overrides.js";
@@ -589,6 +591,9 @@ export async function createGatewayApp(overrides = {}) {
     maxWorkflowBytes: config.maxWorkflowBytes,
   });
   await freeWorkflows.load();
+  // 角色替换长链（上游 swap-chain）：按段生成并逐段接力，产物落 dataDir。
+  const swapChain = createSwapChain({ comfy, config, logger, dataDir: config.dataDir });
+  swapChain.load();
   // G1：后台轮询 ComfyUI 工作流目录，源文件改了就防抖同步（不阻塞启动）。
   // 定时器 unref，退出时不需要额外清理；sync 失败只记 warn。
   freeWorkflows.startWatching({
@@ -1854,6 +1859,12 @@ export async function createGatewayApp(overrides = {}) {
   });
 
   // G9：写入参数披露项（保留用户已有的值，不覆盖同 key 的已改值）。
+  // 参数披露写入：上游契约用 PUT，本地前端沿用 POST，这里两个方法都接。
+  app.put("/api/free-workflows/:id/params", async (req, res) => {
+    const entry = await freeWorkflows.setParams(req.params.id, req.body?.params);
+    res.json({ workflow: await freeWorkflows.publicEntry(entry) });
+  });
+
   app.post("/api/free-workflows/:id/params", async (req, res) => {
     const entry = await freeWorkflows.setParams(req.params.id, req.body?.params);
     res.json({ workflow: await freeWorkflows.publicEntry(entry) });
@@ -2440,6 +2451,160 @@ export async function createGatewayApp(overrides = {}) {
     }
     res.json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: file.buffer.toString("base64") }], mime_type: file.mimeType, prompt_id: result.promptId, warnings });
   });
+
+  app.post("/v1/images/scene3d", upload.any(), async (req, res) => {
+    await reloadRegistryAndSnapshot();
+    const body = req.body || {};
+    const panoEntry = registry.resolve(SCENE3D_PANO_ID);
+    const seamEntry = registry.resolve(SCENE3D_SEAM_ID);
+    if (!panoEntry || !seamEntry) {
+      throw new HttpError("3D 场景工作流未注册", { status: 500, code: "missing_scene3d_workflow" });
+    }
+    for (const entry of [panoEntry, seamEntry]) {
+      const unavailable = workflowAvailabilityProblem(setup, entry);
+      if (unavailable) throw new HttpError(unavailable.message, { status: 409, code: unavailable.code, details: unavailable.details });
+    }
+    const files = imageFilesFrom(req.files || []);
+    if (!files.length) throw new HttpError("3D 场景缺少输入图片", { status: 400, code: "missing_image" });
+    const inputFile = files[0];
+    const python = resolveScene3dPython({ comfyDir: config.comfyDir || inferComfyRootFromFolderPaths(setup.folderPaths?.() || {}) });
+    const script = scene3dScriptPath();
+    if (!python || !fs.existsSync(script)) {
+      throw new HttpError("3D 场景缺少图像处理环境（Pillow/numpy/cv2）。可复制给 AI Agent：设置 SCENE3D_PYTHON 指向 ComfyUI 的 python_embeded，或安装 Pillow/numpy/opencv-python 后重试。", {
+        status: 500,
+        code: "missing_scene3d_image_runtime",
+      });
+    }
+    const maxAttempts = Math.max(1, Math.min(3, Number(body.attempts) || 3));
+    let baseSeed = Number(body.seed);
+    if (!Number.isFinite(baseSeed) || baseSeed <= 0) baseSeed = crypto.randomInt(1, 2147483647);
+    baseSeed = Math.trunc(baseSeed) % 2147483647 || 1;
+    const sceneText = String(body.prompt ?? body.scene ?? "").trim();
+    const readOffset = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.5;
+    };
+    const offsetX = readOffset(body.offsetX ?? body.offset_x);
+    const offsetY = readOffset(body.offsetY ?? body.offset_y);
+    const prompt = buildScene3dPrompt(sceneText);
+    const task = tasks.create({
+      model: "image-scene-3d",
+      request: { prompt: sceneText, seed: baseSeed, attempts: maxAttempts, offsetX, offsetY },
+    });
+    tasks.enqueue(task, async (_task, onProgress, signal) => {
+      const report = (progress, phase, promptId) => {
+        onProgress(promptId ? { progress, phase, promptId } : { progress, phase });
+      };
+      let lastPromptId = null;
+      try {
+        let lastMetrics = null;
+        let lastReasons = [];
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          if (signal.aborted) throw Object.assign(new Error("任务已取消"), { code: "cancelled" });
+          const seed = ((baseSeed + attempt - 1 - 1) % 2147483647) + 1;
+          report(0.08, "扩全景");
+          const placed = await placeSource({
+            python,
+            script,
+            inputBuffer: inputFile.buffer,
+            offsetX,
+            offsetY,
+            signal,
+          });
+          const uploadedPlaced = await uploadImages(comfy, [
+            { buffer: placed.buffer, originalname: `scene3d_placed_${seed}.png`, mimetype: "image/png" },
+          ]);
+          const panoContext = buildContext({ prompt, count: 1, images: [inputFile], uploadedImages: uploadedPlaced, params: { seed } });
+          const pano = await runWorkflow({
+            entry: panoEntry,
+            context: panoContext,
+            comfy,
+            timeoutMs: config.requestTimeoutMs,
+            pollIntervalMs: config.pollIntervalMs,
+            signal,
+            requestId: task.id,
+            logger,
+            loraCatalog: setup.loraNames(),
+            modelAliasFor: setup.modelAliasFor,
+            loaderSpecs: setup.modelLoaderSpecs?.(),
+          });
+          lastPromptId = pano.promptId;
+          report(0.4, "扩全景", pano.promptId);
+          const panoFile = pano.files.find((file) => /^image\//i.test(file.mimeType)) || pano.files[0];
+          if (!panoFile) throw new Error("H3 全景扩图没有返回图片");
+          await comfy.freeMemory().catch(() => {});
+
+          report(0.45, "修缝");
+          const assets = await prepareSeamAssets({
+            python,
+            script,
+            panoBuffer: panoFile.buffer,
+            inputBuffer: inputFile.buffer,
+            signal,
+          });
+          const uploadedSeam = await uploadImages(comfy, [
+            { buffer: assets.stripBuffer, originalname: `scene3d_strip_${seed}.png`, mimetype: "image/png" },
+            { buffer: assets.maskBuffer, originalname: `scene3d_mask_${seed}.png`, mimetype: "image/png" },
+          ]);
+          const seamContext = buildContext({ count: 1, uploadedImages: uploadedSeam, params: { seed } });
+          const seam = await runWorkflow({
+            entry: seamEntry,
+            context: seamContext,
+            comfy,
+            timeoutMs: config.requestTimeoutMs,
+            pollIntervalMs: config.pollIntervalMs,
+            signal,
+            requestId: task.id,
+            logger,
+            loraCatalog: setup.loraNames(),
+            modelAliasFor: setup.modelAliasFor,
+            loaderSpecs: setup.modelLoaderSpecs?.(),
+          });
+          report(0.7, "修缝", seam.promptId);
+          const seamFile = seam.files.find((file) => /^image\//i.test(file.mimeType)) || seam.files[0];
+          if (!seamFile) throw new Error("Qwen 接缝修复没有返回图片");
+          await comfy.freeMemory().catch(() => {});
+
+          report(0.78, "建场景");
+          const stitched = await stitchPanorama({
+            python,
+            script,
+            panoBuffer: panoFile.buffer,
+            repairedBuffer: seamFile.buffer,
+            maskBuffer: assets.maskBuffer,
+            inputBuffer: inputFile.buffer,
+            signal,
+          });
+          const gate = evaluateScene3dMetrics(stitched.metrics);
+          lastMetrics = { ...stitched.metrics, person_single: gate.person };
+          lastReasons = gate.reasons;
+          logger.info(
+            `scene3d attempt ${attempt}/${maxAttempts} seed=${seed} mae=${lastMetrics.edge_mae ?? "-"} luma=${lastMetrics.luma_delta ?? "-"} person=${gate.person} passed=${gate.passed} ${task.id}`,
+          );
+          if (gate.passed) {
+            report(0.95, "建场景", seam.promptId);
+            return { buffer: stitched.buffer, ext: "png", mimeType: "image/png", promptId: seam.promptId };
+          }
+          await comfy.freeMemory().catch(() => {});
+        }
+        const error = new Error(
+          `3D 场景质量门未通过（${maxAttempts} 个种子）：${lastReasons.join("；")}。可复制给 AI Agent：重试 /v1/images/scene3d，换更清晰的主体图或缩短场景描述；若连续失败，检查 H3-Image 与 Qwen 2.1 的节点/权重是否齐全。`,
+        );
+        error.code = "scene3d_quality_rejected";
+        error.details = { attempts: maxAttempts, base_seed: baseSeed, last_metrics: lastMetrics, reasons: lastReasons };
+        throw error;
+      } catch (error) {
+        if (lastPromptId) {
+          logger.info(`scene3d task ${task.id} failed after prompt ${lastPromptId}: ${error?.message || error}`);
+        }
+        throw error;
+      } finally {
+        await comfy.freeMemory().catch(() => {});
+      }
+    });
+    res.status(202).json({ id: task.id, taskId: task.id, status: task.status, progress: task.progress });
+  });
+
 
   app.post("/v1/images/generations", async (req, res) => {
     await reloadRegistryAndSnapshot();
@@ -3461,6 +3626,228 @@ export async function createGatewayApp(overrides = {}) {
     });
   });
 
+  // ---- 视频编辑预览（Phase2，§15 契约）：当前帧单图预览，后台按有无蒙版自动路由 ----
+  const videoEditPreviewJobs = new Map();
+  const videoEditPreviewTimeout = Math.min(Number(config.requestTimeoutMs) || 0, 5 * 60 * 1000) || 5 * 60 * 1000;
+
+  function decodePreviewImage(value, field) {
+    if (value === undefined || value === null || value === "") return null;
+    const text = String(value).trim();
+    const match = /^data:([^;,]+)?(;base64)?,/i.exec(text);
+    const base64 = match ? text.slice(match[0].length) : text;
+    if (match && !match[2]) throw new HttpError(`${field} 必须是 base64 编码的图片`, { status: 400, code: `invalid_${field}` });
+    let buffer;
+    try { buffer = Buffer.from(base64, "base64"); } catch { buffer = Buffer.alloc(0); }
+    if (!buffer.length) throw new HttpError(`${field} 不是有效的 base64 图片`, { status: 400, code: `invalid_${field}` });
+    if (buffer.length > 32 * 1024 * 1024) throw new HttpError(`${field} 超过 32MB`, { status: 413, code: `too_large_${field}` });
+    const mime = String(match?.[1] || "image/png").toLowerCase();
+    return { buffer, mimetype: mime.startsWith("image/") ? mime : "image/png", originalname: `${field}.png` };
+  }
+
+  async function resolvePreviewSource(source) {
+    const text = String(source || "").trim();
+    if (!text) throw new HttpError("source 不能为空", { status: 400, code: "missing_source" });
+    if (/^data:/i.test(text)) {
+      const match = /^data:([^;,]+)?(;base64)?,/i.exec(text);
+      if (!match?.[2]) throw new HttpError("source data URL 必须是 base64", { status: 400, code: "invalid_source" });
+      const buffer = Buffer.from(text.slice(match[0].length), "base64");
+      if (!buffer.length) throw new HttpError("source 为空", { status: 400, code: "invalid_source" });
+      return { buffer, mimetype: match[1] || "video/mp4", originalname: "source.mp4" };
+    }
+    if (/^https?:/i.test(text)) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error("下载源视频超时")), 120000);
+      try {
+        const response = await fetch(text, { signal: controller.signal, redirect: "follow" });
+        if (!response.ok) throw new HttpError(`源视频下载失败：HTTP ${response.status}`, { status: 422, code: "source_unavailable" });
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (!buffer.length) throw new HttpError("源视频为空", { status: 422, code: "source_unavailable" });
+        if (buffer.length > (Number(config.maxUploadBytes) || 512 * 1024 * 1024)) throw new HttpError("源视频超过上传上限", { status: 413, code: "source_too_large" });
+        return { buffer, mimetype: response.headers.get("content-type") || "video/mp4", originalname: "source.mp4" };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const base = safeFileName(path.basename(text.replace(/[?#].*$/, "")));
+    const candidates = [];
+    if (/^\/files\//i.test(text)) {
+      const name = decodeURIComponent(text.replace(/^\/files\//i, "").replace(/[?#].*$/, ""));
+      candidates.push(path.join(config.outputDir, safeFileName(name)));
+    }
+    candidates.push(path.join(config.outputDir, base));
+    candidates.push(path.join(config.dataDir, "uploads", base));
+    if (path.isAbsolute(text)) candidates.push(text);
+    for (const file of candidates) {
+      try {
+        if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
+          return { buffer: fs.readFileSync(file), mimetype: "video/mp4", originalname: path.basename(file) };
+        }
+      } catch { /* 继续下一个候选 */ }
+    }
+    throw new HttpError("source 无法解析为本地视频或 URL；可传 /files 地址、data URL 或绝对路径", { status: 422, code: "source_unavailable" });
+  }
+
+  function previewProbeDuration(file) {
+    const candidates = [
+      process.env.FFPROBE_PATH,
+      "ffprobe",
+      config.comfyDir && path.join(config.comfyDir, "ffprobe.exe"),
+      config.comfyDir && path.join(config.comfyDir, "..", "ffprobe.exe"),
+      config.comfyDir && path.join(config.comfyDir, "..", "ffmpeg", "bin", "ffprobe.exe"),
+    ].filter(Boolean);
+    const binary = candidates.find((candidate) => {
+      try { execFileSync(candidate, ["-version"], { stdio: "ignore", timeout: 5000 }); return true; } catch { return false; }
+    });
+    if (!binary) throw new HttpError("网关未找到 ffprobe，无法按 frame_t 定位帧", { status: 422, code: "ffprobe_missing" });
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "video-edit-probe-"));
+    try {
+      const input = path.join(tempDir, "source.mp4");
+      fs.writeFileSync(input, file.buffer);
+      const raw = execFileSync(binary, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input], { encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
+      const duration = Number(String(raw).trim());
+      if (!Number.isFinite(duration) || duration <= 0) throw new Error("duration invalid");
+      return duration;
+    } catch (error) {
+      throw new HttpError(`源视频时长探测失败：${String(error?.message || error).slice(0, 200)}`, { status: 422, code: "frame_extract_failed" });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  function buildPreviewSwapGraph({ targetName, refName, prompt, strength, seed }) {
+    return {
+      "1": { class_type: "UNETLoader", inputs: { unet_name: "qwen_image_2.1_bf16.safetensors", weight_dtype: "default" } },
+      "2": { class_type: "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: "p_q_image_2.1_6_steps_v0.2_comfyui_bf16.safetensors", strength_model: 1 } },
+      "3": { class_type: "LoraLoaderModelOnly", inputs: { model: ["2", 0], lora_name: "oldx-qwen2.1人物替换.safetensors", strength_model: strength } },
+      "4": { class_type: "CLIPLoader", inputs: { clip_name: "qwen3vl_8b_int8_convrot.safetensors", type: "qwen_image", device: "default" } },
+      "5": { class_type: "VAELoader", inputs: { vae_name: "qwen_image_2.1_vae_bf16.safetensors" } },
+      "6": { class_type: "LoadImage", inputs: { image: targetName } },
+      "7": { class_type: "LoadImage", inputs: { image: refName } },
+      "10": { class_type: "TextEncodeQwenImage21", inputs: { clip: ["4", 0], vae: ["5", 0], negative_prompt: "extra fingers, missing fingers, deformed hands, bad anatomy, malformed hands", resolution: 1024, prompt, "images.image_1": ["7", 0], "images.image_2": ["6", 0] } },
+      "11": { class_type: "VAEEncode", inputs: { pixels: ["6", 0], vae: ["5", 0] } },
+      "12": { class_type: "CFGGuider", inputs: { model: ["3", 0], positive: ["10", 0], negative: ["10", 1], cfg: 1 } },
+      "13": { class_type: "RandomNoise", inputs: { noise_seed: seed } },
+      "14": { class_type: "ManualSigmas", inputs: { sigmas: "1.0, 0.961054, 0.918949, 0.769302, 0.545554, 0.35, 0.152292, 0" } },
+      "15": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
+      "16": { class_type: "SamplerCustomAdvanced", inputs: { noise: ["13", 0], guider: ["12", 0], sampler: ["15", 0], sigmas: ["14", 0], latent_image: ["11", 0] } },
+      "17": { class_type: "VAEDecode", inputs: { samples: ["16", 0], vae: ["5", 0] } },
+      "18": { class_type: "SaveImage", inputs: { images: ["17", 0], filename_prefix: "video-edit-preview/swap" } },
+    };
+  }
+
+  async function runPreviewSwap({ targetFile, refFile, prompt, strength }) {
+    const [targetUpload, refUpload] = await uploadImages(comfy, [targetFile, refFile]);
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    const graph = buildPreviewSwapGraph({ targetName: targetUpload.name, refName: refUpload.name, prompt, strength, seed });
+    const submitted = await comfy.submit(graph, { clientId: randomId("video-edit-preview-") });
+    const deadline = Date.now() + videoEditPreviewTimeout;
+    while (Date.now() < deadline) {
+      await sleep(config.pollIntervalMs);
+      const hist = await comfy.history(submitted.promptId).catch(() => null);
+      if (!hist) continue;
+      if (hist.status?.status_str === "error") {
+        const reason = (hist.status?.messages || []).flat().join(" ").slice(0, 300);
+        throw new HttpError(`OLDX 替换执行失败：${reason || "未知错误"}`, { status: 502, code: "swap_failed" });
+      }
+      const out = hist.outputs?.["18"]?.images?.[0];
+      if (out) {
+        const viewed = await comfy.view(out);
+        return { buffer: viewed.buffer, promptId: submitted.promptId };
+      }
+    }
+    throw new HttpError("OLDX 替换超时", { status: 504, code: "swap_timeout" });
+  }
+
+  async function runPreviewQwen({ jobId, mode, prompt, frameFile, maskFile, requestId }) {
+    const entry = requireModel(registry, setup, "image-qwen21", "image");
+    requireWorkflowMode(setup, entry, mode);
+    const files = maskFile ? [frameFile, maskFile] : [frameFile];
+    const uploadedImages = await uploadImages(comfy, files);
+    const context = buildContext({ prompt, mode, count: 1, images: files, uploadedImages, params: {} });
+    const result = await runImage({ entry, context, comfy, timeoutMs: config.requestTimeoutMs, pollIntervalMs: config.pollIntervalMs, requestId, logger, loraCatalog: setup.loraNames() });
+    const file = result.files[0];
+    if (!file?.buffer?.length) throw new HttpError("预览工作流没有返回图片", { status: 502, code: "no_preview_output" });
+    return { buffer: file.buffer, promptId: result.promptId };
+  }
+
+  function saveVideoEditPreview(jobId, buffer) {
+    const filename = `video-edit-${jobId}.png`;
+    fs.mkdirSync(config.outputDir, { recursive: true });
+    fs.writeFileSync(path.join(config.outputDir, filename), buffer);
+    return filename;
+  }
+
+  app.post("/v1/video-edit/preview", upload.any(), async (req, res) => {
+    await reloadRegistryAndSnapshot();
+    const body = req.body || {};
+    const mode = String(body.mode || "").trim();
+    if (!["swap", "edit"].includes(mode)) {
+      throw new HttpError('mode 必须是 "swap" 或 "edit"', { status: 400, code: "invalid_mode" });
+    }
+    const frameT = Number(body.frame_t ?? body.frameT);
+    const frameFileInput = decodePreviewImage(body.frame, "frame");
+    const prompt = String(body.prompt ?? "").trim();
+    const maskFile = decodePreviewImage(body.mask, "mask");
+    const refFile = decodePreviewImage(body.ref, "ref");
+    const strengthRaw = Number(body.strength);
+    const strength = Math.max(0, Math.min(1, Number.isFinite(strengthRaw) ? strengthRaw : 0.9));
+    if (mode === "swap" && !maskFile && !refFile) {
+      throw new HttpError("swap 预览需要 ref 角色参考图", { status: 400, code: "missing_ref" });
+    }
+    if (!frameFileInput && (!Number.isFinite(frameT) || frameT < 0 || frameT > 1)) {
+      throw new HttpError("未提供 frame 时，frame_t 必须是 0–1 之间的数字", { status: 400, code: "invalid_frame_t" });
+    }
+    const jobId = randomId("preview-");
+    const job = { id: jobId, status: "running", imageUrl: null, error: null, route: "", promptId: null, createdAt: nowIso() };
+    videoEditPreviewJobs.set(jobId, job);
+    if (videoEditPreviewJobs.size > 200) {
+      const oldest = videoEditPreviewJobs.keys().next().value;
+      if (oldest) videoEditPreviewJobs.delete(oldest);
+    }
+    try {
+      let frameFile;
+      if (frameFileInput) {
+        frameFile = { ...frameFileInput, originalname: "video-edit-frame.png" };
+      } else {
+        const sourceFile = await resolvePreviewSource(body.source);
+        const duration = previewProbeDuration(sourceFile);
+        const frameIndex = Math.max(0, Math.round(frameT * duration * 24));
+        const ffmpegConfig = { ...config, comfyDir: config.comfyDir || resources.comfyRoot?.() || "" };
+        const frame = await extractVideoFrame(sourceFile, { frame: frameIndex, config: ffmpegConfig });
+        frameFile = { buffer: frame.buffer, mimetype: "image/png", originalname: "video-edit-frame.png" };
+      }
+      let result;
+      if (maskFile) {
+        job.route = "qwen-inpaint";
+        result = await runPreviewQwen({ jobId, mode: "inpaint", prompt, frameFile, maskFile, requestId: req.id });
+      } else if (mode === "edit") {
+        job.route = "qwen-edit";
+        result = await runPreviewQwen({ jobId, mode: "edit", prompt, frameFile, maskFile: null, requestId: req.id });
+      } else {
+        job.route = "oldx-swap";
+        const swapPrompt = prompt || "将目标人物替换为参考图中的人物；保持姿势、构图、背景与光照不变，只替换目标人物。";
+        const finalPrompt = /^<rwth>/i.test(swapPrompt) ? swapPrompt : `<rwth>, ${swapPrompt}`;
+        result = await runPreviewSwap({ targetFile: frameFile, refFile, prompt: finalPrompt, strength });
+      }
+      job.promptId = result.promptId || null;
+      const filename = saveVideoEditPreview(jobId, result.buffer);
+      job.imageUrl = absoluteTaskUrl(config, req, `/files/${encodeURIComponent(filename)}`);
+      job.status = "completed";
+      res.json({ job_id: jobId, image_url: job.imageUrl, status: job.status, route: job.route, prompt_id: job.promptId });
+    } catch (error) {
+      job.status = "failed";
+      job.error = String(error?.message || error);
+      throw error;
+    }
+  });
+
+  app.get("/v1/video-edit/preview/:job_id", (req, res) => {
+    const job = videoEditPreviewJobs.get(String(req.params.job_id || ""));
+    if (!job) throw new HttpError("预览任务不存在", { status: 404, code: "preview_not_found" });
+    res.json({ job_id: job.id, status: job.status, image_url: job.imageUrl, route: job.route, prompt_id: job.promptId, error: job.error });
+  });
+
+
   app.get("/api/previews/:promptId", (req, res) => {
     const preview = previewHub.get(req.params.promptId);
     if (!preview) throw new HttpError("预览还没有生成", { status: 404, code: "preview_not_ready" });
@@ -3549,6 +3936,42 @@ export async function createGatewayApp(overrides = {}) {
     res.json({ ...result, url: result.url ? absoluteTaskUrl(config, req, result.url) : null });
   });
 
+  // ---- 角色替换长链（swap-chain）----
+  app.post("/v1/swap-chain", upload.any(), async (req, res) => {
+    const files = req.files || [];
+    const source = files.find((file) => file.fieldname === "source_video" || String(file.mimetype || "").startsWith("video/"));
+    const refs = files.filter((file) => file !== source && String(file.mimetype || "").startsWith("image/")).slice(0, 2);
+    if (!source) throw new HttpError("缺少源视频", { status: 400, code: "missing_source_video" });
+    const job = await swapChain.create({
+      source,
+      refs,
+      intent: req.body?.intent,
+      mode: req.body?.mode,
+      targetSelection: req.body?.target_selection,
+      seed: req.body?.seed,
+    });
+    res.status(202).json(job);
+  });
+
+  app.get("/v1/swap-chain/:id", (req, res) => {
+    const job = swapChain.get(req.params.id);
+    if (!job) throw new HttpError("任务不存在", { status: 404, code: "job_not_found" });
+    res.json(job);
+  });
+
+  app.get("/v1/swap-chain/:id/content/:artifact", (req, res) => {
+    const file = swapChain.artifactPath(req.params.id, req.params.artifact);
+    if (!file || !fs.existsSync(file)) throw new HttpError("产物尚未生成", { status: 404, code: "artifact_not_found" });
+    res.sendFile(file);
+  });
+
+  app.post("/v1/swap-chain/:id/cancel", async (req, res) => {
+    res.json(await swapChain.cancel(req.params.id));
+  });
+
+  app.post("/v1/swap-chain/:id/resume", async (req, res) => {
+    res.json(await swapChain.resume(req.params.id));
+  });
   app.get("/v1/tasks/:id", (req, res) => {
     const task = tasks.get(req.params.id);
     if (!task) throw new HttpError("任务不存在", { status: 404, code: "task_not_found" });

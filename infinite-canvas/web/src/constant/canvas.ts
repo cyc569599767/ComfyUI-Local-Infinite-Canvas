@@ -21,6 +21,8 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.VoiceDesign]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.voiceDesign"); } },
     [CanvasNodeType.FreeCard]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.freeCard"); } },
     [CanvasNodeType.Workbench]: { width: 360, height: 220, get title() { return i18n.t("canvas.nodeTypes.workbench"); } },
+    [CanvasNodeType.Drama]: { width: 960, height: 760, title: "短剧" },
+    [CanvasNodeType.Automation]: { width: 460, height: 320, title: "自动化" },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
@@ -58,6 +60,30 @@ export const NODE_SPECS = {
     [CanvasNodeType.Workbench]: {
         width: 360, height: 220, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Workbench].title; },
         metadata: { status: "idle", workbenchKind: "storyboard" },
+    },
+    [CanvasNodeType.Automation]: {
+        width: 460, height: 320, title: "自动化",
+        metadata: { status: "idle" },
+    },
+    [CanvasNodeType.Drama]: {
+        width: 960, height: 760, title: "短剧",
+        metadata: {
+            status: "idle",
+            dramaCard: {
+                title: "斗破苍穹",
+                style: "xianxia 3d",
+                aspect: "16:9",
+                imageWorkflow: "local-gateway::image-qwen21",
+                videoWorkflow: "",
+                videoMode: "frames",
+                activeTab: "characters",
+                episodes: [
+                    { id: "ep-1", title: "第一章陨落的天才", synopsis: "斗之力，三段！望着测验魔石…", shots: 19, draft: true },
+                    { id: "ep-2", title: "第二章斗气大陆", synopsis: "月如银盘，漫天繁星。山崖之…", shots: 0, draft: true },
+                    { id: "ep-3", title: "第三章客人", synopsis: "床榻之上，少年闭目盘腿而坐…", shots: 0, draft: true },
+                ],
+            },
+        },
     },
     [CanvasNodeType.Group]: {
         width: 760, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Group].title; },

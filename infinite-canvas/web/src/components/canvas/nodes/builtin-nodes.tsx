@@ -1,3 +1,5 @@
+import { ShortDramaPanel } from "@/components/canvas/short-drama-panel";
+import { CanvasAutomationPanelHost } from "@/components/canvas/canvas-automation-panel-host";
 import { Box, Clapperboard, Download, FileText, Group, Image as ImageIcon, Layers3, Mic, Music2, Settings2, Sparkles, Video } from "lucide-react";
 import { message } from "antd";
 import { saveAs } from "file-saver";
@@ -111,6 +113,42 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
         autoOpenPanel: false,
         // 双击是进入工作台的唯一入口；单击标题会进重命名，两者不能抢同一个手势。
         // 参数类型必须写明：这个数组经过 .map() 后失去上下文推断。
+        onDoubleClick: (ctx: CanvasNodeContext) => {
+            ctx.openPanel();
+            return true;
+        },
+    },
+    // 自动化：长文改编 → 分镜 → 批量出图出片的流水线面板，本身不产出媒体。
+    {
+        type: CanvasNodeType.Automation,
+        title: "自动化",
+        icon: <Clapperboard className={iconClass} />,
+        minimapColor: "#38bdf8",
+        hasSourceHandle: false,
+        hasTargetHandle: false,
+        description: "长文改编：剧本 → 分镜 → 批量出图出片",
+        defaultMetadata: { status: "idle" },
+        Panel: CanvasAutomationPanelHost,
+        clickOpensPanel: false,
+        autoOpenPanel: false,
+        onDoubleClick: (ctx: CanvasNodeContext) => {
+            ctx.openPanel();
+            return true;
+        },
+    },
+    // 短剧：分镜导演台。面板承载角色/场景/道具库与逐集分镜，本身不产出媒体。
+    {
+        type: CanvasNodeType.Drama,
+        title: "短剧",
+        icon: <Clapperboard className={iconClass} />,
+        minimapColor: "#fb7185",
+        hasSourceHandle: false,
+        hasTargetHandle: false,
+        description: "分镜导演台：角色/场景/道具库、逐集分镜与出图出片",
+        defaultMetadata: { status: "idle" },
+        Panel: ShortDramaPanel,
+        clickOpensPanel: false,
+        autoOpenPanel: false,
         onDoubleClick: (ctx: CanvasNodeContext) => {
             ctx.openPanel();
             return true;

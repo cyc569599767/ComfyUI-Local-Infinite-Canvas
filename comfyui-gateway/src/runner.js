@@ -3,6 +3,10 @@ import path from "node:path";
 import { creationOutputParams } from "./creation-output-names.js";
 import { applyBindings } from "./bindings.js";
 import { applyLoraChain } from "./lora-chain.js";
+import { applyKrea2Mode } from "./krea2-mode.js";
+import { applyQwenHybridMode } from "./qwen-t2i-mode.js";
+import { applyZImageAccel } from "./zimage-accel.js";
+import { resolveMossTier } from "./moss-tier.js";
 import { MODEL_LOADER_SPECS } from "./model-loaders.js";
 import { workflowModelCompatibilityProblems } from "./workflow-model-compatibility.js";
 import { mimeFromFilename, sleep, truncate } from "./util.js";
@@ -139,7 +143,23 @@ export async function runWorkflow({ entry, context, comfy, timeoutMs = 10 * 60 *
   const resolved = resolveForMode(entry, context.mode);
   const { params, assetName } = creationOutputParams(resolved, resolved.baseModelParams ? { ...resolved.baseModelParams, ...(context.params || {}) } : context.params);
   const stats = {};
-  const bound = applyMainModelFile(applyBindings(resolved.workflow, resolved, { ...context, params }, { logger, stats }), resolved.strictModelNames ? "" : resolved.mainModelFile);
+  let baseWorkflow = applyMainModelFile(applyBindings(resolved.workflow, resolved, { ...context, params }, { logger, stats }), resolved.strictModelNames ? "" : resolved.mainModelFile);
+  // 图像质量档位（上游 F 项）：fast/quality/ultra + Sage 加速。
+  // 本地默认不传档位参数时完全跳过，保证既有出图链零变化；
+  // 各 apply* 内部另有 entry.id 守卫，结构不匹配时原样返回。
+  const tierRequested = Boolean(params?.krea2Mode || params?.qwenT2iMode || params?.zimageAccel || params?.mossTier || params?.krea2AccelT);
+  if (tierRequested) {
+    baseWorkflow = applyZImageAccel(
+      applyQwenHybridMode(
+        applyKrea2Mode(baseWorkflow, { entry: resolved, params, logger }),
+        { entry: resolved, params, mode: context.mode, logger },
+      ),
+      { entry: resolved, params, logger },
+    ).workflow;
+  }
+  const moss = tierRequested ? resolveMossTier(resolved, params) : null;
+  if (moss) logger?.info?.(`MOSS 档位 ${moss.tier} → 精度 ${moss.precision}`);
+  const bound = baseWorkflow;
   if (resolved.strictModelNames && params?.loras?.some((lora) => lora?.enabled !== false)) {
     throw new GenerationError("创作专用工作流固定使用参考图中的 LoRA，不接受额外注入。", { status: 400, code: "fixed_workflow_loras" });
   }

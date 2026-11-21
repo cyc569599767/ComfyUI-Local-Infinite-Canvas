@@ -916,7 +916,8 @@ test("krea2 and four-view packs keep the base workflow and standalone resource e
     // 101 = 98 + HyperFlow 的「INT8 加载节点 + Flash 节点 + Ref2VA INT8 主模型」。
     // 108 = 101 + Viggle 的「Remake 节点 + 换人 INT8 + Q4 备用 + edit LoRA + pruned 底模
     //        + Singularity 未剪枝底模 + H3 视频 VAE」。
-    assert.equal(index.resources.length, 108);
+    // 109 = 108 + oldx Qwen 2.1 人物替换 LoRA（可选资源卡，不随仓库分发）。
+    assert.equal(index.resources.length, 109);
     assert.equal(new Set(index.resources.map(item => item.id)).size, index.resources.length);
 });
 

@@ -2851,6 +2851,19 @@
         "https://www.modelscope.cn/models/Comfy-Org/MiniMax-H3/resolve/master/vae/minimax_h3_video_vae_fp16.safetensors",
         "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"
       ]
+    },
+    {
+      "id": "qwen21_oldx_character_swap_lora",
+      "type": "model",
+      "label": "oldx Qwen 2.1 人物替换 LoRA",
+      "target": "loras/oldx-qwen2.1人物替换.safetensors",
+      "size": 159436400,
+      "sha256": "73a9a729394a1a85e1135ca991aee8154fbc4507a27a4ba59a43dd0f629eee17",
+      "license": "社区件许可不明",
+      "note": "社区件，许可不明（仅作可选资源卡，不随仓库分发）；Qwen 2.1 人物替换 LoRA；魔搭自托管。",
+      "sources": [
+        "https://www.modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/comfyui-gateway/resources/loras/oldx-qwen2.1%E4%BA%BA%E7%89%A9%E6%9B%BF%E6%8D%A2.safetensors"
+      ]
     }
   ]
 }

@@ -22,22 +22,22 @@ export const LOCAL_GATEWAY_ORIGIN = (() => {
 export const LOCAL_GATEWAY_CHANNEL_ID = "local-gateway";
 
 export const LOCAL_GATEWAY_MODELS = [
-    { name: "image-z-image-turbo", capability: "image" as const, imageInputs: 0 },
-    { name: "image-krea2-turbo", capability: "image" as const, imageInputs: 0 },
-    { name: "image-qwen21", capability: "image" as const, imageInputs: 4 },
-    { name: "image-moss-sft-8step", capability: "image" as const, imageInputs: 0 },
-    { name: "image-moss-sft-50step", capability: "image" as const, imageInputs: 0 },
-    { name: "video-h3-t2v", capability: "video" as const, imageInputs: 0 },
-    { name: "video-h3-frames", capability: "video" as const, imageInputs: 2 },
-    { name: "video-h3-fast", capability: "video" as const, imageInputs: 2 },
-    { name: "video-h3-ref2va", capability: "video" as const, imageInputs: 6 },
-    { name: "video-h3-character-swap", capability: "video" as const, imageInputs: 6 },
-    { name: "video-h3-t2v-novdn", capability: "video" as const, imageInputs: 0 },
-    { name: "video-h3-frames-novdn", capability: "video" as const, imageInputs: 2 },
-    { name: "video-h3-ref2va-novdn", capability: "video" as const, imageInputs: 6 },
-    { name: "audio-voice-design", capability: "audio" as const, imageInputs: 0 },
-    { name: "audio-voice-clone", capability: "audio" as const, imageInputs: 0 },
-    { name: "audio-music", capability: "audio" as const, imageInputs: 0 },
+    { name: "image-z-image-turbo", label: "Z-Image Turbo", capability: "image" as const, imageInputs: 0 },
+    { name: "image-krea2-turbo", label: "Krea2 Turbo", capability: "image" as const, imageInputs: 0 },
+    { name: "image-qwen21", label: "Qwen Image 2.1", capability: "image" as const, imageInputs: 4 },
+    { name: "image-moss-sft-8step", label: "MOSS-Image 极速 8步", capability: "image" as const, imageInputs: 0 },
+    { name: "image-moss-sft-50step", label: "MOSS-Image 高质量 50步", capability: "image" as const, imageInputs: 0 },
+    { name: "video-h3-t2v", label: "H3 文生视频", capability: "video" as const, imageInputs: 0 },
+    { name: "video-h3-frames", label: "H3 首尾帧", capability: "video" as const, imageInputs: 2 },
+    { name: "video-h3-fast", label: "H3 极速草稿", capability: "video" as const, imageInputs: 2 },
+    { name: "video-h3-ref2va", label: "H3 多参", capability: "video" as const, imageInputs: 6 },
+    { name: "video-h3-character-swap", label: "H3 角色替换", capability: "video" as const, imageInputs: 6 },
+    { name: "video-h3-t2v-novdn", label: "H3 文生视频（无VDN）", capability: "video" as const, imageInputs: 0 },
+    { name: "video-h3-frames-novdn", label: "H3 首尾帧（无VDN）", capability: "video" as const, imageInputs: 2 },
+    { name: "video-h3-ref2va-novdn", label: "H3 多参（无VDN）", capability: "video" as const, imageInputs: 6 },
+    { name: "audio-voice-design", label: "音色设计", capability: "audio" as const, imageInputs: 0 },
+    { name: "audio-voice-clone", label: "音色克隆", capability: "audio" as const, imageInputs: 0 },
+    { name: "audio-music", label: "音乐生成", capability: "audio" as const, imageInputs: 0 },
 ];
 
 export const LOCAL_GATEWAY_MODEL_VALUES = LOCAL_GATEWAY_MODELS.map((model) => `${LOCAL_GATEWAY_CHANNEL_ID}::${model.name}`);

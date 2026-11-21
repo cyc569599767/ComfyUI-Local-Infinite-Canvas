@@ -23,8 +23,23 @@ export type ChannelModel = {
     variantModes?: string[];
     variantLabels?: Record<string, string>;
     imageInputs?: number;
+    // 上游 v0.25.x：MOSS 档位元数据（可选，缺省时按单档处理）
+    moss?: MossModelMeta;
 };
 
+export type MossTierStatus = {
+    id?: string;
+    label?: string;
+    steps?: number;
+    available?: boolean;
+    reason?: string | null;
+    precision?: Record<string, boolean>;
+};
+
+export type MossModelMeta = {
+    tiers?: Record<string, MossTierStatus>;
+    precision?: { bf16?: boolean; int8?: boolean };
+};
 export type ModelChannel = {
     id: string;
     name: string;
