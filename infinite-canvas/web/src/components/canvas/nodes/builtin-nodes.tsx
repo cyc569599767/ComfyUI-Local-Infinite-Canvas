@@ -1,5 +1,6 @@
 import { ShortDramaPanel } from "@/components/canvas/short-drama-panel";
 import { CanvasAutomationPanelHost } from "@/components/canvas/canvas-automation-panel-host";
+import { AutomationNodeContent, ShortDramaNodeContent } from "@/components/canvas/drama-node-content";
 import { Box, Clapperboard, Download, FileText, Group, Image as ImageIcon, Layers3, Mic, Music2, Settings2, Sparkles, Video } from "lucide-react";
 import { message } from "antd";
 import { saveAs } from "file-saver";
@@ -128,6 +129,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
         hasTargetHandle: false,
         description: "长文改编：剧本 → 分镜 → 批量出图出片",
         defaultMetadata: { status: "idle" },
+        Content: AutomationNodeContent,
         Panel: CanvasAutomationPanelHost,
         clickOpensPanel: false,
         autoOpenPanel: false,
@@ -146,6 +148,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
         hasTargetHandle: false,
         description: "分镜导演台：角色/场景/道具库、逐集分镜与出图出片",
         defaultMetadata: { status: "idle" },
+        Content: ShortDramaNodeContent,
         Panel: ShortDramaPanel,
         clickOpensPanel: false,
         autoOpenPanel: false,
