@@ -228,14 +228,15 @@ export function imageSizeLabel(size: string) {
     return `${scale} · ${ratio}`;
 }
 
-export function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
+export function OptionPill({ selected, theme, onClick, children, disabled = false }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode; disabled?: boolean }) {
     return (
         <button
             type="button"
-            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            className={disabled ? "h-9 cursor-not-allowed rounded-full border px-2 text-sm opacity-40" : "h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"}
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+            disabled={disabled}
             onMouseDown={(event) => event.stopPropagation()}
-            onClick={onClick}
+            onClick={disabled ? undefined : onClick}
         >
             {children}
         </button>

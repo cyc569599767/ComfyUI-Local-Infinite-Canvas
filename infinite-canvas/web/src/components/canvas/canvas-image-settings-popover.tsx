@@ -5,6 +5,7 @@ import { Button, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel, OptionPill, SettingTitle, imageSizeLabel } from "@/components/image-settings-panel";
+import { Krea2TierSection, MossTierSection, QwenTierSection, ZImageTierSection } from "@/components/canvas/image-tier-sections";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasTheme } from "@/lib/canvas/use-canvas-theme";
 import { channelModelOf } from "@/stores/use-config-store";
@@ -56,6 +57,61 @@ function qwenModelInfo(config: AiConfig) {
     return { modes, labels: { ...qwenModeLabels, ...(model.variantLabels || {}) } };
 }
 
+// ── 图像质量档位判定（F 项，对应网关 krea2-mode / qwen-t2i-mode /
+//    zimage-accel / moss-tier 四个模块）。只在对应工作流下返回非空，
+//    其他模型完全不显示档位 UI。
+const TIER_VALUES = ["fast", "quality", "ultra"] as const;
+const TIER_LABELS: Record<string, string> = { fast: "快速", quality: "质量", ultra: "极致" };
+
+function readParams(config: AiConfig): Record<string, unknown> {
+    return (config.params || {}) as Record<string, unknown>;
+}
+
+/** Krea2 Turbo：三档 + 加速（0=关闭，5/6/7=低/中/高）。 */
+function krea2TierInfo(config: AiConfig) {
+    const workflowId = channelModelOf(config, config.model)?.model.workflowId || "";
+    if (workflowId !== "image-krea2-turbo") return null;
+    const params = readParams(config);
+    const raw = String(params.krea2Mode || "fast");
+    const accelRaw = Number(params.krea2AccelT);
+    return {
+        mode: (TIER_VALUES as readonly string[]).includes(raw) ? raw : "fast",
+        accelIndex: accelRaw === 5 ? 1 : accelRaw === 6 ? 2 : accelRaw === 7 ? 3 : 0,
+    };
+}
+
+/** Qwen 2.1 混合档位：仅文生图/编辑模式生效（与网关守卫一致）。 */
+function qwenTierInfo(config: AiConfig) {
+    const workflowId = channelModelOf(config, config.model)?.model.workflowId || "";
+    if (workflowId !== "image-qwen21") return null;
+    const mode = String(config.imageMode || "t2i");
+    if (!["t2i", "edit"].includes(mode)) return null;
+    const raw = String(readParams(config).qwenT2iMode || "fast");
+    return { mode: (TIER_VALUES as readonly string[]).includes(raw) ? raw : "fast" };
+}
+
+/** Z-Image Turbo：低速加速开关，仅 2k/4k 可用。 */
+function zimageTierInfo(config: AiConfig) {
+    const workflowId = channelModelOf(config, config.model)?.model.workflowId || "";
+    if (workflowId !== "image-z-image-turbo") return null;
+    const accelRaw = Number(readParams(config).zimageAccelT);
+    const on = accelRaw === 5 || accelRaw === 6 || accelRaw === 7;
+    const shortSide = Math.min(...String(config.size || "").split("x").map((item) => Number(item) || 0).filter(Boolean));
+    return { on, available: shortSide >= 1536 || /[2-4]k/i.test(String(config.size || "")) };
+}
+
+/** MOSS-Image：三档，档位可用性来自网关返回的 model.moss.tiers。 */
+function mossTierInfo(config: AiConfig) {
+    const model = channelModelOf(config, config.model)?.model;
+    const workflowId = model?.workflowId || "";
+    if (workflowId !== "image-moss-image") return null;
+    const params = readParams(config);
+    const raw = String(params.mossTier || "fast");
+    return {
+        mode: (TIER_VALUES as readonly string[]).includes(raw) ? raw : "fast",
+        tiers: model?.moss?.tiers || {},
+    };
+}
 export function CanvasImageSettingsPopover({ config, onConfigChange, onParamsChange, onOpenChange, onOpenMaskEditor, onOpenOutpaintEditor, onOpenMossLayoutEditor, buttonClassName, placement = "topLeft" }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = useCanvasTheme();
@@ -137,6 +193,11 @@ function ImageSettingsPortal({
     onClose: () => void;
 }) {
     const qwen = qwenModelInfo(config);
+    // F 项：图像质量档位（仅对应工作流非空）。
+    const krea2Tier = krea2TierInfo(config);
+    const qwenTier = qwenTierInfo(config);
+    const zimageTier = zimageTierInfo(config);
+    const mossTier = mossTierInfo(config);
     const moss = mossModelInfo(config);
     const qwenMode = String(config.imageMode || "t2i");
     const refResolution = String((config.params as Record<string, unknown> | undefined)?.resolution ?? 1024);
@@ -197,7 +258,10 @@ function ImageSettingsPortal({
                             {qwenModeHints[qwenMode] || qwenModeHints.t2i}
                         </div>
                         {qwenMode === "t2i" ? (
-                            <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" maxCount={10} />
+                            <div className="space-y-3">
+                                {qwenTier ? <QwenTierSection theme={theme} onParamsChange={onParamsChange} mode={qwenTier.mode} /> : null}
+                                <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" maxCount={10} />
+                            </div>
                         ) : qwenMode === "edit" ? (
                             <div className="space-y-3">
                                 <div className="space-y-2 rounded-xl border p-3" style={{ borderColor: theme.node.stroke }}>
@@ -300,6 +364,9 @@ function ImageSettingsPortal({
                             </div>
                         </div>
                     ) : null}
+                    {krea2Tier ? <Krea2TierSection theme={theme} onParamsChange={onParamsChange} mode={krea2Tier.mode} accelIndex={krea2Tier.accelIndex} /> : null}
+                    {mossTier ? <MossTierSection theme={theme} onParamsChange={onParamsChange} mode={mossTier.mode} tiers={mossTier.tiers} /> : null}
+                    {zimageTier ? <ZImageTierSection theme={theme} onParamsChange={onParamsChange} on={zimageTier.on} available={zimageTier.available} /> : null}
                     <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" maxCount={10} />
                 </div>
             )}
