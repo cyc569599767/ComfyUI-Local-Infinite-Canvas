@@ -10,6 +10,7 @@ import { formatElapsedDuration } from "@/lib/media-size";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { formatResolutionLabel } from "@/lib/canvas/node-resolution-label";
 import { hasOutputHandle } from "@/lib/canvas/canvas-node-geometry";
 import { nodeInteractionState } from "@/lib/canvas/node-interaction";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
@@ -165,6 +166,12 @@ export const CanvasNode = React.memo(function CanvasNode({
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
     const hasDragHeader = Boolean(definition?.dragHeader);
     const dragHeaderHeight = hasDragHeader ? 36 : 0;
+    // 只有图片/视频卡片在标题后显示分辨率：文本、音频、分组谈分辨率没有意义。
+    // 空卡片（没有内容）也不显示，避免出现「240 × 180」这种只是占位框的假分辨率。
+    const resolutionLabel =
+        (data.type === CanvasNodeType.Image && hasImageContent) || (data.type === CanvasNodeType.Video && hasVideoContent)
+            ? formatResolutionLabel(data)
+            : null;
     const { contentInteractive } = nodeInteractionState(data, definition);
     // Transparent nodes such as SVGs blend into the canvas while retaining outlines for selected or related states.
     const transparentBg = Boolean(definition?.transparentBackground);
@@ -353,7 +360,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 </div>
             ) : null}
             {!isBare && (!hasDragHeader || isEditingTitle) && !referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
-                <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                <div className="absolute left-3 top-[-28px] z-[65] flex max-w-[calc(100%-24px)] items-center gap-1.5" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                     {isEditingTitle ? (
                         <input
                             ref={titleInputRef}
@@ -372,18 +379,31 @@ export const CanvasNode = React.memo(function CanvasNode({
                             }}
                         />
                     ) : (
-                        <button
-                            type="button"
-                            className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
-                            style={{ color: titleTheme.text }}
-                            title={t("canvas.node.renameHint")}
-                            onDoubleClick={(event) => {
-                                event.stopPropagation();
-                                setIsEditingTitle(true);
-                            }}
-                        >
-                            {data.title || t("canvas.node.untitled")}
-                        </button>
+                        <>
+                            {/* truncate 必须挂在 span 上而不是 button 上：button 的 display 是 inline-block，
+                                CSS 规范要求溢出裁剪与 inline-block 冲突时按钮内部盒忽略 overflow，
+                                于是 title 超长会直接画出卡片外（实测 text-overflow 有值但 overflow 为 visible）。
+                                所以 button 只做交互与布局，截断交给内层 block 级 span。 */}
+                            <button
+                                type="button"
+                                className="flex min-w-0 max-w-full shrink border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
+                                style={{ color: titleTheme.text }}
+                                title={t("canvas.node.renameHint")}
+                                onDoubleClick={(event) => {
+                                    event.stopPropagation();
+                                    setIsEditingTitle(true);
+                                }}
+                            >
+                                <span className="min-w-0 truncate">{data.title || t("canvas.node.untitled")}</span>
+                            </button>
+                            {/* 分辨率放标题后：看画面比例只能猜到大概，确认「出的是 1080p 还是 720p」
+                                原本要点开详情。灰色小字、不参与截断（shrink-0），标题长了先压标题。 */}
+                            {resolutionLabel ? (
+                                <span className="shrink-0 whitespace-nowrap text-[10px] font-normal tabular-nums leading-none opacity-45" style={{ color: titleTheme.text }} data-node-resolution={data.id}>
+                                    {resolutionLabel}
+                                </span>
+                            ) : null}
+                        </>
                     )}
                 </div>
             )}
