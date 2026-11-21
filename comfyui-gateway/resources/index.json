@@ -2864,6 +2864,20 @@
       "sources": [
         "https://www.modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/comfyui-gateway/resources/loras/oldx-qwen2.1%E4%BA%BA%E7%89%A9%E6%9B%BF%E6%8D%A2.safetensors"
       ]
+    },
+    {
+      "id": "moss_12steps_lora",
+      "type": "model",
+      "label": "MOSS-Image 12步 Turbo LoRA",
+      "target": "loras/Moss_image/12_step_turbo_moss_1024_distill_v8_r64_weightsx2.safetensors",
+      "size": 284147832,
+      "sha256": "873f6de07cf21ae3a373c009383da3d120092a8f3a0ba92c9dc5815693ca24df",
+      "license": "Apache-2.0",
+      "note": "MOSS-Image 质量档（12步/CFG1/强度1）必需；权重自带 weight_multiplier 2.0；来源 anyMODE/moss-image-12step-turbo-lora commit 5045cdb8。",
+      "sources": [
+        "https://hf-mirror.com/anyMODE/moss-image-12step-turbo-lora/resolve/5045cdb8/12_step_turbo_moss_1024_distill_v8_r64_weightsx2.safetensors",
+        "https://huggingface.co/anyMODE/moss-image-12step-turbo-lora/resolve/5045cdb8/12_step_turbo_moss_1024_distill_v8_r64_weightsx2.safetensors"
+      ]
     }
   ]
 }

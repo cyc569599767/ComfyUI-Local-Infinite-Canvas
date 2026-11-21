@@ -917,7 +917,8 @@ test("krea2 and four-view packs keep the base workflow and standalone resource e
     // 108 = 101 + Viggle 的「Remake 节点 + 换人 INT8 + Q4 备用 + edit LoRA + pruned 底模
     //        + Singularity 未剪枝底模 + H3 视频 VAE」。
     // 109 = 108 + oldx Qwen 2.1 人物替换 LoRA（可选资源卡，不随仓库分发）。
-    assert.equal(index.resources.length, 109);
+    // 110 = 109 + MOSS-Image 12步 Turbo LoRA（质量档必需）。
+    assert.equal(index.resources.length, 110);
     assert.equal(new Set(index.resources.map(item => item.id)).size, index.resources.length);
 });
 
