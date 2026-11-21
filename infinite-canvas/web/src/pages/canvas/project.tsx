@@ -5753,13 +5753,18 @@ function InfiniteCanvasPage() {
                             dramaCard: {
                                 ...card,
                                 storyboards: { ...(card.storyboards || {}), [episodeId]: shots },
-                                episodes: card.episodes.map((item) => (item.id === episodeId ? { ...item, shots: shots.length, screenplay: screenplayRecord } : item)),
+                                // episode.shots 表示「这一集有多少个镜头」，用打包前的分镜计划数，
+                                // 不能用 shots.length（打包后段数）——同场景多镜会被合并成一段，
+                                // 那样界面上会显示「3 个镜头只有 1 镜」。
+                                episodes: card.episodes.map((item) => (item.id === episodeId ? { ...item, shots: plan.length || shots.length, screenplay: screenplayRecord } : item)),
                             },
                         },
                     };
                 }),
             );
-            message.info(useReference ? `分镜已生成，开始批量生成 ${shots.length} 组多参视频…` : `分镜已生成，先批量生成 ${shots.length} 张首帧…`);
+            // shots 是打包后的生成段数，plan 才是镜头数；同场景多镜会被合并，两者通常不等。
+            const shotCountText = plan.length && plan.length !== shots.length ? `${plan.length} 个镜头（合并为 ${shots.length} 个生成段）` : `${shots.length} 个镜头`;
+            message.info(useReference ? `分镜已生成 ${shotCountText}，开始批量生成多参视频…` : `分镜已生成 ${shotCountText}，先批量生成首帧…`);
             await waitAutomationRender();
             saveDramaRun(dramaNode, episodeId, run);
             const waitForNode = async (nodeId: string, ready?: (node: CanvasNodeData) => boolean) => {

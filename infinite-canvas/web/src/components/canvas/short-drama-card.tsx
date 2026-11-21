@@ -752,7 +752,8 @@ export function ShortDramaCard({
                                                     setStyleOpen(false);
                                                 }}
                                             >
-                                                <img src={option.thumb} alt={option.label} className="aspect-[3/2] w-full object-cover" draggable={false} />
+                                                {/* 缩略图缺失时降级成色块 + 文字，避免浏览器默认破图占位。 */}
+                                                <StyleThumb src={option.thumb} label={option.label} active={active} />
                                                 <div className="truncate px-2 py-1.5 text-center text-[11px]" style={{ color: active ? ACCENT : theme.node.text }}>{option.label}</div>
                                             </button>
                                         );
@@ -774,4 +775,25 @@ export function ShortDramaCard({
             </Modal>
         </div>
     );
+}
+
+/**
+ * 画风缩略图。仓库里没有随包资源时 `/style-thumbs/*.jpg` 会 404，
+ * 浏览器默认会渲染成破图图标；这里降级为「渐变色块 + 首字」，
+ * 让画风库在没有图片资源时依然可读、可点。
+ */
+function StyleThumb({ src, label, active }: { src: string; label: string; active: boolean }) {
+    const [failed, setFailed] = useState(false);
+    if (failed || !src) {
+        return (
+            <div
+                className="grid aspect-[3/2] w-full place-items-center text-[22px] font-semibold"
+                style={{ background: active ? `${ACCENT}22` : "linear-gradient(135deg, #e7e5e4, #d6d3d1)", color: active ? ACCENT : "#78716c" }}
+                aria-hidden="true"
+            >
+                {label.slice(0, 1)}
+            </div>
+        );
+    }
+    return <img src={src} alt={label} className="aspect-[3/2] w-full object-cover" draggable={false} onError={() => setFailed(true)} />;
 }

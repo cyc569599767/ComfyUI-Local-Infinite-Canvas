@@ -439,15 +439,23 @@ export function expandShotsForVideo(shots: DramaStoryboardShot[], hardMax = 15):
             continue;
         }
         // 不可切割的连续 inner：单一句内心 + 无动作切镜，最多放到 GEN_MAX_SECONDS，不按 15s 硬拆。
+        // 注意这里不能再判 sec <= hardMax（函数入口已提前 return），否则整段变成死代码，
+        // 超长单句会被下面的通用切分逻辑拆出「无台词空段 + 整段保留」两张卡。
+        // rows 必须真有台词：无台词的长动作走下面的通用切分，不能被这条捷径吞掉。
         const rows = String(shot.dialogue || "").split(/\n+/).map((row) => row.trim()).filter(Boolean);
         const singleInner = rows.length === 1 && /^\[(内心|inner)\]/i.test(rows[0]);
         const noActionCuts = actionPartsOf(shot.action).length <= 1;
-        if (singleInner && noActionCuts && sec <= hardMax) {
-            out.push(shot);
+        if (singleInner && noActionCuts) {
+            out.push({
+                ...shot,
+                duration: Math.max(GEN_MIN_SECONDS, Math.min(GEN_MAX_SECONDS, Math.ceil(sec))),
+                splitReason: sec > hardMax ? "单句超长/不可切，按整段保留" : shot.splitReason,
+            });
             continue;
         }
         const lines = String(shot.dialogue || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
         const parts = actionPartsOf(shot.action);
+        const startIndex = out.length;
         let lineIdx = 0;
         let segParts: string[] = [];
         let segLines: string[] = [];
@@ -472,26 +480,58 @@ export function expandShotsForVideo(shots: DramaStoryboardShot[], hardMax = 15):
             segActionSec = 0;
             segDialogueSec = 0;
         };
-        for (let p = 0; p < parts.length; p += 1) {
-            if (segActionSec + 2.5 > hardMax && (segParts.length || segLines.length)) flush();
-            segParts.push(parts[p]);
-            segActionSec += 2.5;
+        // 段内动作按「该段实际文字量」折算，而不是每 part 固定 2.5s：
+        // 否则 200 字的单 part 只算 2.5s，台词全被推到下一段，首段变成无台词空卡。
+        const partSec = (value: string) => Math.max(2, Math.min(12, value.replace(/\s/g, "").length / 10));
+        // 双指针同时推进：每轮把「下一个动作 part」和「下一句台词」都装进当前段，
+        // 任一维度超限就先结算再继续。这样不会出现「动作装完了但台词还没进来」的空段。
+        let partIdx = 0;
+        while (partIdx < parts.length || lineIdx < lines.length) {
+            let progressed = false;
+            if (partIdx < parts.length) {
+                const next = partSec(parts[partIdx]);
+                if (segParts.length && segActionSec + next > hardMax) {
+                    flush();
+                    continue;
+                }
+                segParts.push(parts[partIdx]);
+                segActionSec += next;
+                partIdx += 1;
+                progressed = true;
+            }
             while (lineIdx < lines.length) {
                 const need = charSeconds(lines[lineIdx]);
-                if (segDialogueSec + need > hardMax && (segParts.length || segLines.length)) break;
+                if (segLines.length && segDialogueSec + need > hardMax) break;
                 segLines.push(lines[lineIdx]);
-                lineIdx += 1;
                 segDialogueSec += need;
+                lineIdx += 1;
+                progressed = true;
+                // 单句本身就超段长时不必再往下塞。
+                if (segDialogueSec > hardMax) break;
+            }
+            if (!progressed) {
+                // 两个维度都装不进当前段（都为空却超限），强制结算避免死循环。
+                flush();
+                if (!segParts.length && !segLines.length) break;
             }
         }
-        while (lineIdx < lines.length) {
-            const need = charSeconds(lines[lineIdx]);
-            if (segDialogueSec + need > hardMax && (segParts.length || segLines.length)) flush();
-            segLines.push(lines[lineIdx]);
-            lineIdx += 1;
-            segDialogueSec += need;
-        }
         flush();
+        // 只在本镜刚产出的这几段里合并「有动作无台词」的残段，绝不能跨到别的输入镜，
+        // 否则相邻的独立镜头会被拼成一段、场景也被串掉。
+        const produced = out.splice(startIndex);
+        const kept: DramaStoryboardShot[] = [];
+        for (const segment of produced) {
+            const previous = kept[kept.length - 1];
+            const emptyDialogue = !segment.dialogue.trim() && Boolean(segment.action.trim());
+            if (emptyDialogue && previous && !previous.splitReason && (previous.duration || 0) + (segment.duration || 0) <= GEN_MAX_SECONDS) {
+                previous.action = [previous.action, segment.action].filter(Boolean).join("；");
+                previous.duration = Math.min(GEN_MAX_SECONDS, (previous.duration || 0) + (segment.duration || 0));
+                previous.result = segment.result || previous.result;
+                continue;
+            }
+            kept.push(segment);
+        }
+        out.push(...kept);
     }
     return out.filter((shot) => shot.action || shot.dialogue).map((shot, index) => ({ ...shot, shotNumber: index + 1 }));
 }
@@ -769,18 +809,41 @@ function toDialogueLines(value: unknown): DramaDialogueLine[] {
     return lines;
 }
 
+// 通道标签 + 正文。先说人后说正文的写法（`萧炎：...`）才拆出说话人；
+// 没有冒号时整段都是台词，不能把台词当成说话人（否则 text 为空、整行被丢弃）。
+const DIALOGUE_TAG = /^\[(台词|内心|画外|系统|spoken|inner|system)\]\s*([\s\S]*)$/i;
+// 冒号前若以人称代词起头或带句读，说明这是台词正文里的冒号（如「我想：他来了」），不是说话人。
+const PRONOUN_START = /^(我|你|您|他|她|它|咱|俺|这|那|其)/;
+const SENTENCE_MARK = /[，。！？…；、,.!?;]/;
+
+function looksLikeSpeakerName(value: string) {
+    const name = value.trim();
+    if (!name || name.length > 8) return false;
+    if (PRONOUN_START.test(name) || SENTENCE_MARK.test(name) || /\s/.test(name)) return false;
+    return true;
+}
+
+function splitTaggedDialogue(line: string): { speaker: string; channel: DramaDialogueChannel; text: string } | null {
+    const match = line.match(DIALOGUE_TAG);
+    if (!match) return null;
+    const tag = match[1].toLowerCase();
+    const channel: DramaDialogueChannel = tag === "内心" || tag === "inner" ? "inner" : tag === "画外" || tag === "系统" || tag === "system" ? "system" : "spoken";
+    const rest = match[2].trim();
+    const withSpeaker = rest.match(/^([^：:]{1,20})\s*[：:]\s*([\s\S]+)$/);
+    if (withSpeaker && looksLikeSpeakerName(withSpeaker[1]) && withSpeaker[2].trim()) {
+        return { speaker: withSpeaker[1].trim(), channel, text: withSpeaker[2].trim() };
+    }
+    return { speaker: channel === "system" ? "系统" : "角色", channel, text: rest };
+}
+
 export function parseDialogueLines(dialogue: string): DramaDialogueLine[] {
     return String(dialogue || "").split(/\n+/).map((raw) => {
         const line = raw.trim();
         if (!line) return null;
-        const match = line.match(/^\[(台词|内心|画外|系统|spoken|inner|system)\]\s*([^：:]*)[：:]?\s*([\s\S]*)$/i);
-        if (!match) {
-            const speakerMatch = line.match(/^([^：:]{1,20})[：:]\s*([\s\S]*)$/);
-            return { speaker: speakerMatch?.[1]?.trim() || "角色", channel: "spoken" as const, text: (speakerMatch?.[2] || line).trim() };
-        }
-        const tag = match[1].toLowerCase();
-        const channel: DramaDialogueChannel = tag === "内心" || tag === "inner" ? "inner" : tag === "画外" || tag === "系统" || tag === "system" ? "system" : "spoken";
-        return { speaker: match[2]?.trim() || (channel === "system" ? "系统" : "角色"), channel, text: match[3].trim() };
+        const tagged = splitTaggedDialogue(line);
+        if (tagged) return tagged;
+        const speakerMatch = line.match(/^([^：:]{1,20})[：:]\s*([\s\S]*)$/);
+        return { speaker: speakerMatch?.[1]?.trim() || "角色", channel: "spoken" as const, text: (speakerMatch?.[2] || line).trim() };
     }).filter((line): line is DramaDialogueLine => Boolean(line?.text));
 }
 
@@ -789,12 +852,11 @@ export function serializeDialogueLines(lines: DramaDialogueLine[]): string {
 }
 
 function dialogueOnlyAction(line: string): string {
-    const match = String(line).match(/^\[(台词|内心|画外|系统|spoken|inner|system)\]\s*([^：:]*)[：:]?/i);
-    const tag = (match?.[1] || "台词").toLowerCase();
-    const speaker = (match?.[2] || "").trim() || "角色";
-    if (tag === "内心" || tag === "inner") return `${speaker}神色微动（内心低语）`;
-    if (tag === "画外" || tag === "系统" || tag === "system") return "画外或系统声响起";
-    return `${speaker}开口说话`;
+    // 复用同一套拆分逻辑，避免这里把整句台词当成说话人。
+    const tagged = splitTaggedDialogue(String(line).trim());
+    if (tagged?.channel === "inner") return `${tagged.speaker}神色微动（内心低语）`;
+    if (tagged?.channel === "system") return "画外或系统声响起";
+    return `${tagged?.speaker || "角色"}开口说话`;
 }
 
 function splitDialogueParts(value: string): string[] {

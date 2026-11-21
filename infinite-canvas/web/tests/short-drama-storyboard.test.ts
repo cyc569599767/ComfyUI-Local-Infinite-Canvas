@@ -82,15 +82,28 @@ test("动作时长按信息量连续估算，不压成固定 3 秒", () => {
 });
 
 test("超长镜头按 15 秒切分且重编镜号不丢内容", () => {
-    const expanded = expandShotsForVideo([shot({ action: "A".repeat(200), dialogue: "这句话很长".repeat(20) })], 15);
+    // 多个切镜 + 多句台词，内容确实装不进一段时必须拆开。
+    const cutAction = Array.from({ length: 8 }, (_, i) => `${"动作描述".repeat(12)} Cut to Shot ${i + 1}`).join(" ");
+    const longDialogue = Array.from({ length: 8 }, (_, i) => `第${i + 1}句台词内容稍长一些`).join("\n");
+    const expanded = expandShotsForVideo([shot({ action: cutAction, dialogue: longDialogue })], 15);
     expect(expanded.length).toBeGreaterThan(1);
     // 镜号必须连续从 1 开始重排，否则画布卡片顺序会错。
     expect(expanded.map((item) => item.shotNumber)).toEqual(expanded.map((_, index) => index + 1));
-    // 每段都不能超过 25 秒硬上限。
+    // 每段都不能超 25 秒硬上限。
     expect(expanded.every((item) => (item.duration || 0) <= 25)).toBe(true);
-    // 拆分后内容不能丢：合并回去应包含原始动作与台词。
-    expect(expanded.map((item) => item.dialogue).join("")).toContain("这句话很长");
-    expect(expanded.some((item) => item.splitReason)).toBe(true);
+    // 拆分后内容不能丢：动作与台词都要保留在某个段里。
+    expect(expanded.map((item) => item.dialogue).join("\n")).toContain("第1句台词");
+    expect(expanded.map((item) => item.action).join("")).toContain("动作描述");
+    // 拆出来的每一段都要有台词，不能出现白烧生成的空卡。
+    expect(expanded.every((item) => item.dialogue.trim() || !item.action.trim())).toBe(true);
+});
+
+test("内容装得进一段时不拆，避免无意义地多花一次生成", () => {
+    // 单个动作 part（12s 上限）+ 台词总量未超段长，整段保留即可。
+    const single = expandShotsForVideo([shot({ action: "A".repeat(200), dialogue: "这句话很长".repeat(20) })], 15);
+    expect(single).toHaveLength(1);
+    expect(single[0].dialogue.trim().length).toBeGreaterThan(0);
+    expect((single[0].duration || 0) <= 25).toBe(true);
 });
 
 test("同场景短镜打包成 ≤15 秒生成段，内部记录切点", () => {
@@ -124,18 +137,34 @@ test("打包后总时长等于各段之和，不会因合并而漂移", () => {
 
 test("台词逐行解析通道、说话人与正文", () => {
     expect(parseDialogueLines("[内心] 萧炎：我该怎么办")).toEqual([{ speaker: "萧炎", channel: "inner", text: "我该怎么办" }]);
-    expect(parseDialogueLines("[画外] 系统提示")).toEqual([]);
+    expect(parseDialogueLines("[画外] 系统：门被推开")).toEqual([{ speaker: "系统", channel: "system", text: "门被推开" }]);
     expect(parseDialogueLines("萧炎：你来了")).toEqual([{ speaker: "萧炎", channel: "spoken", text: "你来了" }]);
     expect(parseDialogueLines("你来了")).toEqual([{ speaker: "角色", channel: "spoken", text: "你来了" }]);
     expect(parseDialogueLines("")).toEqual([]);
 });
 
-test.failing("无说话人的通道台词不应被静默丢弃（已知缺陷）", () => {
-    // 现状：正则把标签后的所有内容当作 speaker，没有冒号时 text 为空 → 整行被过滤。
-    // 影响：[内心]/[画外] 不带说话人的台词在 ensureSpokenDialogue 里丢失，
-    // 导致 H3 提示词缺少应保留的台词。修复后应改为 test()。
+test("无说话人的通道台词按通道保底，不被静默丢弃", () => {
+    // 只有通道标签、没有「说话人：」时，整段都是台词，说话人取该通道的默认值。
     expect(parseDialogueLines("[内心]我不能退")).toEqual([{ speaker: "角色", channel: "inner", text: "我不能退" }]);
     expect(parseDialogueLines("[画外]门被推开")).toEqual([{ speaker: "系统", channel: "system", text: "门被推开" }]);
+    expect(parseDialogueLines("[系统]叮！获得传承")).toEqual([{ speaker: "系统", channel: "system", text: "叮！获得传承" }]);
+    expect(parseDialogueLines("[台词]你好")).toEqual([{ speaker: "角色", channel: "spoken", text: "你好" }]);
+    // 多行混合时不能因为某行没说话人就整行消失。
+    expect(parseDialogueLines("[内心]我不能退\n萧炎：你来了")).toEqual([
+        { speaker: "角色", channel: "inner", text: "我不能退" },
+        { speaker: "萧炎", channel: "spoken", text: "你来了" },
+    ]);
+});
+
+test("台词正文里的冒号不被误判成说话人", () => {
+    // 人称代词起头的冒号属于台词正文。
+    expect(parseDialogueLines("[内心] 我想：他来了")).toEqual([{ speaker: "角色", channel: "inner", text: "我想：他来了" }]);
+    expect(parseDialogueLines("[台词]他说：我不去")).toEqual([{ speaker: "角色", channel: "spoken", text: "他说：我不去" }]);
+    // 真正的说话人仍要正确拆出（含英文冒号、带空格的写法）。
+    expect(parseDialogueLines("[台词] 萧炎: 你来了")).toEqual([{ speaker: "萧炎", channel: "spoken", text: "你来了" }]);
+    expect(parseDialogueLines("[内心]纳兰嫣然：我不会退")).toEqual([{ speaker: "纳兰嫣然", channel: "inner", text: "我不会退" }]);
+    // 画外音允许写来源（广播/电视）。
+    expect(parseDialogueLines("[画外]广播：三百万金币")).toEqual([{ speaker: "广播", channel: "system", text: "三百万金币" }]);
 });
 
 test("台词序列化与解析可往返，通道不丢失", () => {
@@ -149,12 +178,14 @@ test("台词序列化与解析可往返，通道不丢失", () => {
     expect(parseDialogueLines(text)).toEqual(lines);
 });
 
-test.failing("超长单句 inner 不应拆出空段（已知缺陷）", () => {
-    // 现状：expandShotsForVideo 里 singleInner 分支的条件 `sec <= hardMax` 与外层
-    // `if (sec <= hardMax) continue` 重复，该分支永远不可达；长内心句被拆成
-    //「有动作无台词的空段 + 带 splitReason 的整段」。修复后应改为 test()。
+test("超长单句 inner 整段保留，不拆出无台词空段", () => {
+    // 单句内心 + 无动作切镜属于不可切割内容：整段保留并夹到 25s，
+    // 不能先产出一张「只有动作没有台词」的空卡再补一张整段卡。
     const expanded = expandShotsForVideo([shot({ action: "静坐", dialogue: `[内心] 萧炎：${"很长的一句话".repeat(20)}` })], 15);
-    expect(expanded.every((item) => item.dialogue.trim() || item.action.trim() !== "静坐")).toBe(true);
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0].dialogue).toContain("[内心]");
+    expect((expanded[0].duration || 0)).toBeLessThanOrEqual(25);
+    expect(expanded[0].splitReason).toBe("单句超长/不可切，按整段保留");
 });
 
 test("校验能发现 beat 漏覆盖、重复覆盖与时长装不下台词", () => {
