@@ -117,3 +117,75 @@ test("H3 size snaps to multiples of 32 and reference images map by index", () =>
   // 第三张参考图在原工作流里是可选输入，绑定时应能动态补上。
   assert.equal(output["136"].inputs["ref_images.ref_image_2"], "c.png");
 });
+
+// H3 角色替换：额度 6 图 / 1 源视频 / 2 音频，超限必须拒绝而不是静默截断。
+// 静默截断会让用户以为第 7 张角色参考也参与了换人，出片后才发现换错了人。
+const swapWorkflow = () => ({
+  76: { class_type: "MiniMaxH3Ref2VA", inputs: { prompt: "x", width: 1344, height: 768, task_type: "Ref2VA" } },
+});
+const swapEntry = (extra = {}) => ({
+  name: "video-h3-character-swap",
+  strictMedia: true,
+  bindings: {
+    prompt: { node: "76", input: "prompt" },
+    refs: { node: "76", input: "ref_images", from: "image", array: true, inputPrefix: "ref_images.ref_image_", min: 1, max: 6 },
+    videos: { node: "76", input: "ref_videos", from: "video", array: true, inputPrefix: "ref_videos.ref_video_", min: 1, max: 1, loadType: "video", loader: "native" },
+    audios: { node: "76", input: "ref_audios", from: "audio", array: true, inputPrefix: "ref_audios.ref_audio_", min: 0, max: 2, loadType: "audio" },
+  },
+  ...extra,
+});
+const images = (n) => Array.from({ length: n }, (_, i) => ({ name: `c${i}.png` }));
+const videos = (n) => Array.from({ length: n }, (_, i) => ({ name: `v${i}.mp4` }));
+const audios = (n) => Array.from({ length: n }, (_, i) => ({ name: `a${i}.wav` }));
+
+test("character swap accepts 6 images + 1 video + 2 audios", () => {
+  const out = applyBindings(
+    swapWorkflow(),
+    swapEntry(),
+    buildContext({ prompt: "swap", uploadedImages: images(6), uploadedVideos: videos(1), uploadedAudios: audios(2) }),
+  );
+  const refKeys = Object.keys(out["76"].inputs).filter((key) => key.startsWith("ref_images."));
+  const videoKeys = Object.keys(out["76"].inputs).filter((key) => key.startsWith("ref_videos."));
+  const audioKeys = Object.keys(out["76"].inputs).filter((key) => key.startsWith("ref_audios."));
+  assert.equal(refKeys.length, 6);
+  assert.equal(videoKeys.length, 1);
+  assert.equal(audioKeys.length, 2);
+});
+
+test("character swap rejects 7 images instead of silently dropping one", () => {
+  assert.throws(
+    () => applyBindings(swapWorkflow(), swapEntry(), buildContext({ prompt: "swap", uploadedImages: images(7), uploadedVideos: videos(1) })),
+    (error) => error.code === "too_many_reference_media",
+  );
+});
+
+test("character swap rejects 2 source videos", () => {
+  assert.throws(
+    () => applyBindings(swapWorkflow(), swapEntry(), buildContext({ prompt: "swap", uploadedImages: images(1), uploadedVideos: videos(2) })),
+    (error) => error.code === "too_many_reference_media",
+  );
+});
+
+test("character swap rejects 3 audios", () => {
+  assert.throws(
+    () => applyBindings(swapWorkflow(), swapEntry(), buildContext({ prompt: "swap", uploadedImages: images(1), uploadedVideos: videos(1), uploadedAudios: audios(3) })),
+    (error) => error.code === "too_many_reference_media",
+  );
+});
+
+test("character swap still requires at least one reference image", () => {
+  assert.throws(
+    () => applyBindings(swapWorkflow(), swapEntry(), buildContext({ prompt: "swap", uploadedImages: [], uploadedVideos: videos(1) })),
+    (error) => error.code === "missing_reference_media",
+  );
+});
+
+test("non-strict workflows keep truncating to their max", () => {
+  // 没有 strictMedia 的工作流保持原行为：超限截断而不是报错。
+  const out = applyBindings(
+    swapWorkflow(),
+    swapEntry({ strictMedia: false }),
+    buildContext({ prompt: "swap", uploadedImages: images(9), uploadedVideos: videos(1) }),
+  );
+  assert.equal(Object.keys(out["76"].inputs).filter((key) => key.startsWith("ref_images.")).length, 6);
+});

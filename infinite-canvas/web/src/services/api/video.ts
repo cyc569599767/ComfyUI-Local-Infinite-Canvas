@@ -362,6 +362,22 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     const frameMode = config.frameMode || (references.length >= 2 ? "both" : "first");
     const creationH3 = /^creation-video-h3-(768|1080)$/.test(modelOptionName(model));
     if (creationH3 && (references.length > 9 || (options?.videos?.length || 0) > 3 || (options?.audios?.length || 0) > 3)) throw new Error("创作H3最多支持9张图、3段视频、3段音频，不能静默截断引用。");
+    // H3 角色替换的额度与网关绑定一致（6 图 / 1 源视频 / 2 音频）。超限必须报错拒绝：
+    // 静默截断会让用户以为第 7 张角色参考也参与了换人，出片后才发现换错了人。
+    const swapWorkflow = baseVideoWorkflowId(videoWorkflowId(config, model)) === "video-h3-character-swap";
+    if (swapWorkflow) {
+        const overImages = references.length > 6;
+        const overVideos = (options?.videos?.length || 0) > 1;
+        const overAudios = (options?.audios?.length || 0) > 2;
+        if (overImages || overVideos || overAudios) {
+            const parts = [
+                overImages ? `${references.length} 张参考图（上限 6）` : "",
+                overVideos ? `${options?.videos?.length} 段源视频（上限 1）` : "",
+                overAudios ? `${options?.audios?.length} 段音频（上限 2）` : "",
+            ].filter(Boolean).join("、");
+            throw new Error(`H3 角色替换超出入参上限：${parts}。请先删掉多余的参考，避免被静默丢弃。`);
+        }
+    }
     const selectedImages = references.slice(0, mode === "text" ? 0 : mode === "frames" ? 2 : creationH3 ? 9 : 6);
     const selectedVideos = mode === "reference" ? (options?.videos || []).slice(0, creationH3 ? 3 : 1) : [];
     const selectedAudios = mode === "reference" ? (options?.audios || []).slice(0, creationH3 ? 3 : 2) : [];

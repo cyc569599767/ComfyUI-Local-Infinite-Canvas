@@ -61,8 +61,10 @@ test("既有注册项和工作流内容保持原样", () => {
   // 摘要覆盖除创作专用外的全部注册项；v0.25.3 选择性合并新增了
   // video-hyperflow-ref2va-6p2 / image-h3image / image-ph3image / video-h3-viggle-swap 四条，
   // 其余历史条目必须继续与基线逐字节一致。
+  // 2026-11-21：为 video-h3-character-swap / video-h3-viggle-swap 增加 strictMedia 标记
+  // （超限拒绝而非静默截断），注册表摘要据此更新；工作流 JSON 未改动，第二个摘要不变。
   const legacy = rows.filter((entry) => !entry.id.startsWith("creation-"));
-  assert.equal(digest(JSON.stringify(legacy)), "f5dddff69ac7e819ad11f232ee1ad41ecacc5a74eadbe288df3b316fb9e1ddbe");
+  assert.equal(digest(JSON.stringify(legacy)), "2a7677025d5a2a97f9bfa0a324fc8f4c0414b6623a6a96cf52019206982c1c91");
   const files = [...new Set(legacy.flatMap((entry) => [entry.file, ...Object.values(entry.variants || {}).map((variant) => variant.file)]).filter(Boolean))].sort();
   // 规范化换行，避免 Windows Git autocrlf 造成无意义差异。
   const canonical = files.map((file) => [file, digest(JSON.stringify(read(file)))]);

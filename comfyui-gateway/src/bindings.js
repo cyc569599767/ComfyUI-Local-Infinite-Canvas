@@ -204,7 +204,10 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
       const isVideo = binding.loadType === "video" || binding.from === "video";
       const isAudio = binding.loadType === "audio" || binding.from === "audio";
       const media = (isVideo ? context.uploadedVideos : isAudio ? context.uploadedAudios : context.uploadedImages) || [];
-      if (entry.strictModelNames && binding.max && media.length > Number(binding.max)) throw new BindingError(`创作工作流最多接收 ${binding.max} 个参考素材，收到 ${media.length} 个，不能静默截断。`, { code: "too_many_reference_media" });
+      // 超限默认截断（部分工作流的 min/max 只是软上限）。带 strictMedia 的工作流必须拒绝：
+      // 换人场景里第 N+1 张角色参考被静默丢掉，用户会以为换的是那个人。
+      const strictMedia = entry.strictMedia === true || entry.strictModelNames === true;
+      if (strictMedia && binding.max && media.length > Number(binding.max)) throw new BindingError(`工作流最多接收 ${binding.max} 个参考素材，收到 ${media.length} 个，不能静默截断。`, { code: "too_many_reference_media" });
       const selected = media.slice(0, Number(binding.max || 8));
       const min = Number(binding.min || 0);
       if (selected.length < min) {

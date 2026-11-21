@@ -3217,6 +3217,7 @@
     },
     {
       "id": "video-h3-character-swap",
+      "strictMedia": true,
       "name": "video-h3-character-swap",
       "type": "video",
       "file": "h3-character-swap-vdn.json",
@@ -5702,6 +5703,7 @@
     },
     {
       "id": "video-h3-viggle-swap",
+      "strictMedia": true,
       "name": "video-h3-viggle-swap",
       "type": "video",
       "file": "h3-viggle-swap.json",

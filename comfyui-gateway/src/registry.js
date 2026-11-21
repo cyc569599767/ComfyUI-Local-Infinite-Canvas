@@ -343,6 +343,9 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
       category: entry.category || null,
       hidden: entry.hidden === true,
       strictModelNames: entry.strictModelNames === true,
+      // 参考素材超限时是否拒绝而非静默截断。与 strictModelNames 分开：
+      // 后者还会牵动模型名严格匹配，不能为了「不丢素材」而顺带收紧模型解析。
+      strictMedia: entry.strictMedia === true,
       audioMode: entry.audioMode,
       outputNodes: entry.outputNodes,
       file: entry.file,

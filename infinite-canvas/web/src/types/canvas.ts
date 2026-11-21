@@ -189,6 +189,8 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     refsWarningDismissed?: boolean;
+    // 角色替换工作流的玩法说明是否被用户手动关闭。
+    swapHintDismissed?: boolean;
     videoTaskId?: string;
     videoTaskProvider?: "openai" | "gemini";
     previewUrl?: string;

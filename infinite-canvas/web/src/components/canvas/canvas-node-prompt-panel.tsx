@@ -123,10 +123,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const optimizeResult = node.metadata?.promptOptimizePrompt || "";
     const optimizeError = node.metadata?.promptOptimizeError || "";
     const originalPrompt = node.metadata?.promptOptimizeSource?.trim() || "";
-    const promptPlaceholder =
-        workflowId === "video-h3-character-swap"
-            ? t("canvas.promptPanel.characterSwapHint")
-            : t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`);
+    // 换人的玩法说明已经移到面板顶部的常驻提示条（占位符里重复一遍只会显得啰嗦，
+    // 而且输入框一有内容占位符就消失，等于没有）。
+    const promptPlaceholder = t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`);
     const canOptimize = canOptimizeVideo && Boolean(draft.trim()) && !isRunning && !optimizeRunning;
     const canOptimizeImage = isImage && Boolean(draft.trim()) && !isRunning && !optimizeRunning;
     const optimizeEngine = config.promptApiEngine === "cloud" ? "cloud" : "local";
@@ -146,6 +145,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const hasMediaReferences = mentionReferences.some((reference) => reference.kind !== "text");
     const textVideoHasReferences = isH3T2V && hasMediaReferences;
     const refsWarningDismissed = Boolean(node.metadata?.refsWarningDismissed);
+    const swapHintDismissed = Boolean(node.metadata?.swapHintDismissed);
     const sourceVideoTooLong = Boolean(sourceVideoNode?.metadata?.durationMs && sourceVideoNode.metadata.durationMs > 15000);
     const frameMode: "first" | "last" | "both" =
         node.metadata?.frameMode === "last" || node.metadata?.frameMode === "both" || node.metadata?.frameMode === "first"
@@ -473,6 +473,16 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                 </div>
             ) : null}
             {sourceVideoTooLong && !textVideoHasReferences ? <div className="mb-2 text-xs leading-4 text-amber-600 dark:text-amber-400">{t("canvas.promptPanel.sourceVideoLimit")}</div> : null}
+            {/* 角色替换的玩法说明必须常驻：只放在 placeholder 里的话，用户一输入提示词就看不到
+                「哪张图当角色、哪段视频当源」，很容易把顺序搞反。可手动关闭。 */}
+            {isCharacterSwap && !swapHintDismissed ? (
+                <div className="mb-2 flex items-start gap-2 rounded-lg bg-sky-500/10 px-2 py-1 text-xs leading-4 text-sky-700 dark:text-sky-300">
+                    <span className="min-w-0 flex-1">{t("canvas.promptPanel.characterSwapHint")}</span>
+                    <button type="button" className="shrink-0 opacity-70 hover:opacity-100" aria-label={t("canvas.promptPanel.dismissHint")} onClick={() => onConfigChange(node.id, { swapHintDismissed: true })}>
+                        <X className="size-3.5" />
+                    </button>
+                </div>
+            ) : null}
             <CanvasResourceMentionTextarea
                 ref={textareaRef}
                 value={draft}
