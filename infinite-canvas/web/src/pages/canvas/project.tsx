@@ -10,7 +10,7 @@ import { createFreeWorkflowVideoTask, fetchFreeWorkflow, fetchFreeWorkflows, req
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
 import { generateCanvasAudio, resolveReferenceAudioBlob, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
 import { createVideoGenerationTask, createVideoInterpolateTask, createVideoUpscaleTask, isVideoTaskFailed, readVideoTaskResumeInfo, storeGeneratedVideo, waitForVideoGenerationTask, type VideoPreview } from "@/services/api/video";
-import { channelModelOf, defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { activePromptCloudApi, channelModelOf, defaultConfig, selectableModelsByCapability, useConfigStore, useEffectiveConfig, workflowModelOptions, type AiConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, imageToDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -18,6 +18,15 @@ import { dataUrlToFile, getDataUrlByteSize, readImageMeta } from "@/lib/image-ut
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
+import { videoWorkflowId } from "@/lib/canvas/video-model-mode";
+import { automationImageSize, computeAutomationLayout } from "@/lib/automation/layout";
+import { AUTOMATION_VIDEO_PROMPT_VERSION, STORYBOARD_NEGATIVE_PROMPT, STORYBOARD_PROMPT_VERSION, applyComicFrameworkHints, automationCharacterSheetPrompt, buildAutomationVideoReference, buildComicFrameworkMessages, buildComicToVideoMessages, buildGridMoss, buildNovelToComicMessages, buildScriptAdaptationMessages, cameraMoveCount, collectAutomationScenes, duplicatePageEvents, extractJson, formatPageCard, formatScriptForPlanning, isCrowdCharacterName, isRef2VAPrompt, mergeAutomationScripts, mergeComicPlans, missingPageEvents, normalizeComicPlan, normalizeMossLayout, normalizeScript, normalizeVideoPrompts, pageSpeechSeconds, resolvePageVideoSeconds, reviewComicPlan, sanitizePageDialogue, scriptStats, splitAutomationSource, splitPageVideoSegments, splitScriptIntoBatches } from "@/lib/automation/skills";
+import { buildCharacterExtractionMessages, buildPropExtractionMessages, buildPropPolishMessages, buildRolePolishMessages, buildSceneExtractionMessages, buildScenePolishMessages, characterAssetPrompt, deriveSceneVariant, frameReferencePrompt, isMajorSceneChange, isSameSceneKey, normalizeCharacters, normalizeLocationKey, normalizeProps, normalizeScenes, propAssetPrompt, sceneAssetPrompt, sceneReferencePrompt, sharesSceneBase } from "@/lib/short-drama/assets";
+import { buildDramaResumePlan, createDramaRun, markDramaRunStoryboardsDone, updateDramaRunItem, type DramaRun } from "@/lib/short-drama/run-manifest";
+import { buildDeterministicH3Prompt, buildH3BasePrompt, buildH3CompileMessages, buildRef2VAPrompt, buildScreenplayAdaptationMessages, buildShotPlanMessages, elasticPackShots, estimateShotSeconds, fallbackBeatsFromScript, fallbackShotPlan, normalizeH3Prompt, normalizeScreenplay, normalizeShotPlan, parseDialogueLines, planToShots, repairStoryboardPlan, sanityCheckPackedShots, storyboardCardContent, validateStoryboardPlan, type DramaBeat, type DramaScreenplay, type DramaShotPlan } from "@/lib/short-drama/storyboard";
+import { findDramaStyle } from "@/lib/short-drama/styles";
+import { ShortDramaCard } from "@/components/canvas/short-drama-card";
+import { CanvasAutomationPanel, type CanvasAutomationStartInput } from "@/components/canvas/canvas-automation-panel";
 import { CANVAS_ASSET_MIME, resolveDraggedAsset, assetDropPosition } from "@/lib/canvas/asset-drag";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl } from "@/lib/canvas/canvas-image-data";
@@ -120,6 +129,22 @@ import {
     type Position,
     type SelectionBox,
     type ViewportTransform,
+    type CanvasAutomationCharacter,
+    type CanvasAutomationCharacterSheet,
+    type CanvasAutomationGrid,
+    type CanvasAutomationPage,
+    type CanvasAutomationPanelSpec,
+    type CanvasAutomationScene,
+    type CanvasAutomationSceneSheet,
+    type CanvasAutomationScript,
+    type CanvasAutomationScriptBeat,
+    type CanvasAutomationScriptLine,
+    type CanvasAutomationScriptScene,
+    type CanvasAutomationSettings,
+    type CanvasAutomationShotGroup,
+    type CanvasAutomationState,
+    type CanvasDramaCardData,
+    type CanvasDramaStoryboardShot,
     isAudioNodeType,
 } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
@@ -185,6 +210,87 @@ function applyGeneratedVideo(item: CanvasNodeData, video: UploadedFile, extra: C
         position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
         metadata: { ...item.metadata, ...videoMetadata(video), ...extra },
     };
+}
+
+// ── 短剧编排用到的模块级辅助（上游 v0.25.x）──
+
+function updateDramaCardProgress(
+    setNodes: (updater: (prev: CanvasNodeData[]) => CanvasNodeData[]) => void,
+    nodeId: string,
+    stage: string | null,
+    current: number,
+    total: number,
+) {
+    setNodes((prev) =>
+        prev.map((node) => {
+            if (node.id !== nodeId || !node.metadata?.dramaCard) return node;
+            return {
+                ...node,
+                metadata: {
+                    ...node.metadata,
+                    status: stage ? NODE_STATUS_LOADING : NODE_STATUS_SUCCESS,
+                    stepProgress: total > 0 ? { step: current, total, complete: !stage } : undefined,
+                    dramaCard: { ...node.metadata.dramaCard, progress: stage ? { stage, current, total } : undefined },
+                },
+            };
+        }),
+    );
+}
+
+function resolveDramaTextConfig(config: AiConfig): AiConfig | null {    const textModel = config.textModel || selectableModelsByCapability(config, "text")[0];
+    if (textModel) return { ...config, model: textModel };
+    const cloudApi = activePromptCloudApi(config);
+    if (!cloudApi) return null;
+    const channelId = `prompt-cloud-${cloudApi.id || "active"}`;
+    const modelValue = `${channelId}::${cloudApi.model}`;
+    return {
+        ...config,
+        channels: [
+            { id: channelId, name: cloudApi.name || "Cloud", baseUrl: cloudApi.baseUrl, apiKey: cloudApi.apiKey, apiFormat: "openai" as const, models: [{ name: cloudApi.model, capability: "text" as const }] },
+            ...config.channels,
+        ],
+        model: modelValue,
+        textModel: modelValue,
+    };
+}
+
+function ensureSpokenDialogue(prompt: string, dialogue: string) {
+    const lines = parseDialogueLines(dialogue);
+    if (!lines.length) return prompt;
+    const norm = (s: string) => s.replace(/[\s“”「」"'，,。.!！?？…：:；;（）()<>\/\[\]a-zA-Z-]/g, "");
+    const spoken = [...prompt.matchAll(/<d>([\s\S]*?)<\/d>/gi)].map((m) => norm(m[1]));
+    const missing = lines.filter((line) => {
+        const core = norm(line.text);
+        return core.length > 0 && !spoken.some((s) => s.includes(core));
+    });
+    if (!missing.length) return prompt;
+    const injected = missing.map((line) => {
+        const cue = line.channel === "inner"
+            ? `${line.speaker || "S1"} (inner voice, lips remain completely closed, no lip-sync): `
+            : line.channel === "system"
+              ? "SYS (off-screen system voice, no visible speaker): "
+              : "";
+        return `${cue}<d>[Chinese] ${line.text}</d>`;
+    }).join(" ");
+    return /overall_soundscape\s*:/i.test(prompt) ? prompt.replace(/(\n\s*overall_soundscape\s*:)/i, `\n${injected}\n$1`) : `${prompt}\n${injected}`;
+}
+
+async function requestH3CompileAnswer(config: AiConfig, messages: Parameters<typeof requestImageQuestion>[1]) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort("timeout"), 120000);
+    try {
+        return await requestImageQuestion(config, messages, () => undefined, { signal: controller.signal });
+    } finally {
+        window.clearTimeout(timer);
+    }
+}
+
+const dramaRunGuards = new Set<string>();
+
+function stepPreviewUrl(url: string | undefined, step: number | undefined, previousUrl: string | undefined, previousStep: number | undefined) {
+    if (!url || step == null) return url;
+    if (step === previousStep || url !== previousUrl) return url;
+    return `${url}${url.includes("?") ? "&" : "?"}s=${step}`;
 }
 
 export default function CanvasPage() {
@@ -4949,9 +5055,2692 @@ function InfiniteCanvasPage() {
         [runningNodeId],
     );
 
+    // ── 短剧 / 自动化 运行时编排（上游 v0.25.x）──────────────────────────
+    // 声明在 renderNodePanel 之前，避免回调在初始化前被引用。
+    const dramaPauseRef = useRef(new Set<string>());
+    const [automationRunningIds, setAutomationRunningIds] = useState<Set<string>>(new Set());
+    const automationControllersRef = useRef(new Map<string, AbortController>());
+    const waitAutomationRender = useCallback(() => new Promise<void>((resolve) => window.setTimeout(resolve, 80)), []);
+
+    const clearDramaPause = useCallback(
+        (dramaNode: CanvasNodeData) => {
+            dramaPauseRef.current.delete(dramaNode.id);
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === dramaNode.id && node.metadata?.dramaCard?.paused ? { ...node, metadata: { ...node.metadata, dramaCard: { ...node.metadata.dramaCard, paused: false } } } : node,
+                ),
+            );
+        },
+        [setNodes],
+    );
+
+    const pauseDramaCreation = useCallback(
+        (dramaNode: CanvasNodeData) => {
+            dramaPauseRef.current.add(dramaNode.id);
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === dramaNode.id && node.metadata?.dramaCard ? { ...node, metadata: { ...node.metadata, dramaCard: { ...node.metadata.dramaCard, paused: true } } } : node,
+                ),
+            );
+            message.info("当前步骤完成后暂停");
+        },
+        [message, setNodes],
+    );
+
+    const saveDramaRun = useCallback(
+        (dramaNode: CanvasNodeData, episodeId: string, run: DramaRun) => {
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === dramaNode.id && node.metadata?.dramaCard
+                        ? { ...node, metadata: { ...node.metadata, dramaCard: { ...node.metadata.dramaCard, runs: { ...(node.metadata.dramaCard.runs || {}), [episodeId]: run } } } }
+                        : node,
+                ),
+            );
+        },
+        [setNodes],
+    );
+
+    const resumeDramaStoryboards = useCallback(
+        async (dramaNode: CanvasNodeData, episodeId: string) => {
+            const liveNode = nodesRef.current.find((node) => node.id === dramaNode.id) || dramaNode;
+            const data = liveNode.metadata?.dramaCard;
+            const episode = data?.episodes.find((item) => item.id === episodeId);
+            const run = data?.runs?.[episodeId];
+            if (!data || !episode) throw new Error("分集不存在");
+            if (!run?.storyboardsDone || !run.items.length) throw new Error("没有可继续的分镜");
+            const shots = data.storyboards?.[episodeId]?.length ? data.storyboards[episodeId] : run.items.map((item) => item.shot);
+            if (!shots.length) throw new Error("没有可继续的分镜");
+            const textConfig = resolveDramaTextConfig(effectiveConfig);
+            if (!textConfig) throw new Error("未配置文本模型");
+            const style = findDramaStyle(data.style);
+            const stylePrompt = style?.prompt || style?.promptEn || data.style;
+            const library = data.assets || { characters: [], scenes: [], props: [] };
+            const useReference = true;
+            const imageModel = data.imageWorkflow || "local-gateway::image-qwen21";
+            const imageRefLimit = Math.max(0, channelModelOf(effectiveConfig, imageModel)?.model.imageInputs ?? (imageModel.endsWith("::image-qwen21") ? 4 : 0));
+            const allAssetRecords = [...library.characters, ...library.scenes, ...library.props];
+            const resolveAssetNode = (name: string) => {
+                const record = allAssetRecords.find((candidate) => candidate.name === name);
+                if (!record?.nodeId) return undefined;
+                const node = nodesRef.current.find((candidate) => candidate.id === record.nodeId && Boolean(candidate.metadata?.content));
+                if (!node) console.warn(`参考资产缺图，已跳过：${name}`);
+                return node;
+            };
+            const frameRefsFor = (shot: (typeof shots)[number]) => {
+                const shotText = `${shot.title} ${shot.location} ${shot.action} ${shot.dialogue} ${shot.result}`;
+                const shotLocationKey = shot.location ? normalizeLocationKey(shot.location) : "";
+                const sceneMatched = library.scenes.filter((record) => {
+                    if (!record.nodeId) return false;
+                    const recordKey = record.locationKey || normalizeLocationKey(record.location || record.name);
+                    const locationHit = Boolean(shotLocationKey) && (recordKey === shotLocationKey || isSameSceneKey(recordKey, shotLocationKey) || sharesSceneBase(recordKey, shotLocationKey));
+                    return locationHit || shotText.includes(record.name) || Boolean(record.location && shotText.includes(record.location));
+                });
+                const scenePicks = (sceneMatched.length ? sceneMatched : library.scenes.filter((record) => record.nodeId)).slice(0, 1);
+                const characterMatched = library.characters.filter((record) => record.nodeId && shotText.includes(record.name));
+                const characterPool = library.characters.filter((record) => record.nodeId);
+                const primary = characterPool.slice(0, 1);
+                const characterPicks = [...primary, ...characterMatched.filter((record) => !primary.includes(record)), ...characterPool.filter((record) => !primary.includes(record) && !characterMatched.includes(record))];
+                const slots = Math.max(0, imageRefLimit - scenePicks.length);
+                return imageRefLimit
+                    ? [
+                          ...scenePicks.map((record) => ({ name: record.name, kind: "scene" as const })),
+                          ...characterPicks.slice(0, slots).map((record) => ({ name: record.name, kind: "character" as const })),
+                      ].slice(0, imageRefLimit)
+                    : [];
+            };
+            const videoRefsFor = (shot: (typeof shots)[number]) => {
+                const text = `${shot.action} ${shot.dialogue} ${shot.result} ${shot.title}`;
+                const recordOf = (name: string) => allAssetRecords.find((candidate) => candidate.name === name);
+                const scenes = library.scenes.map((record) => record.name);
+                const characters = library.characters.map((record) => record.name);
+                const props = library.props.map((record) => record.name);
+                const matchedOf = (names: string[]) => names.filter((name) => text.includes(name));
+                // Picture 1 固定给场景，其后角色（最多 3），最后道具——必须与提示词里的 <Picture N> 顺序一致。
+                const scene = matchedOf(scenes)[0] || scenes[0];
+                const characterNames = [...new Set([...matchedOf(characters), ...characters])].slice(0, 3);
+                const propNames = matchedOf(props).slice(0, 2);
+                const chosen = [...new Set([scene, ...characterNames, ...propNames].filter((name): name is string => Boolean(name)))].slice(0, 6);
+                return chosen.map((name) => {
+                    const record = recordOf(name);
+                    return { name, kind: (record?.kind || "character") as "character" | "scene" | "prop", description: record?.description || record?.prompt || "" };
+                });
+            };
+            const plan = buildDramaResumePlan({ run, shots, nodes: nodesRef.current, useReference });
+            if (plan.complete) {
+                saveDramaRun(dramaNode, episodeId, { ...run, updatedAt: new Date().toISOString(), items: run.items.map((item) => ({ ...item, done: true, lastError: undefined })) });
+                message.info("这一集已经生成完成");
+                return;
+            }
+            const assetNodeIds = new Set(allAssetRecords.map((record) => record.nodeId).filter((nodeId): nodeId is string => Boolean(nodeId)));
+            const assetRight = nodesRef.current.filter((node) => assetNodeIds.has(node.id)).reduce((max, node) => Math.max(max, node.position.x + node.width), dramaNode.position.x + dramaNode.width + 120);
+            const baseX = assetRight + 120;
+            const width = 360;
+            const height = 240;
+            const gap = 18;
+            const frameSize =
+                data.aspect === "9:16"
+                    ? { width: 216, height: 387, size: "928x1664" }
+                    : data.aspect === "4:3"
+                      ? { width: 320, height: 240, size: "1472x1104" }
+                      : data.aspect === "3:4"
+                        ? { width: 240, height: 320, size: "1104x1472" }
+                        : data.aspect === "1:1"
+                          ? { width: 280, height: 280, size: "1328x1328" }
+                          : { width: 384, height: 214, size: "1664x928" };
+            const frameX = baseX + width + 100;
+            const videoX = frameX + frameSize.width + 100;
+            const isPaused = () => dramaPauseRef.current.has(dramaNode.id);
+            const setProgress = (stage: string | null, current: number, total: number) => updateDramaCardProgress(setNodes, dramaNode.id, stage, current, total);
+            let current = { ...run, items: run.items.map((item) => ({ ...item })) };
+            const save = (next: DramaRun) => {
+                current = next;
+                saveDramaRun(dramaNode, episodeId, next);
+            };
+            const tasks = plan.items.map((planItem, index) => {
+                const item = current.items.find((candidate) => candidate.shotNumber === planItem.shot.shotNumber);
+                const storyNode = item?.storyNodeId ? nodesRef.current.find((node) => node.id === item.storyNodeId) : undefined;
+                const frameNode = item?.frameNodeId ? nodesRef.current.find((node) => node.id === item.frameNodeId) : undefined;
+                const videoNode = item?.videoNodeId ? nodesRef.current.find((node) => node.id === item.videoNodeId) : undefined;
+                return { planItem, item, shot: planItem.shot, storyNode, frameNode, videoNode, index };
+            });
+            for (const planItem of plan.items) {
+                if (planItem.videoAction.kind === "skip" && !current.items.find((item) => item.shotNumber === planItem.shot.shotNumber)?.done) {
+                    current = updateDramaRunItem(current, planItem.shot.shotNumber, { done: true, lastError: undefined });
+                }
+            }
+            save(current);
+            const newNodes: CanvasNodeData[] = [];
+            const newConnections: CanvasConnection[] = [];
+            for (const task of tasks) {
+                if (task.storyNode) continue;
+                const shot = task.shot;
+                const content = storyboardCardContent(shot);
+                const storyNode: CanvasNodeData = {
+                    id: `drama-shot-${nanoid()}`,
+                    type: CanvasNodeType.Text,
+                    title: `分镜 ${shot.shotNumber} · ${shot.title}`,
+                    position: { x: baseX, y: dramaNode.position.y + task.index * (height + gap) },
+                    width,
+                    height,
+                    metadata: { content, prompt: content, status: NODE_STATUS_SUCCESS, fontSize: 13 },
+                };
+                task.storyNode = storyNode;
+                newNodes.push(storyNode);
+                newConnections.push({ id: nanoid(), fromNodeId: dramaNode.id, toNodeId: storyNode.id, role: "lineage" });
+                save(updateDramaRunItem(current, shot.shotNumber, { storyNodeId: storyNode.id, lastError: undefined }));
+            }
+            for (const task of tasks) {
+                if (useReference || task.frameNode || task.planItem.frameAction.kind !== "generate" || task.planItem.videoAction.kind === "skip") continue;
+                const shot = task.shot;
+                const visual = [stylePrompt, shot.shotType, shot.cameraAngle, shot.location && `地点：${shot.location}`, shot.time && `时间：${shot.time}`, shot.action, shot.result].filter(Boolean).join("；");
+                const frameNode: CanvasNodeData = {
+                    id: `drama-frame-${nanoid()}`,
+                    type: CanvasNodeType.Image,
+                    title: `首帧 ${shot.shotNumber} · ${shot.title}`,
+                    position: { x: frameX, y: task.storyNode ? task.storyNode.position.y : dramaNode.position.y + task.index * (height + gap) },
+                    width: frameSize.width,
+                    height: frameSize.height,
+                    metadata: { status: NODE_STATUS_IDLE, generationType: "generation", imageMode: "t2i", model: imageModel, size: frameSize.size, count: 1, prompt: `${visual}。画面中不要出现字幕、标题或水印。` },
+                };
+                task.frameNode = frameNode;
+                newNodes.push(frameNode);
+                newConnections.push({ id: nanoid(), fromNodeId: task.storyNode!.id, toNodeId: frameNode.id, role: "lineage" });
+                for (const ref of frameRefsFor(shot)) {
+                    const node = resolveAssetNode(ref.name);
+                    if (node) newConnections.push({ id: nanoid(), fromNodeId: node.id, toNodeId: frameNode.id });
+                }
+                save(updateDramaRunItem(current, shot.shotNumber, { frameNodeId: frameNode.id }));
+            }
+            if (newNodes.length) {
+                setNodes((prev) => [...prev, ...newNodes]);
+                setConnections((prev) => [...prev, ...newConnections]);
+                await waitAutomationRender();
+                newNodes.length = 0;
+                newConnections.length = 0;
+            }
+            setProgress("续跑", 0, tasks.length);
+            for (let index = 0; index < tasks.length; index += 1) {
+                const task = tasks[index];
+                const { planItem, shot, storyNode, frameNode } = task;
+                if (!storyNode) continue;
+                if (!frameNode || planItem.frameAction.kind !== "generate") continue;
+                if (isPaused()) {
+                    setProgress(null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                setProgress("续跑首帧", index + 1, tasks.length);
+                let frameController: AbortController | undefined;
+                try {
+                    const refs = frameRefsFor(shot).flatMap((ref) => {
+                        const node = resolveAssetNode(ref.name);
+                        return node ? [{ name: ref.name, kind: ref.kind, node }] : [];
+                    });
+                    const frameConfig = { ...buildGenerationConfig(effectiveConfig, frameNode, "image"), model: imageModel, count: "1", size: frameSize.size, imageMode: "t2i" as const };
+                    if (!isAiConfigReady(frameConfig, frameConfig.model)) throw new Error("生图工作流不可用");
+                    setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)));
+                    const controller = startGenerationRequest(frameNode.id, dramaNode.id, frameNode.id);
+                    frameController = controller;
+                    const framePrompt = refs.length ? frameReferencePrompt(frameNode.metadata?.prompt || "", refs) : frameNode.metadata?.prompt || "";
+                    const image = refs.length
+                        ? await requestEdit(
+                              { ...frameConfig, imageMode: "edit" as const },
+                              framePrompt,
+                              refs.map((item) => ({ id: item.node.id, name: `${item.name}.png`, type: item.node.metadata?.mimeType || "image/png", dataUrl: "", url: item.node.metadata?.content || "", storageKey: item.node.metadata?.storageKey })),
+                              { signal: controller.signal },
+                          ).then((items) => items[0])
+                        : await requestGeneration(frameConfig, framePrompt, { signal: controller.signal }).then((items) => items[0]);
+                    if (!image) throw new Error("首帧没有返回图片");
+                    const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                    setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
+                    finishGenerationRequest(frameNode.id, controller);
+                    save(updateDramaRunItem(current, shot.shotNumber, { frameNodeId: frameNode.id, lastError: undefined }));
+                    await waitAutomationRender();
+                } catch (error) {
+                    if (frameController) finishGenerationRequest(frameNode.id, frameController);
+                    if (isGenerationCanceled(error)) {
+                        setProgress(null, 0, 0);
+                        message.info("已暂停");
+                        return;
+                    }
+                    const text = error instanceof Error ? error.message : "首帧生成失败";
+                    setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: text } } : node)));
+                    save(updateDramaRunItem(current, shot.shotNumber, { lastError: text }));
+                    message.error(`第 ${shot.shotNumber} 镜首帧：${text}`);
+                }
+            }
+            const preparedPrompts = new Map<string, string>();
+            for (const task of tasks) {
+                const { planItem, shot, item, storyNode, frameNode } = task;
+                if (!storyNode || planItem.videoAction.kind === "skip") continue;
+                if (isPaused()) {
+                    setProgress(null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                let videoNode = task.videoNode;
+                if (!videoNode) {
+                    if (!useReference && !frameNode?.metadata?.content) {
+                        save(updateDramaRunItem(current, shot.shotNumber, { lastError: "首帧未生成，跳过视频" }));
+                        continue;
+                    }
+                    const videoRefs = useReference ? videoRefsFor(shot) : [];
+                    const resolvedRefs = videoRefs.flatMap((ref) => {
+                        const node = resolveAssetNode(ref.name);
+                        return node ? [{ ...ref, node }] : [];
+                    });
+                    const createdVideo: CanvasNodeData = {
+                        id: `drama-video-${nanoid()}`,
+                        type: CanvasNodeType.Video,
+                        title: `视频 ${shot.shotNumber} · ${shot.title}`,
+                        position: { x: useReference ? frameX : videoX, y: storyNode.position.y },
+                        width: frameSize.width,
+                        height: frameSize.height,
+                        metadata: {
+                            status: NODE_STATUS_IDLE,
+                            model: data.videoWorkflow || "local-gateway::video-h3-ref2va",
+                            videoMode: useReference ? "reference" : "frames",
+                            ...(useReference ? {} : { frameMode: "first" }),
+                            size: data.aspect,
+                            seconds: String(estimateShotSeconds(shot)),
+                            vquality: data.vquality || "720",
+                            generateAudio: "true",
+                            referenceAcceleration: false,
+                            count: 1,
+                            prompt: "",
+                        },
+                    };
+                    videoNode = createdVideo;
+                    task.videoNode = createdVideo;
+                    newNodes.push(createdVideo);
+                    newConnections.push(
+                        { id: nanoid(), fromNodeId: storyNode.id, toNodeId: createdVideo.id, role: "lineage" },
+                        ...(frameNode ? [{ id: nanoid(), fromNodeId: frameNode.id, toNodeId: createdVideo.id }] : resolvedRefs.map((ref) => ({ id: nanoid(), fromNodeId: ref.node.id, toNodeId: createdVideo.id }))),
+                    );
+                    save(updateDramaRunItem(current, shot.shotNumber, { videoNodeId: createdVideo.id }));
+                }
+                if (!videoNode) continue;
+            }
+            if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
+            if (newConnections.length) setConnections((prev) => [...prev, ...newConnections]);
+            await waitAutomationRender();
+            for (const task of tasks) {
+                const { planItem, shot, item, videoNode } = task;
+                if (!videoNode || planItem.videoAction.kind === "skip" || planItem.videoAction.kind === "resume") continue;
+                if (item?.compiledPrompt) {
+                    preparedPrompts.set(videoNode.id, item.compiledPrompt);
+                    continue;
+                }
+                if (isPaused()) {
+                    setProgress(null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                setProgress("续跑提示词", task.index + 1, tasks.length);
+                const promptMode = useReference ? ("reference" as const) : ("frames" as const);
+                const compileRefs = useReference ? videoRefsFor(shot).filter((ref) => Boolean(resolveAssetNode(ref.name))) : [];
+                const fallbackPrompt = useReference ? buildRef2VAPrompt(shot, compileRefs, stylePrompt) : buildH3BasePrompt(shot, stylePrompt);
+                let compiledPrompt = fallbackPrompt;
+                try {
+                    const subjects = useReference
+                        ? []
+                        : frameRefsFor(shot)
+                              .filter((ref) => ref.kind === "character")
+                              .map((ref, subjectIndex) => {
+                                  const record = library.characters.find((candidate) => candidate.name === ref.name);
+                                  return { name: ref.name, kind: "character" as const, description: record?.description || "", primary: subjectIndex === 0 };
+                              });
+                    const compileImages: string[] = [];
+                    try {
+                        if (useReference) {
+                            for (const ref of compileRefs) {
+                                const node = resolveAssetNode(ref.name);
+                                if (node?.metadata?.content) compileImages.push(await imageToDataUrl({ storageKey: node.metadata.storageKey, url: node.metadata.content }));
+                            }
+                        } else if (task.frameNode?.metadata?.content) {
+                            compileImages.push(await imageToDataUrl({ storageKey: task.frameNode.metadata.storageKey, url: task.frameNode.metadata.content }));
+                        }
+                    } catch {
+                        compileImages.length = 0;
+                    }
+                    const messagesWithImages = buildH3CompileMessages({ shot, style: stylePrompt, aspect: data.aspect, duration: estimateShotSeconds(shot), mode: promptMode, refs: compileRefs, subjects, images: compileImages });
+                    const messagesTextOnly = buildH3CompileMessages({ shot, style: stylePrompt, aspect: data.aspect, duration: estimateShotSeconds(shot), mode: promptMode, refs: compileRefs, subjects });
+                    let answer = "";
+                    try {
+                        answer = await requestH3CompileAnswer(textConfig, messagesWithImages as Parameters<typeof requestImageQuestion>[1]);
+                    } catch {
+                        answer = await requestH3CompileAnswer(textConfig, messagesTextOnly as Parameters<typeof requestImageQuestion>[1]);
+                    }
+                    compiledPrompt = ensureSpokenDialogue(normalizeH3Prompt(answer, promptMode, useReference ? compileRefs.length : 1) || fallbackPrompt, shot.dialogue);
+                } catch {
+                    compiledPrompt = fallbackPrompt;
+                }
+                setNodes((prev) => prev.map((node) => (node.id === videoNode.id ? { ...node, metadata: { ...node.metadata, prompt: compiledPrompt } } : node)));
+                save(updateDramaRunItem(current, shot.shotNumber, { compiledPrompt }));
+                preparedPrompts.set(videoNode.id, compiledPrompt);
+            }
+            const resumeVideos = tasks.filter((task) => task.planItem.videoAction.kind === "resume" && task.videoNode);
+            for (const task of resumeVideos) {
+                try {
+                    const resumeId = task.videoNode!.id;
+                    await pollVideoNodeTask(task.videoNode!);
+                    if (nodesRef.current.find((node) => node.id === resumeId)?.metadata?.content) save(updateDramaRunItem(current, task.planItem.shot.shotNumber, { done: true, lastError: undefined }));
+                } catch (error) {
+                    save(updateDramaRunItem(current, task.planItem.shot.shotNumber, { lastError: error instanceof Error ? error.message : "视频续接失败" }));
+                }
+            }
+            for (let index = 0; index < tasks.length; index += 1) {
+                const task = tasks[index];
+                const { planItem, shot, videoNode } = task;
+                if (!videoNode || planItem.videoAction.kind !== "generate") continue;
+                const compiledPrompt = preparedPrompts.get(videoNode.id);
+                if (!compiledPrompt) continue;
+                if (isPaused()) {
+                    setProgress(null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                setProgress(useReference ? "续跑多参视频" : "续跑视频", index + 1, tasks.length);
+                try {
+                    await handleGenerateNode(videoNode.id, "video", compiledPrompt);
+                    await waitAutomationRender();
+                    const ok = nodesRef.current.find((node) => node.id === videoNode.id)?.metadata?.content;
+                    save(updateDramaRunItem(current, shot.shotNumber, ok ? { done: true, lastError: undefined } : { lastError: "视频生成失败" }));
+                    setNodes((prev) => prev.map((node) => (node.id === videoNode.id ? { ...node, title: `视频 ${shot.shotNumber} · ${shot.title}`, metadata: { ...node.metadata, ...(useReference ? {} : { frameMode: "first" as const }) } } : node)));
+                } catch (error) {
+                    if (isGenerationCanceled(error)) {
+                        setProgress(null, 0, 0);
+                        message.info("已暂停");
+                        return;
+                    }
+                    const text = error instanceof Error ? error.message : "视频生成失败";
+                    save(updateDramaRunItem(current, shot.shotNumber, { lastError: text }));
+                    message.error(`第 ${shot.shotNumber} 镜视频：${text}`);
+                }
+            }
+            setProgress(null, tasks.length, tasks.length);
+            const pending = current.items.filter((item) => !item.done).length;
+            if (pending) message.warning(`续跑完成，还有 ${pending} 镜未完成`);
+            else message.success("续跑完成");
+        },
+        [buildDramaResumePlan, effectiveConfig, handleGenerateNode, isAiConfigReady, message, nodesRef, pollVideoNodeTask, saveDramaRun, setConnections, setNodes, startGenerationRequest, waitAutomationRender],
+    );
+
+    const generateDramaStoryboards = useCallback(
+        async (dramaNode: CanvasNodeData, episodeId: string, options?: { fromScratch?: boolean }) => {
+            const liveNode = nodesRef.current.find((node) => node.id === dramaNode.id) || dramaNode;
+            const data = liveNode.metadata?.dramaCard;
+            const episode = data?.episodes.find((item) => item.id === episodeId);
+            if (!data || !episode) throw new Error("分集不存在");
+            const existingRun = data.runs?.[episodeId];
+            if (!options?.fromScratch && existingRun?.storyboardsDone && existingRun.items.some((item) => !item.done)) {
+                return resumeDramaStoryboards(dramaNode, episodeId);
+            }
+            const script = (episode.script || "").trim();
+            if (!script) throw new Error("这一集还没有剧本");
+            const textConfig = resolveDramaTextConfig(effectiveConfig);
+            if (!textConfig) throw new Error("未配置文本模型");
+            const style = findDramaStyle(data.style);
+            const stylePrompt = style?.prompt || style?.promptEn || data.style;
+            const library = data.assets || { characters: [], scenes: [], props: [] };
+            const pendingAssets = [...library.characters, ...library.scenes, ...library.props].filter((record) => record.nodeId && nodesRef.current.find((node) => node.id === record.nodeId)?.metadata?.status === NODE_STATUS_LOADING);
+            if (pendingAssets.length) throw new Error("资产图还在生成，请等资产完成后再生成分镜");
+            const runGuardKey = `${dramaNode.id}:${episodeId}`;
+            if (dramaRunGuards.has(runGuardKey)) { console.warn("该集生成正在进行中，忽略重复触发"); return; }
+            dramaRunGuards.add(runGuardKey);
+            window.setTimeout(() => dramaRunGuards.delete(runGuardKey), 10 * 60 * 1000);
+            const isPaused = () => dramaPauseRef.current.has(dramaNode.id);
+            const setDramaProgress = (stage: string | null, current: number, total: number) => updateDramaCardProgress(setNodes, dramaNode.id, stage, current, total);
+            setDramaProgress("分镜", 0, 0);
+            const controller = new AbortController();
+            const requestDramaText = async (messages: Parameters<typeof requestImageQuestion>[1], timeoutMs: number, label: string) => {
+                const request = new AbortController();
+                const forwardAbort = () => request.abort(controller.signal.reason);
+                if (controller.signal.aborted) forwardAbort();
+                else controller.signal.addEventListener("abort", forwardAbort, { once: true });
+                let timedOut = false;
+                const timer = window.setTimeout(() => {
+                    timedOut = true;
+                    request.abort("timeout");
+                }, timeoutMs);
+                try {
+                    return await requestImageQuestion(textConfig, messages, () => undefined, { signal: request.signal });
+                } catch (error) {
+                    if (timedOut && !controller.signal.aborted) throw new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒没有返回，已中止`);
+                    throw error;
+                } finally {
+                    window.clearTimeout(timer);
+                    controller.signal.removeEventListener("abort", forwardAbort);
+                }
+            };
+            const segmentSeconds = Math.max(2, Math.min(15, Math.round(Number(data.segmentSeconds) || 15)));
+            const screenplayMessages = buildScreenplayAdaptationMessages({
+                script,
+                title: episode.title,
+                characters: library.characters.map((record) => record.name),
+                scenes: library.scenes.map((record) => record.name),
+                props: library.props.map((record) => record.name),
+                adaptationLevel: "performance",
+                segmentSeconds,
+            });
+            let screenplayRecord: DramaScreenplay | undefined;
+            let beats: DramaBeat[] = [];
+            try {
+                setDramaProgress("分镜·剧本", 0, 0);
+                const screenplayAnswer = await requestDramaText(screenplayMessages as Parameters<typeof requestImageQuestion>[1], 120000, "剧本改写");
+                const normalized = normalizeScreenplay(extractJson(screenplayAnswer), script);
+                if (normalized.beats.length) {
+                    screenplayRecord = normalized.screenplay;
+                    beats = normalized.beats;
+                    if (normalized.warnings.length) console.warn("剧本改写来源提示", normalized.warnings);
+                } else {
+                    console.warn("剧本改写没有产出 beats，改用确定性拆分");
+                }
+            } catch (error) {
+                if (controller.signal.aborted) throw error;
+                console.warn("剧本改写失败，改用确定性拆分", error);
+            }
+            if (screenplayRecord?.coverage?.requiredMissing.length) {
+                setDramaProgress(null, 0, 0);
+                throw new Error(`剧情关键事件未覆盖（required source_units 丢失，禁止出片）：${screenplayRecord.coverage.requiredMissing.slice(0, 3).map((unit) => unit.text).join("；")}`);
+            }
+            if (!beats.length) beats = fallbackBeatsFromScript(script);
+            const shotMessages = buildShotPlanMessages({
+                beats,
+                style: stylePrompt,
+                aspect: data.aspect,
+                targetShots: episode.shots || 0,
+                characters: library.characters.map((record) => record.name),
+                scenes: library.scenes.map((record) => record.name),
+                props: library.props.map((record) => record.name),
+            });
+            let plan: DramaShotPlan[] = [];
+            try {
+                setDramaProgress("分镜·Shot", 0, 0);
+                const shotAnswer = await requestDramaText(shotMessages as Parameters<typeof requestImageQuestion>[1], 180000, "Shot 规划");
+                plan = normalizeShotPlan(extractJson(shotAnswer), beats);
+            } catch (error) {
+                if (controller.signal.aborted) throw error;
+                console.warn("Shot 规划失败，改用确定性兜底", error);
+            }
+            let validation = validateStoryboardPlan(plan, beats, segmentSeconds);
+            if (!validation.ok) {
+                const repaired = repairStoryboardPlan(plan, segmentSeconds);
+                const repairedValidation = validateStoryboardPlan(repaired, beats, segmentSeconds);
+                if (repairedValidation.ok) {
+                    plan = repaired;
+                    validation = repairedValidation;
+                } else {
+                    console.warn("Shot 规划校验失败，改用确定性兜底", repairedValidation.errors);
+                    plan = fallbackShotPlan(beats, segmentSeconds);
+                    validation = validateStoryboardPlan(plan, beats, segmentSeconds);
+                }
+            }
+            if (!validation.ok) {
+                setDramaProgress(null, 0, 0);
+                throw new Error(`分镜规划校验失败：${validation.errors.slice(0, 3).join("；")}`);
+            }
+            if (validation.warnings?.length) console.warn("分镜软提示（不影响继续）", validation.warnings);
+            const shots = elasticPackShots(planToShots(plan), segmentSeconds);
+            const packedIssues = sanityCheckPackedShots(shots);
+            if (packedIssues.length) console.warn("打包后结构提示（不影响出卡）", packedIssues);
+            if (!shots.length) {
+                setDramaProgress(null, 0, 0);
+                throw new Error("没有从返回内容里解析出分镜");
+            }
+            setDramaProgress("分镜", shots.length, shots.length);
+            const assetNodeIds = new Set(
+                [...library.characters, ...library.scenes, ...library.props]
+                    .map((record) => record.nodeId)
+                    .filter((nodeId): nodeId is string => Boolean(nodeId)),
+            );
+            const assetRight = nodesRef.current
+                .filter((node) => assetNodeIds.has(node.id))
+                .reduce((max, node) => Math.max(max, node.position.x + node.width), dramaNode.position.x + dramaNode.width + 120);
+            const baseX = assetRight + 120;
+            const baseY = dramaNode.position.y;
+            const width = 360;
+            const height = 240;
+            const gap = 18;
+            const nodesToAdd: CanvasNodeData[] = shots.map((shot, index) => {
+                const content = storyboardCardContent(shot);
+                return {
+                    id: `drama-shot-${nanoid()}`,
+                    type: CanvasNodeType.Text,
+                    title: `分镜 ${shot.shotNumber} · ${shot.title}`,
+                    position: { x: baseX, y: baseY + index * (height + gap) },
+                    width,
+                    height,
+                    metadata: { content, prompt: content, status: NODE_STATUS_SUCCESS, fontSize: 13 },
+                };
+            });
+            const connectionsToAdd: CanvasConnection[] = nodesToAdd.map((node) => ({ id: nanoid(), fromNodeId: dramaNode.id, toNodeId: node.id, role: "lineage" }));
+            let run = markDramaRunStoryboardsDone(
+                createDramaRun(episodeId, shots),
+                Object.fromEntries(nodesToAdd.map((node, index) => [shots[index].shotNumber, node.id])),
+            );
+            const frameSize =
+                data.aspect === "9:16"
+                    ? { width: 216, height: 387, size: "928x1664" }
+                    : data.aspect === "4:3"
+                      ? { width: 320, height: 240, size: "1472x1104" }
+                      : data.aspect === "3:4"
+                        ? { width: 240, height: 320, size: "1104x1472" }
+                        : data.aspect === "1:1"
+                          ? { width: 280, height: 280, size: "1328x1328" }
+                          : { width: 384, height: 214, size: "1664x928" };
+            const frameX = baseX + width + 100;
+            const videoX = frameX + frameSize.width + 100;
+            const extraNodes: CanvasNodeData[] = [];
+            const extraConnections: CanvasConnection[] = [];
+            const useReference = true;
+            const imageModel = data.imageWorkflow || "local-gateway::image-qwen21";
+            const imageRefLimit = Math.max(0, channelModelOf(effectiveConfig, imageModel)?.model.imageInputs ?? (imageModel.endsWith("::image-qwen21") ? 4 : 0));
+            const allAssetRecords = [...library.characters, ...library.scenes, ...library.props];
+            const resolveAssetNode = (name: string) => {
+                const record = allAssetRecords.find((candidate) => candidate.name === name);
+                if (!record?.nodeId) return undefined;
+                const node = nodesRef.current.find((candidate) => candidate.id === record.nodeId && Boolean(candidate.metadata?.content));
+                if (!node) console.warn(`参考资产缺图，已跳过：${name}`);
+                return node;
+            };
+            const assetNames = [...library.characters, ...library.scenes, ...library.props].map((record) => record.name);
+            const tasks: {
+                shot: (typeof shots)[number];
+                storyNode: CanvasNodeData;
+                videoId: string;
+                videoPrompt: string;
+                frame?: CanvasNodeData;
+                frameRefs: { name: string; kind: "character" | "scene" }[];
+                videoRefs: { name: string; kind: "character" | "scene" | "prop"; description?: string }[];
+            }[] = [];
+            shots.forEach((shot, index) => {
+                const storyNode = nodesToAdd[index];
+                if (!storyNode) return;
+                const visual = [
+                    stylePrompt,
+                    shot.shotType,
+                    shot.cameraAngle,
+                    shot.location && `地点：${shot.location}`,
+                    shot.time && `时间：${shot.time}`,
+                    shot.action,
+                    shot.result,
+                ]
+                    .filter(Boolean)
+                    .join("；");
+                const videoPrompt = [visual, shot.cameraMovement].filter(Boolean).join("；");
+                const videoId = `drama-video-${nanoid()}`;
+                if (useReference) {
+                    const text = `${shot.action} ${shot.dialogue} ${shot.result} ${shot.title}`;
+                    const matched = assetNames.filter((name) => text.includes(name));
+                    const chosen = [...new Set([assetNames[0], ...matched, ...assetNames].filter((name): name is string => Boolean(name)))].slice(0, 6);
+                    let characterCount = 0;
+                    const videoRefs = chosen
+                        .map((name) => {
+                            const record = allAssetRecords.find((candidate) => candidate.name === name);
+                            return { name, kind: (record?.kind || "character") as "character" | "scene" | "prop", description: record?.description || record?.prompt || "" };
+                        })
+                        .filter((ref) => {
+                            if (ref.kind !== "character") return true;
+                            if (characterCount >= 3) return false;
+                            characterCount += 1;
+                            return true;
+                        });
+                    tasks.push({ shot, storyNode, videoId, videoPrompt, frameRefs: [], videoRefs });
+                    return;
+                }
+                const frameNode: CanvasNodeData = {
+                    id: `drama-frame-${nanoid()}`,
+                    type: CanvasNodeType.Image,
+                    title: `首帧 ${shot.shotNumber} · ${shot.title}`,
+                    position: { x: frameX, y: storyNode.position.y },
+                    width: frameSize.width,
+                    height: frameSize.height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        generationType: "generation",
+                        imageMode: "t2i",
+                        model: imageModel,
+                        size: frameSize.size,
+                        count: 1,
+                        prompt: `${visual}。画面中不要出现字幕、标题或水印。`,
+                    },
+                };
+                extraNodes.push(frameNode);
+                const shotText = `${shot.title} ${shot.location} ${shot.action} ${shot.dialogue} ${shot.result}`;
+                const shotLocationKey = shot.location ? normalizeLocationKey(shot.location) : "";
+                const sceneMatched = library.scenes.filter((record) => {
+                    if (!record.nodeId) return false;
+                    const recordKey = record.locationKey || normalizeLocationKey(record.location || record.name);
+                    const locationHit = Boolean(shotLocationKey) && (recordKey === shotLocationKey || isSameSceneKey(recordKey, shotLocationKey));
+                    return locationHit || shotText.includes(record.name) || Boolean(record.location && shotText.includes(record.location));
+                });
+                const characterMatched = library.characters.filter((record) => record.nodeId && shotText.includes(record.name));
+                const scenePicks = (sceneMatched.length ? sceneMatched : library.scenes.filter((record) => record.nodeId)).slice(0, 1);
+                const characterPool = library.characters.filter((record) => record.nodeId);
+                const primaryCharacter = characterPool.slice(0, 1);
+                const characterPicks = [
+                    ...primaryCharacter,
+                    ...characterMatched.filter((record) => !primaryCharacter.includes(record)),
+                    ...characterPool.filter((record) => !primaryCharacter.includes(record) && !characterMatched.includes(record)),
+                ];
+                const characterSlots = Math.max(0, imageRefLimit - scenePicks.length);
+                const frameRefs = imageRefLimit
+                    ? [
+                          ...scenePicks.map((record) => ({ name: record.name, kind: "scene" as const })),
+                          ...characterPicks.slice(0, characterSlots).map((record) => ({ name: record.name, kind: "character" as const })),
+                      ].slice(0, imageRefLimit)
+                    : [];
+                extraConnections.push(
+                    { id: nanoid(), fromNodeId: storyNode.id, toNodeId: frameNode.id, role: "lineage" },
+                    ...frameRefs.flatMap((ref) => {
+                        const record = allAssetRecords.find((candidate) => candidate.name === ref.name);
+                        return record?.nodeId && nodesRef.current.some((node) => node.id === record.nodeId) ? [{ id: nanoid(), fromNodeId: record.nodeId, toNodeId: frameNode.id }] : [];
+                    }),
+                );
+                tasks.push({ shot, storyNode, videoId, videoPrompt, frame: frameNode, frameRefs, videoRefs: [] });
+            });
+            setNodes((prev) => [...prev, ...nodesToAdd, ...extraNodes]);
+            setConnections((prev) => [...prev, ...connectionsToAdd, ...extraConnections]);
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== dramaNode.id || !node.metadata?.dramaCard) return node;
+                    const card = node.metadata.dramaCard;
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            dramaCard: {
+                                ...card,
+                                storyboards: { ...(card.storyboards || {}), [episodeId]: shots },
+                                episodes: card.episodes.map((item) => (item.id === episodeId ? { ...item, shots: shots.length, screenplay: screenplayRecord } : item)),
+                            },
+                        },
+                    };
+                }),
+            );
+            message.info(useReference ? `分镜已生成，开始批量生成 ${shots.length} 组多参视频…` : `分镜已生成，先批量生成 ${shots.length} 张首帧…`);
+            await waitAutomationRender();
+            saveDramaRun(dramaNode, episodeId, run);
+            const waitForNode = async (nodeId: string, ready?: (node: CanvasNodeData) => boolean) => {
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                    const node = nodesRef.current.find((item) => item.id === nodeId);
+                    if (node && (!ready || ready(node))) return;
+                    await waitAutomationRender();
+                }
+            };
+            let failedTasks = 0;
+            const failedShots = new Set<number>();
+
+            if (!useReference) {
+                for (let index = 0; index < tasks.length; index += 1) {
+                    const task = tasks[index];
+                    const { shot, frame: frameNode } = task;
+                    if (!frameNode) continue;
+                    if (isPaused()) {
+                        setDramaProgress(null, 0, 0);
+                        message.info("已暂停");
+                        return;
+                    }
+                    setDramaProgress("首帧", index + 1, tasks.length);
+                    let frameController: AbortController | undefined;
+                    try {
+                        const refs = task.frameRefs.flatMap((ref) => {
+                            const node = resolveAssetNode(ref.name);
+                            return node ? [{ name: ref.name, kind: ref.kind, node }] : [];
+                        });
+                        const frameConfig = { ...buildGenerationConfig(effectiveConfig, frameNode, "image"), model: imageModel, count: "1", size: frameSize.size, imageMode: "t2i" as const };
+                        if (!isAiConfigReady(frameConfig, frameConfig.model)) throw new Error("生图工作流不可用");
+                        setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)));
+                        const controller = startGenerationRequest(frameNode.id, dramaNode.id, frameNode.id);
+                        frameController = controller;
+                        const framePrompt = refs.length ? frameReferencePrompt(frameNode.metadata?.prompt || "", refs) : frameNode.metadata?.prompt || "";
+                        const image = refs.length
+                            ? await requestEdit(
+                                  { ...frameConfig, imageMode: "edit" as const },
+                                  framePrompt,
+                                  refs.map((item) => ({ id: item.node.id, name: `${item.name}.png`, type: item.node.metadata?.mimeType || "image/png", dataUrl: "", url: item.node.metadata?.content || "", storageKey: item.node.metadata?.storageKey })),
+                                  { signal: controller.signal },
+                              ).then((items) => items[0])
+                            : await requestGeneration(frameConfig, framePrompt, { signal: controller.signal }).then((items) => items[0]);
+                        if (!image) throw new Error("首帧没有返回图片");
+                        const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                        setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
+                        finishGenerationRequest(frameNode.id, controller);
+                        run = updateDramaRunItem(run, shot.shotNumber, { frameNodeId: frameNode.id, lastError: undefined });
+                        saveDramaRun(dramaNode, episodeId, run);
+                        await waitForNode(frameNode.id, (node) => Boolean(node.metadata?.content));
+                        if (!nodesRef.current.find((node) => node.id === frameNode.id)?.metadata?.content) throw new Error("首帧未写回画布，已停止后续视频");
+                    } catch (error) {
+                        if (frameController) finishGenerationRequest(frameNode.id, frameController);
+                        if (isGenerationCanceled(error)) {
+                            setDramaProgress(null, 0, 0);
+                            message.info("已停止生成");
+                            return;
+                        }
+                        const text = error instanceof Error ? error.message : "首帧生成失败";
+                        failedTasks += 1;
+                        failedShots.add(shot.shotNumber);
+                        run = updateDramaRunItem(run, shot.shotNumber, { lastError: text });
+                        saveDramaRun(dramaNode, episodeId, run);
+                        setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: text } } : node)));
+                        message.error(`第 ${shot.shotNumber || index + 1} 镜首帧：${text}`);
+                    }
+                }
+            }
+
+            const videoRefsById = new Map<string, { name: string; kind: "character" | "scene" | "prop"; description?: string }[]>();
+            const newVideoNodes: CanvasNodeData[] = [];
+            const newVideoConnections: CanvasConnection[] = [];
+            for (let index = 0; index < tasks.length; index += 1) {
+                const task = tasks[index];
+                const { shot, storyNode, videoId, frame: frameNode } = task;
+                if (failedShots.has(shot.shotNumber)) continue;
+                if (isPaused()) {
+                    setDramaProgress(null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                const videoRefs = task.videoRefs.flatMap((ref) => {
+                    const node = resolveAssetNode(ref.name);
+                    return node ? [{ ...ref, node }] : [];
+                });
+                videoRefsById.set(videoId, videoRefs.map((ref) => ({ name: ref.name, kind: ref.kind, description: ref.description })));
+                if (nodesRef.current.some((node) => node.id === videoId)) continue;
+                setDramaProgress("视频卡", index + 1, tasks.length);
+                const createdVideo: CanvasNodeData = {
+                    id: videoId,
+                    type: CanvasNodeType.Video,
+                    title: `视频 ${shot.shotNumber} · ${shot.title}`,
+                    position: { x: useReference ? frameX : videoX, y: storyNode.position.y },
+                    width: frameSize.width,
+                    height: frameSize.height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        model: data.videoWorkflow || "local-gateway::video-h3-ref2va",
+                        videoMode: useReference ? "reference" : "frames",
+                        ...(useReference ? {} : { frameMode: "first" }),
+                        size: data.aspect,
+                        seconds: String(estimateShotSeconds(shot)),
+                        vquality: data.vquality || "720",
+                        generateAudio: "true",
+                        referenceAcceleration: false,
+                        count: 1,
+                        prompt: "",
+                    },
+                };
+                newVideoNodes.push(createdVideo);
+                newVideoConnections.push(
+                    { id: nanoid(), fromNodeId: storyNode.id, toNodeId: videoId, role: "lineage" as const },
+                    ...(frameNode ? [{ id: nanoid(), fromNodeId: frameNode.id, toNodeId: videoId }] : videoRefs.map((ref) => ({ id: nanoid(), fromNodeId: ref.node.id, toNodeId: videoId }))),
+                );
+                run = updateDramaRunItem(run, shot.shotNumber, { videoNodeId: videoId });
+                saveDramaRun(dramaNode, episodeId, run);
+            }
+            if (newVideoNodes.length) {
+                setNodes((prev) => [...prev, ...newVideoNodes]);
+                setConnections((prev) => [...prev, ...newVideoConnections]);
+                await waitAutomationRender();
+            }
+            // 流水线：编译完第 N 个提示词立即排队跑第 N 个视频，同时继续编译第 N+1 个。
+            // 视频生成串行（单卡 GPU），提示词编译（文本/云）与视频生成并行，减少等待。
+            let videoChain: Promise<void> = Promise.resolve();
+            for (let index = 0; index < tasks.length; index += 1) {
+                const task = tasks[index];
+                const { shot, videoId } = task;
+                if (failedShots.has(shot.shotNumber)) continue;
+                if (!nodesRef.current.some((node) => node.id === videoId)) continue;
+                if (isPaused()) break;
+                setDramaProgress("视频提示词", index + 1, tasks.length);
+                let compiledPrompt = "";
+                try {
+                    const videoRefs = videoRefsById.get(videoId) || [];
+                    const promptMode = useReference ? ("reference" as const) : ("frames" as const);
+                    const compileRefs = useReference ? videoRefs : [];
+                    const fallbackPrompt = useReference ? buildRef2VAPrompt(shot, compileRefs, stylePrompt) : buildH3BasePrompt(shot, stylePrompt);
+                    compiledPrompt = fallbackPrompt;
+                    try {
+                        // 字段确定性生成：段内时间表（先声后画）+ 参考图绑定全部由 shot 字段拼装，不再让 LLM 自由改写。
+                        compiledPrompt = ensureSpokenDialogue(
+                            buildDeterministicH3Prompt({ shot, mode: promptMode, refs: compileRefs, style: stylePrompt, aspect: data.aspect, duration: estimateShotSeconds(shot) }),
+                            shot.dialogue,
+                        );
+                    } catch {
+                        compiledPrompt = fallbackPrompt;
+                    }
+                    setNodes((prev) => prev.map((node) => (node.id === videoId ? { ...node, metadata: { ...node.metadata, prompt: compiledPrompt } } : node)));
+                    run = updateDramaRunItem(run, shot.shotNumber, { compiledPrompt });
+                    saveDramaRun(dramaNode, episodeId, run);
+                } catch (error) {
+                    if (isGenerationCanceled(error)) {
+                        setDramaProgress(null, 0, 0);
+                        message.info("已停止生成");
+                        await videoChain;
+                        return;
+                    }
+                    const text = error instanceof Error ? error.message : "视频提示词生成失败";
+                    failedTasks += 1;
+                    failedShots.add(shot.shotNumber);
+                    setNodes((prev) => prev.map((node) => (node.id === videoId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: text } } : node)));
+                    message.error(`第 ${shot.shotNumber || index + 1} 镜提示词：${text}`);
+                    continue;
+                }
+                const promptForVideo = compiledPrompt;
+                const shotNo = shot.shotNumber;
+                const pos = index;
+                videoChain = videoChain.then(async () => {
+                    if (isPaused()) return;
+                    setDramaProgress(useReference ? "多参视频" : "视频", pos + 1, tasks.length);
+                    try {
+                        await handleGenerateNode(videoId, "video", promptForVideo);
+                        await waitAutomationRender();
+                        const videoState = nodesRef.current.find((node) => node.id === videoId);
+                        const videoFailed = videoState?.metadata?.status === NODE_STATUS_ERROR;
+                        const videoDone = Boolean(videoState?.metadata?.content);
+                        if (videoFailed || !videoDone) failedTasks += 1;
+                        run = updateDramaRunItem(run, shotNo, videoDone ? { done: true, lastError: undefined } : { lastError: videoFailed ? "视频生成失败" : "视频未生成" });
+                        saveDramaRun(dramaNode, episodeId, run);
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === videoId ? { ...node, title: `视频 ${shotNo} · ${shot.title}`, metadata: { ...node.metadata, ...(useReference ? {} : { frameMode: "first" as const }) } } : node,
+                            ),
+                        );
+                    } catch (error) {
+                        if (isGenerationCanceled(error)) return;
+                        const text = error instanceof Error ? error.message : "自动生成失败";
+                        failedTasks += 1;
+                        run = updateDramaRunItem(run, shotNo, { lastError: text });
+                        saveDramaRun(dramaNode, episodeId, run);
+                        setNodes((prev) => prev.map((node) => (node.id === videoId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: text } } : node)));
+                        message.error(`第 ${shotNo} 镜视频：${text}`);
+                    }
+                });
+            }
+            await videoChain;
+            if (isPaused()) {
+                setDramaProgress(null, 0, 0);
+                message.info("已暂停");
+                return;
+            }
+            setDramaProgress(null, shots.length, shots.length);
+            if (failedTasks) message.warning(`分镜已生成，${failedTasks} 镜自动生成失败`);
+            else message.success(useReference ? `已生成 ${shots.length} 条分镜，并自动出多参视频` : `已生成 ${shots.length} 条分镜，并自动出首帧和视频`);
+        },
+        [effectiveConfig, handleGenerateNode, nodesRef, pollVideoNodeTask, resumeDramaStoryboards, saveDramaRun, setConnections, setNodes, waitAutomationRender],
+    );
+
+    const startDramaCreation = useCallback(
+        async (dramaNode: CanvasNodeData, episodeId: string) => {
+            const data = dramaNode.metadata?.dramaCard;
+            const episode = data?.episodes.find((item) => item.id === episodeId);
+            if (!data || !episode) throw new Error("分集不存在");
+            const script = (episode.script || "").trim();
+            if (!script) throw new Error("这一集还没有剧本，先导入 TXT 或粘贴剧本");
+            const textConfig = resolveDramaTextConfig(effectiveConfig);
+            if (!textConfig) throw new Error("未配置文本模型，无法拆解人物和场景");
+            const style = findDramaStyle(data.style);
+            const stylePrompt = style?.prompt || style?.promptEn || "";
+            const runText = async (messages: Parameters<typeof requestImageQuestion>[1], timeoutMs: number, label: string) => {
+                const controller = new AbortController();
+                const timer = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+                try {
+                    return await requestImageQuestion(textConfig, messages, () => undefined, { signal: controller.signal });
+                } catch (error) {
+                    const canceled = error instanceof DOMException && error.name === "AbortError";
+                    throw new Error(canceled ? `${label}超时，请检查文本模型网络` : error instanceof Error ? error.message : `${label}失败`);
+                } finally {
+                    window.clearTimeout(timer);
+                }
+            };
+            const [charactersAnswer, scenesAnswer, propsAnswer] = await Promise.all([
+                runText(buildCharacterExtractionMessages(script, episode.title, style?.label || "", stylePrompt, data.aspect), 120000, "角色提取"),
+                runText(buildSceneExtractionMessages(script, episode.title, style?.label || "", stylePrompt, data.aspect), 120000, "场景提取"),
+                runText(buildPropExtractionMessages(script, episode.title, style?.label || "", stylePrompt, data.aspect), 120000, "道具提取").catch(() => "[]"),
+            ]);
+            const characters = normalizeCharacters(extractJson(charactersAnswer));
+            const scenes = normalizeScenes(extractJson(scenesAnswer));
+            const props = normalizeProps(extractJson(propsAnswer));
+            if (!characters.length && !scenes.length && !props.length) throw new Error("没有从剧本里识别出人物、场景或道具");
+            const rawPromptFor = (kind: "character" | "scene" | "prop", asset: (typeof characters)[number]) =>
+                kind === "character" ? characterAssetPrompt(stylePrompt, asset, "") : kind === "scene" ? sceneAssetPrompt(stylePrompt, asset, "") : propAssetPrompt(stylePrompt, asset, "");
+
+            const imageModel = data.imageWorkflow || "local-gateway::image-qwen21";
+            const gap = 24;
+            const baseX = dramaNode.position.x + dramaNode.width + 120;
+            const baseY = dramaNode.position.y;
+            const assetDims =
+                data.aspect === "9:16"
+                    ? { width: 216, height: 387, size: "928x1664" }
+                    : data.aspect === "4:3"
+                      ? { width: 320, height: 240, size: "1472x1104" }
+                      : data.aspect === "3:4"
+                        ? { width: 240, height: 320, size: "1104x1472" }
+                        : data.aspect === "1:1"
+                          ? { width: 280, height: 280, size: "1328x1328" }
+                          : { width: 384, height: 214, size: "1664x928" };
+            const kindKey = { character: "characters", scene: "scenes", prop: "props" } as const;
+            const kindTitle = { character: "角色", scene: "场景", prop: "道具" } as const;
+            const library = data.assets || { characters: [], scenes: [], props: [] };
+            const nextLibrary = { characters: [...library.characters], scenes: [...library.scenes], props: [...library.props] };
+            const sceneGroups: { key: string; scenes: typeof scenes }[] = [];
+            for (const scene of scenes) {
+                const key = normalizeLocationKey(scene.location || scene.name);
+                const group = sceneGroups.find((candidate) => candidate.key === key) || sceneGroups.find((candidate) => isSameSceneKey(candidate.key, key)) || sceneGroups.find((candidate) => sharesSceneBase(candidate.key, key));
+                if (group) {
+                    if (key.length > group.key.length) group.key = key;
+                    group.scenes.push(scene);
+                } else {
+                    sceneGroups.push({ key, scenes: [scene] });
+                }
+            }
+            const sceneMetaByName = new Map<string, { locationKey: string; variant: string; time?: string; baseName?: string }>();
+            for (const group of sceneGroups) {
+                const first = group.scenes[0];
+                const currentNames = new Set(group.scenes.map((scene) => scene.name));
+                const existingBase = nextLibrary.scenes.find((record) => {
+                    if (currentNames.has(record.name)) return false;
+                    const recordKey = record.locationKey || normalizeLocationKey(record.location || record.name);
+                    return (recordKey === group.key || isSameSceneKey(recordKey, group.key) || sharesSceneBase(recordKey, group.key)) && Boolean(record.imageUrl) && Boolean(record.nodeId);
+                });
+                if (existingBase) {
+                    const baseKey = existingBase.locationKey || normalizeLocationKey(existingBase.location || existingBase.name);
+                    if (baseKey.length > group.key.length) group.key = baseKey;
+                }
+                group.scenes.forEach((scene, index) => {
+                    sceneMetaByName.set(scene.name, {
+                        locationKey: group.key,
+                        variant: deriveSceneVariant(scene.location || scene.name, scene.time || "", group.key),
+                        time: scene.time,
+                        baseName: existingBase?.name || (index > 0 ? first.name : undefined),
+                    });
+                });
+            }
+            const combined = [
+                ...characters.map((asset) => ({ asset, kind: "character" as const })),
+                ...sceneGroups.flatMap((group) => group.scenes).map((asset) => ({ asset, kind: "scene" as const })),
+                ...props.map((asset) => ({ asset, kind: "prop" as const })),
+            ];
+            const created: {
+                kind: "character" | "scene" | "prop";
+                name: string;
+                node: CanvasNodeData;
+                prompt: string;
+                asset: (typeof characters)[number];
+                needPolish: boolean;
+                baseName?: string;
+                baseNodeId?: string;
+                refMode?: "auto" | "off";
+            }[] = [];
+            const nodesToAdd: CanvasNodeData[] = [];
+            const connectionsToAdd: CanvasConnection[] = [];
+            let newSlot = 0;
+            for (const item of combined) {
+                const key = kindKey[item.kind];
+                const list = nextLibrary[key];
+                const existing = list.find((record) => record.name === item.asset.name);
+                const prompt = existing?.polishedPrompt?.trim() || rawPromptFor(item.kind, item.asset);
+                let node = existing?.nodeId ? nodesRef.current.find((candidate) => candidate.id === existing.nodeId) : undefined;
+                if (!node) {
+                    node = {
+                        id: `drama-${item.kind}-${nanoid()}`,
+                        type: CanvasNodeType.Image,
+                        title: `${kindTitle[item.kind]} · ${item.asset.name}`,
+                        position: { x: baseX, y: baseY + newSlot * (assetDims.height + gap) },
+                        width: assetDims.width,
+                        height: assetDims.height,
+                        metadata: { status: NODE_STATUS_IDLE, generationType: "generation", imageMode: "t2i", model: imageModel, size: assetDims.size, count: 1, prompt },
+                    };
+                    newSlot += 1;
+                    nodesToAdd.push(node);
+                    connectionsToAdd.push({ id: nanoid(), fromNodeId: dramaNode.id, toNodeId: node.id, role: "lineage" });
+                }
+                const sceneInfo = item.kind === "scene" ? sceneMetaByName.get(item.asset.name) : undefined;
+                const baseRecord = sceneInfo?.baseName ? nextLibrary.scenes.find((candidate) => candidate.name === sceneInfo.baseName) : undefined;
+                const baseNodeId = baseRecord?.nodeId;
+                const record = {
+                    id: existing?.id || `drama-asset-${nanoid()}`,
+                    kind: item.kind,
+                    name: item.asset.name,
+                    nameEn: item.asset.nameEn,
+                    role: item.asset.role,
+                    description: item.asset.description,
+                    polishedPrompt: existing?.polishedPrompt,
+                    prompt,
+                    nodeId: node.id,
+                    imageUrl: existing?.imageUrl,
+                    state: existing?.state === "done" ? ("done" as const) : ("pending" as const),
+                    error: undefined,
+                    stages: existing?.stages,
+                    location: item.kind === "scene" ? item.asset.location : undefined,
+                    time: item.kind === "scene" ? item.asset.time : undefined,
+                    variant: sceneInfo?.variant,
+                    locationKey: sceneInfo?.locationKey,
+                    refMode: item.kind === "scene" ? existing?.refMode || ("auto" as const) : undefined,
+                    baseNodeId,
+                    usedReference: sceneInfo?.baseName ? existing?.usedReference : false,
+                };
+                const index = list.findIndex((candidate) => candidate.name === item.asset.name);
+                if (index >= 0) list[index] = record;
+                else list.push(record);
+                created.push({
+                    kind: item.kind,
+                    name: item.asset.name,
+                    node,
+                    prompt,
+                    asset: item.asset,
+                    needPolish: !existing?.polishedPrompt?.trim(),
+                    baseName: sceneInfo?.baseName,
+                    baseNodeId,
+                    refMode: record.refMode,
+                });
+            }
+            const setAssetRecord = (kind: "character" | "scene" | "prop", name: string, patch: Record<string, unknown>) => {
+                setNodes((prev) =>
+                    prev.map((candidate) => {
+                        if (candidate.id !== dramaNode.id) return candidate;
+                        const current = candidate.metadata?.dramaCard;
+                        if (!current?.assets) return candidate;
+                        const key = kindKey[kind];
+                        return {
+                            ...candidate,
+                            metadata: {
+                                ...candidate.metadata,
+                                dramaCard: { ...current, assets: { ...current.assets, [key]: current.assets[key].map((record) => (record.name === name ? { ...record, ...patch } : record)) } },
+                            },
+                        };
+                    }),
+                );
+            };
+            if (!created.length) throw new Error("没有可创建的资产卡");
+            setNodes((prev) => [
+                ...prev.map((candidate) =>
+                    candidate.id === dramaNode.id && candidate.metadata?.dramaCard
+                        ? { ...candidate, metadata: { ...candidate.metadata, dramaCard: { ...candidate.metadata.dramaCard, assets: nextLibrary } } }
+                        : candidate,
+                ),
+                ...nodesToAdd,
+            ]);
+            setConnections((prev) => [...prev, ...connectionsToAdd]);
+            await waitAutomationRender();
+
+            const assetImageByName = new Map<string, { url: string; storageKey?: string; mimeType?: string; nodeId: string }>();
+            for (const key of ["characters", "scenes", "props"] as const) {
+                for (const record of nextLibrary[key]) {
+                    if (!record.imageUrl || !record.nodeId) continue;
+                    const node = nodesRef.current.find((candidate) => candidate.id === record.nodeId);
+                    if (!node?.metadata?.content && !node?.metadata?.storageKey) continue;
+                    assetImageByName.set(record.name, {
+                        url: node?.metadata?.content || record.imageUrl,
+                        storageKey: node?.metadata?.storageKey,
+                        mimeType: node?.metadata?.mimeType,
+                        nodeId: record.nodeId,
+                    });
+                }
+            }
+            const supportsReference = (channelModelOf(effectiveConfig, imageModel)?.model.imageInputs ?? (imageModel.endsWith("::image-qwen21") ? 4 : 0)) > 0;
+
+            let failed = 0;
+            let assetDone = 0;
+            const polishSlots = 3;
+            let polishActive = 0;
+            const polishWaiters: (() => void)[] = [];
+            const polishPromises = new Map<string, Promise<void>>();
+            const polishItem = async (item: (typeof created)[number]) => {
+                const messages =
+                    item.kind === "character"
+                        ? buildRolePolishMessages(item.asset, stylePrompt, data.aspect)
+                        : item.kind === "scene"
+                          ? buildScenePolishMessages(item.asset, stylePrompt, data.aspect)
+                          : buildPropPolishMessages(item.asset, stylePrompt, data.aspect);
+                let polished = "";
+                try {
+                    polished = await runText(messages, 90000, `${kindTitle[item.kind]}「${item.name}」润色`);
+                } catch {
+                    polished = "";
+                }
+                if (!polished) return;
+                item.prompt =
+                    item.kind === "character"
+                        ? characterAssetPrompt(stylePrompt, item.asset, polished)
+                        : item.kind === "scene"
+                          ? sceneAssetPrompt(stylePrompt, item.asset, polished)
+                          : propAssetPrompt(stylePrompt, item.asset, polished);
+                setAssetRecord(item.kind, item.name, { prompt: item.prompt, polishedPrompt: item.prompt });
+                setNodes((prev) => prev.map((node) => (node.id === item.node.id ? { ...node, metadata: { ...node.metadata, prompt: item.prompt } } : node)));
+            };
+            const ensurePolish = (item: (typeof created)[number]) => {
+                if (!item.needPolish) return Promise.resolve();
+                const existing = polishPromises.get(item.node.id);
+                if (existing) return existing;
+                const run = async () => {
+                    if (polishActive >= polishSlots) await new Promise<void>((resolve) => polishWaiters.push(resolve));
+                    polishActive += 1;
+                    try {
+                        await polishItem(item);
+                    } finally {
+                        polishActive -= 1;
+                        polishWaiters.shift()?.();
+                    }
+                };
+                const promise = run();
+                polishPromises.set(item.node.id, promise);
+                return promise;
+            };
+            created.slice(0, polishSlots).forEach((item) => void ensurePolish(item));
+            updateDramaCardProgress(setNodes, dramaNode.id, "资产", 0, created.length);
+            for (const item of created) {
+                if (dramaPauseRef.current.has(dramaNode.id)) {
+                    updateDramaCardProgress(setNodes, dramaNode.id, null, 0, 0);
+                    message.info("已暂停");
+                    return;
+                }
+                let assetController: AbortController | undefined;
+                try {
+                    await ensurePolish(item);
+                    const imageConfig = { ...buildGenerationConfig(effectiveConfig, item.node, "image"), model: imageModel, count: "1", size: assetDims.size, imageMode: "t2i" as const };
+                    if (!isAiConfigReady(imageConfig, imageConfig.model)) throw new Error("生图工作流不可用");
+                    const baseImage = item.baseName ? assetImageByName.get(item.baseName) : undefined;
+                    const referenceEligible = Boolean(
+                        item.kind === "scene" &&
+                            item.baseName &&
+                            item.baseNodeId !== item.node.id &&
+                            item.refMode !== "off" &&
+                            supportsReference &&
+                            baseImage &&
+                            !isMajorSceneChange(`${item.asset.name} ${item.asset.description} ${item.prompt}`),
+                    );
+                    assetImageByName.delete(item.name);
+                    setAssetRecord(item.kind, item.name, { state: "loading", error: undefined, prompt: item.prompt, ...(item.kind === "scene" ? { usedReference: undefined } : {}) });
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === item.node.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, model: imageModel, size: imageConfig.size, prompt: item.prompt } } : node,
+                        ),
+                    );
+                    const controller = startGenerationRequest(item.node.id, dramaNode.id, item.node.id);
+                    assetController = controller;
+                    let image: { id: string; dataUrl: string } | undefined;
+                    let usedReference = false;
+                    if (referenceEligible && baseImage) {
+                        try {
+                            usedReference = true;
+                            image = await requestEdit(
+                                { ...imageConfig, imageMode: "edit" as const },
+                                sceneReferencePrompt(item.prompt),
+                                [{ id: baseImage.nodeId, name: `${item.baseName}.png`, type: baseImage.mimeType || "image/png", dataUrl: "", url: baseImage.url, storageKey: baseImage.storageKey }],
+                                { signal: controller.signal },
+                            ).then((items) => items[0]);
+                            if (!image) throw new Error("没有返回图片");
+                        } catch (error) {
+                            if (isGenerationCanceled(error)) throw error;
+                            usedReference = false;
+                            message.warning(`场景「${item.name}」参考图生成失败，已改用文生图`);
+                            image = await requestGeneration(imageConfig, item.prompt, { signal: controller.signal }).then((items) => items[0]);
+                        }
+                    } else {
+                        image = await requestGeneration(imageConfig, item.prompt, { signal: controller.signal }).then((items) => items[0]);
+                    }
+                    if (!image) throw new Error("没有返回图片");
+                    const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                    assetImageByName.set(item.name, { url: uploaded.url, storageKey: uploaded.storageKey, mimeType: uploaded.mimeType, nodeId: item.node.id });
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === item.node.id
+                                ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, generationType: "generation", imageMode: "t2i", model: imageModel, size: imageConfig.size, prompt: item.prompt } }
+                                : node,
+                        ),
+                    );
+                    setAssetRecord(item.kind, item.name, { state: "done", error: undefined, imageUrl: uploaded.url, prompt: item.prompt, polishedPrompt: item.prompt, ...(item.kind === "scene" ? { usedReference } : {}) });
+                    finishGenerationRequest(item.node.id, controller);
+                } catch (error) {
+                    failed += 1;
+                    if (assetController) finishGenerationRequest(item.node.id, assetController);
+                    setNodes((prev) => prev.map((node) => (node.id === item.node.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "资产生成失败" } } : node)));
+                    setAssetRecord(item.kind, item.name, { state: "error", error: error instanceof Error ? error.message : "资产生成失败" });
+                }
+                assetDone += 1;
+                updateDramaCardProgress(setNodes, dramaNode.id, "资产", assetDone, created.length);
+            }
+            if (failed) message.warning(`已建立 ${created.length} 张资产卡，${failed} 张生成失败`);
+            else message.success(`已建立 ${created.length} 张资产卡并完成生成`);
+            if (dramaPauseRef.current.has(dramaNode.id)) {
+                updateDramaCardProgress(setNodes, dramaNode.id, null, 0, 0);
+                message.info("已暂停");
+                return;
+            }
+            if (failed < created.length) {
+                await waitAutomationRender();
+                const latestNode = nodesRef.current.find((node) => node.id === dramaNode.id) || dramaNode;
+                try {
+                    await generateDramaStoryboards(latestNode, episodeId);
+                } catch (error) {
+                    updateDramaCardProgress(setNodes, dramaNode.id, null, 0, 0);
+                    message.error(error instanceof Error ? error.message : "分镜生成失败");
+                }
+            } else {
+                updateDramaCardProgress(setNodes, dramaNode.id, null, 0, 0);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, generateDramaStoryboards, isAiConfigReady, message, startGenerationRequest, waitAutomationRender],
+    );
+
+    const addDramaStage = useCallback(
+        async (dramaNode: CanvasNodeData, characterName: string, stageName: string, description: string) => {
+            const data = dramaNode.metadata?.dramaCard;
+            const record = data?.assets?.characters.find((item) => item.name === characterName);
+            if (!data || !record) throw new Error("角色不存在");
+            const style = findDramaStyle(data.style);
+            const stylePrompt = style?.prompt || style?.promptEn || "";
+            const imageModel = data.imageWorkflow || "local-gateway::image-qwen21";
+            const dims =
+                data.aspect === "9:16"
+                    ? { width: 216, height: 387, size: "928x1664" }
+                    : data.aspect === "4:3"
+                      ? { width: 320, height: 240, size: "1472x1104" }
+                      : data.aspect === "3:4"
+                        ? { width: 240, height: 320, size: "1104x1472" }
+                        : data.aspect === "1:1"
+                          ? { width: 280, height: 280, size: "1328x1328" }
+                          : { width: 384, height: 214, size: "1664x928" };
+            const prompt = characterAssetPrompt(stylePrompt, { ...record, name: `${record.name} ${stageName}`, description }, "");
+            const assetNodeCount = ["characters", "scenes", "props"].reduce((sum, key) => sum + (data.assets?.[key as "characters" | "scenes" | "props"] || []).filter((item) => item.nodeId).length, 0);
+            const node: CanvasNodeData = {
+                id: `drama-stage-${nanoid()}`,
+                type: CanvasNodeType.Image,
+                title: `角色 · ${record.name} · ${stageName}`,
+                position: { x: dramaNode.position.x + dramaNode.width + 120, y: dramaNode.position.y + assetNodeCount * (dims.height + 24) },
+                width: dims.width,
+                height: dims.height,
+                metadata: { status: NODE_STATUS_IDLE, generationType: "generation", imageMode: "t2i", model: imageModel, size: dims.size, count: 1, prompt },
+            };
+            setNodes((prev) => [
+                ...prev.map((candidate) => {
+                    if (candidate.id !== dramaNode.id) return candidate;
+                    const current = candidate.metadata?.dramaCard;
+                    if (!current?.assets) return candidate;
+                    return {
+                        ...candidate,
+                        metadata: {
+                            ...candidate.metadata,
+                            dramaCard: {
+                                ...current,
+                                assets: {
+                                    ...current.assets,
+                                    characters: current.assets.characters.map((item) =>
+                                        item.name === characterName ? { ...item, stages: [...(item.stages || []), { id: `stage-${nanoid()}`, name: stageName, description, prompt, nodeId: node.id, state: "pending" as const }] } : item,
+                                    ),
+                                },
+                            },
+                        },
+                    };
+                }),
+                node,
+            ]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: dramaNode.id, toNodeId: node.id, role: "lineage" }]);
+            await waitAutomationRender();
+            const setStageState = (patch: Record<string, unknown>) => {
+                setNodes((prev) =>
+                    prev.map((candidate) => {
+                        const current = candidate.id === dramaNode.id ? candidate.metadata?.dramaCard : null;
+                        if (!current?.assets) return candidate;
+                        return {
+                            ...candidate,
+                            metadata: {
+                                ...candidate.metadata,
+                                dramaCard: {
+                                    ...current,
+                                    assets: {
+                                        ...current.assets,
+                                        characters: current.assets.characters.map((item) =>
+                                            item.name === characterName ? { ...item, stages: (item.stages || []).map((stageItem) => (stageItem.nodeId === node.id ? { ...stageItem, ...patch } : stageItem)) } : item,
+                                        ),
+                                    },
+                                },
+                            },
+                        };
+                    }),
+                );
+            };
+            try {
+                const imageConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), model: imageModel, count: "1", size: dims.size, imageMode: "t2i" as const };
+                if (!isAiConfigReady(imageConfig, imageConfig.model)) throw new Error("生图工作流不可用");
+                setStageState({ state: "loading" });
+                setNodes((prev) => prev.map((candidate) => (candidate.id === node.id ? { ...candidate, metadata: { ...candidate.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : candidate)));
+                const controller = startGenerationRequest(node.id, dramaNode.id, node.id);
+                const image = await requestGeneration(imageConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                if (!image) throw new Error("没有返回图片");
+                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                setNodes((prev) => prev.map((candidate) => (candidate.id === node.id ? { ...candidate, metadata: { ...candidate.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS } } : candidate)));
+                setStageState({ state: "done", error: undefined, imageUrl: uploaded.url });
+                finishGenerationRequest(node.id, controller);
+            } catch (error) {
+                setNodes((prev) => prev.map((candidate) => (candidate.id === node.id ? { ...candidate, metadata: { ...candidate.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "造型生成失败" } } : candidate)));
+                setStageState({ state: "error", error: error instanceof Error ? error.message : "造型生成失败" });
+                throw error;
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, startGenerationRequest, waitAutomationRender],
+    );
+
+    const setDramaSceneRefMode = useCallback((dramaNode: CanvasNodeData, name: string, refMode: "auto" | "off") => {
+        setNodes((prev) =>
+            prev.map((candidate) => {
+                if (candidate.id !== dramaNode.id) return candidate;
+                const current = candidate.metadata?.dramaCard;
+                if (!current?.assets) return candidate;
+                return {
+                    ...candidate,
+                    metadata: {
+                        ...candidate.metadata,
+                        dramaCard: {
+                            ...current,
+                            assets: {
+                                ...current.assets,
+                                scenes: current.assets.scenes.map((record) => (record.name === name ? { ...record, refMode } : record)),
+                            },
+                        },
+                    },
+                };
+            }),
+        );
+    }, []);
+
+    const syncAutomation = useCallback((nodeId: string, state: CanvasAutomationState, status?: CanvasNodeMetadata["status"], errorDetails?: string) => {
+        const pages = state.pages || [];
+        const sheets = state.characterSheets || [];
+        const sceneSheets = state.sceneSheets || [];
+        const sheetDone = sheets.filter((sheet) => sheet.state === "done").length;
+        const sceneDone = sceneSheets.filter((sheet) => sheet.state === "done").length;
+        const sheetActive = sheets.some((sheet) => sheet.state === "loading") || sceneSheets.some((sheet) => sheet.state === "loading");
+        const total = pages.length * 2 + sheets.length + sceneSheets.length;
+        const done = pages.reduce((sum, page) => sum + (page.imageState === "done" ? 1 : 0) + (page.videoState === "done" ? 1 : 0), 0) + sheetDone + sceneDone;
+        const active = sheetActive || pages.some((page) => page.imageState === "loading" || page.videoState === "loading");
+        const stepProgress = status === "loading" && total > 0 ? { step: Math.min(total, done + (active ? 1 : 0)), total, complete: false } : undefined;
+        setNodes((prev) =>
+            prev.map((node) =>
+                node.id === nodeId
+                    ? {
+                          ...node,
+                          metadata: {
+                              ...node.metadata,
+                              ...(status ? { status } : {}),
+                              ...(status === "error" ? { errorDetails } : { errorDetails: undefined }),
+                              stepProgress,
+                              automation: state,
+                          },
+                      }
+                    : node,
+            ),
+        );
+    }, []);
+
+    const resolveAutomationModels = useCallback(
+        (settings: CanvasAutomationSettings) => {
+            const buildTextConfig = (value: string) => {
+                if (value.startsWith("prompt-cloud::")) {
+                    const id = value.slice("prompt-cloud::".length);
+                    const api = (effectiveConfig.promptCloudApis || []).find((item) => item.id === id) || activePromptCloudApi(effectiveConfig);
+                    if (!api) throw new Error(t("canvas.automation.textModelRequired"));
+                    const channelId = `prompt-cloud-${api.id || "active"}`;
+                    const modelValue = `${channelId}::${api.model}`;
+                    return {
+                        textModel: modelValue,
+                        textConfig: {
+                            ...effectiveConfig,
+                            channels: [{ id: channelId, name: api.name || "Cloud", baseUrl: api.baseUrl, apiKey: api.apiKey, apiFormat: "openai" as const, models: [{ name: api.model, capability: "text" as const }] }, ...effectiveConfig.channels],
+                            model: modelValue,
+                            textModel: modelValue,
+                        },
+                    };
+                }
+                const textModel = value || effectiveConfig.textModel;
+                if (textModel) return { textModel, textConfig: { ...effectiveConfig, model: textModel } };
+                const cloud = activePromptCloudApi(effectiveConfig);
+                if (cloud) return buildTextConfig(`prompt-cloud::${cloud.id || "active"}`);
+                throw new Error(t("canvas.automation.textModelRequired"));
+            };
+            const { textModel, textConfig } = buildTextConfig(settings.textModel || "");
+            const imageOptions = workflowModelOptions(effectiveConfig, "image");
+            const imageList = imageOptions.length ? imageOptions : selectableModelsByCapability(effectiveConfig, "image");
+            const mossModel = imageList.find((value) => channelModelOf(effectiveConfig, value)?.model.workflowId === "image-moss-image") || "";
+            if (!mossModel) throw new Error("未找到 MOSS 模型，请先安装 MOSS 资源包");
+            const mossMeta = channelModelOf(effectiveConfig, mossModel)?.model.moss;
+            const mossTier = settings.mossSteps === "50" ? "ultra" : "fast";
+            if (mossMeta?.tiers?.[mossTier]?.available === false) throw new Error(mossMeta.tiers[mossTier].reason || `MOSS ${settings.mossSteps}步档不可用`);
+            const storyboardModel = imageList.find((value) => {
+                const model = channelModelOf(effectiveConfig, value)?.model;
+                const text = `${model?.name || value} ${model?.workflowId || ""}`.toLowerCase();
+                return model?.workflowId === "image-qwen21" || text.includes("qwen21") || text.includes("qwen image 2.1");
+            });
+            if (!storyboardModel) throw new Error("未找到 Qwen Image 2.1 故事板模型，请在设置中启用 Qwen Image 2.1");
+            const configuredVideo = effectiveConfig.videoModel || effectiveConfig.model;
+            const configuredWorkflow = configuredVideo ? videoWorkflowId(effectiveConfig, configuredVideo) : "";
+            const vdnModel = videoModelForWorkflow(effectiveConfig, "video-h3-ref2va");
+            const noVdnModel = videoModelForWorkflow(effectiveConfig, "video-h3-ref2va", { noVdn: true });
+            const variant = settings.videoVariant || "auto";
+            const videoModel =
+                variant === "vdn"
+                    ? vdnModel || noVdnModel
+                    : variant === "novdn"
+                      ? noVdnModel || vdnModel
+                      : configuredWorkflow === "video-h3-ref2va" || configuredWorkflow === "video-h3-ref2va-novdn"
+                        ? configuredVideo
+                        : noVdnModel || vdnModel;
+            if (!videoModel) throw new Error("未找到 H3 多参视频模型，请安装 video-h3-ref2va 资源");
+            return { textConfig, textModel, mossModel, storyboardModel, videoModel };
+        },
+        [effectiveConfig, t],
+    );
+
+    const createAutomationChildren = useCallback(async (parent: CanvasNodeData, pages: CanvasAutomationPage[], settings: CanvasAutomationSettings, storyboardModel: string, leftOffset = 0) => {
+        const slots = computeAutomationLayout(parent, pages.length, settings.aspect, settings.grid, leftOffset);
+        const existingNodes = new Set(nodesRef.current.map((node) => node.id));
+        const existingConnections = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}->${connection.toNodeId}`));
+        const newNodes: CanvasNodeData[] = [];
+        const newConnections: CanvasConnection[] = [];
+        const nextPages = pages.map((page, index) => {
+            const textSlot = slots.texts[index];
+            const imageSlot = slots.images[index];
+            const currentImage = page.imageNodeId ? nodesRef.current.find((node) => node.id === page.imageNodeId) : undefined;
+            let textNodeId = page.textNodeId;
+            if (!textNodeId || !existingNodes.has(textNodeId)) {
+                textNodeId = `automation-text-${nanoid()}`;
+                newNodes.push({
+                    id: textNodeId,
+                    type: CanvasNodeType.Text,
+                    title: `第 ${index + 1} 页 · ${page.title}`,
+                    position: { x: textSlot.x, y: textSlot.y },
+                    width: textSlot.width,
+                    height: textSlot.height,
+                    metadata: { content: formatPageCard(page), prompt: page.layout.summary, status: NODE_STATUS_SUCCESS, fontSize: 12 },
+                });
+            }
+            let imageNodeId = page.imageNodeId;
+            if (!imageNodeId || !existingNodes.has(imageNodeId)) {
+                imageNodeId = `automation-image-${nanoid()}`;
+                newNodes.push({
+                    id: imageNodeId,
+                    type: CanvasNodeType.Image,
+                    title: `第 ${index + 1} 页 · 漫画`,
+                    position: { x: imageSlot.x, y: imageSlot.y },
+                    width: imageSlot.width,
+                    height: imageSlot.height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        generationType: "generation",
+                        imageMode: "t2i",
+                        layout: page.layout,
+                        model: storyboardModel,
+                        size: `${page.layout.width || 1024}x${page.layout.height || 1024}`,
+                        count: 1,
+                        prompt: page.layout.summary,
+                    },
+                });
+            }
+            const parentLink = `${parent.id}->${textNodeId}`;
+            if (!existingConnections.has(parentLink)) {
+                newConnections.push({ id: nanoid(), fromNodeId: parent.id, toNodeId: textNodeId, role: "lineage" });
+                existingConnections.add(parentLink);
+            }
+            const imageLink = `${textNodeId}->${imageNodeId}`;
+            if (!existingConnections.has(imageLink)) {
+                newConnections.push({ id: nanoid(), fromNodeId: textNodeId, toNodeId: imageNodeId, role: "lineage" });
+                existingConnections.add(imageLink);
+            }
+            return {
+                ...page,
+                textNodeId,
+                imageNodeId,
+                imageState: currentImage?.metadata?.content ? ("done" as const) : page.imageState,
+            };
+        });
+        if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
+        if (newConnections.length) setConnections((prev) => [...prev, ...newConnections]);
+        return nextPages;
+    }, []);
+
+    const createAutomationCharacterSheets = useCallback(async (parent: CanvasNodeData, characters: CanvasAutomationCharacter[], existingSheets: CanvasAutomationCharacterSheet[], settings: CanvasAutomationSettings, mossModel: string) => {
+        const existingNodes = new Set(nodesRef.current.map((node) => node.id));
+        const existingConnections = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}->${connection.toNodeId}`));
+        const newNodes: CanvasNodeData[] = [];
+        const newConnections: CanvasConnection[] = [];
+        const positionUpdates = new Map<string, { x: number; y: number }>();
+        const width = 320;
+        const height = 240;
+        const gap = 24;
+        const startX = parent.position.x + parent.width + 120;
+        const startY = parent.position.y;
+        const nextSheets = characters.slice(0, 4).map((character, index) => {
+            const existing = existingSheets.find((sheet) => sheet.characterId === character.id);
+            let nodeId = existing?.nodeId;
+            if (!nodeId || !existingNodes.has(nodeId)) {
+                nodeId = `automation-character-${nanoid()}`;
+                newNodes.push({
+                    id: nodeId,
+                    type: CanvasNodeType.Image,
+                    title: `角色设定 · ${character.name}`,
+                    position: { x: startX, y: startY + index * (height + gap) },
+                    width,
+                    height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        generationType: "generation",
+                        model: mossModel,
+                        size: "1024x768",
+                        count: 1,
+                        prompt: automationCharacterSheetPrompt(character, settings.style),
+                    },
+                });
+            }
+            const link = `${parent.id}->${nodeId}`;
+            if (!existingConnections.has(link)) {
+                newConnections.push({ id: nanoid(), fromNodeId: parent.id, toNodeId: nodeId, role: "lineage" });
+                existingConnections.add(link);
+            }
+            if (existingNodes.has(nodeId)) positionUpdates.set(nodeId, { x: startX, y: startY + index * (height + gap) });
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            return {
+                characterId: character.id,
+                nodeId,
+                state: node?.metadata?.content ? ("done" as const) : existing?.state === "error" ? ("pending" as const) : existing?.state || ("pending" as const),
+                error: existing?.error,
+            };
+        });
+        if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
+        if (newConnections.length) setConnections((prev) => [...prev, ...newConnections]);
+        if (positionUpdates.size) setNodes((prev) => prev.map((node) => (positionUpdates.has(node.id) ? { ...node, position: positionUpdates.get(node.id)! } : node)));
+        return nextSheets;
+    }, []);
+
+    const createAutomationSceneSheets = useCallback(async (parent: CanvasNodeData, scenes: { id: string; name: string; description?: string }[], existingSheets: CanvasAutomationSceneSheet[], settings: CanvasAutomationSettings, mossModel: string, characterCount: number) => {
+        const existingNodes = new Set(nodesRef.current.map((node) => node.id));
+        const existingConnections = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}->${connection.toNodeId}`));
+        const newNodes: CanvasNodeData[] = [];
+        const newConnections: CanvasConnection[] = [];
+        const positionUpdates = new Map<string, { x: number; y: number }>();
+        const width = 320;
+        const height = 180;
+        const gap = 24;
+        const startX = parent.position.x + parent.width + 120;
+        const startY = parent.position.y + characterCount * (240 + gap);
+        const nextSheets = scenes.map((scene, index) => {
+            const existing = existingSheets.find((sheet) => sheet.sceneId === scene.id);
+            let nodeId = existing?.nodeId;
+            const position = { x: startX, y: startY + index * (height + gap) };
+            if (!nodeId || !existingNodes.has(nodeId)) {
+                nodeId = `automation-scene-${nanoid()}`;
+                newNodes.push({
+                    id: nodeId,
+                    type: CanvasNodeType.Image,
+                    title: `场景设定 · ${scene.name}`,
+                    position,
+                    width,
+                    height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        generationType: "generation",
+                        model: mossModel,
+                        size: "1280x720",
+                        count: 1,
+                        prompt: `场景概念图/背景设定图，无人物、无文字、无边框，展示空间布局、光线、材质和关键道具；${scene.description || scene.name}；画风：${settings.style}`,
+                    },
+                });
+            } else {
+                positionUpdates.set(nodeId, position);
+            }
+            const link = `${parent.id}->${nodeId}`;
+            if (!existingConnections.has(link)) {
+                newConnections.push({ id: nanoid(), fromNodeId: parent.id, toNodeId: nodeId, role: "lineage" });
+                existingConnections.add(link);
+            }
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            return {
+                sceneId: scene.id,
+                name: scene.name,
+                nodeId,
+                state: node?.metadata?.content ? ("done" as const) : existing?.state === "error" ? ("pending" as const) : existing?.state || ("pending" as const),
+                error: existing?.error,
+            };
+        });
+        if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
+        if (newConnections.length) setConnections((prev) => [...prev, ...newConnections]);
+        if (positionUpdates.size) setNodes((prev) => prev.map((node) => (positionUpdates.has(node.id) ? { ...node, position: positionUpdates.get(node.id)! } : node)));
+        return nextSheets;
+    }, []);
+
+    const runAutomationSceneSheet = useCallback(
+        async (parentId: string, scene: { id: string; name: string; description?: string }, sheet: CanvasAutomationSceneSheet, settings: CanvasAutomationSettings, mossModel: string, signal: AbortSignal) => {
+            const node = nodesRef.current.find((item) => item.id === sheet.nodeId);
+            if (!node) throw new Error(`场景设定卡不存在：${scene.name}`);
+            const prompt = node.metadata?.prompt || `场景概念图/背景设定图，无人物、无文字、无边框；${scene.description || scene.name}；画风：${settings.style}`;
+            const baseImageConfig = buildGenerationConfig(effectiveConfig, node, "image");
+            const imageConfig = { ...baseImageConfig, model: mossModel, count: "1", size: "1280x720", params: { ...(baseImageConfig.params || {}), mossTier: settings.mossSteps === "50" ? "ultra" : "fast", mossPrecision: "auto" } };
+            if (!isAiConfigReady(imageConfig, imageConfig.model)) throw new Error("MOSS 模型不可用，无法生成场景图");
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, prompt, model: mossModel, size: "1280x720" } } : item)));
+            const controller = startGenerationRequest(node.id, parentId, node.id);
+            const abortGeneration = () => controller.abort("user-stop");
+            if (signal.aborted) abortGeneration();
+            else signal.addEventListener("abort", abortGeneration, { once: true });
+            try {
+                const image = await requestGeneration(imageConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                if (!image) throw new Error("MOSS 没有返回场景图");
+                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id
+                            ? { ...item, metadata: { ...item.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, generationType: "generation", model: mossModel, size: "1280x720", prompt } }
+                            : item,
+                    ),
+                );
+            } catch (error) {
+                const canceled = isGenerationCanceled(error);
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id && !item.metadata?.content
+                            ? { ...item, metadata: { ...item.metadata, status: canceled ? NODE_STATUS_IDLE : NODE_STATUS_ERROR, errorDetails: canceled ? undefined : error instanceof Error ? error.message : "场景图生成失败" } }
+                            : item,
+                    ),
+                );
+                throw error;
+            } finally {
+                signal.removeEventListener("abort", abortGeneration);
+                finishGenerationRequest(node.id, controller);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, startGenerationRequest],
+    );
+
+    const createAutomationVideoNodes = useCallback(async (parent: CanvasNodeData, pages: CanvasAutomationPage[], settings: CanvasAutomationSettings, videoModel: string, sheets: CanvasAutomationCharacterSheet[], sceneSheets: CanvasAutomationSceneSheet[]) => {
+        const slots = computeAutomationLayout(parent, pages.length, settings.aspect, settings.grid);
+        const existingNodes = new Set(nodesRef.current.map((node) => node.id));
+        const existingConnections = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}->${connection.toNodeId}`));
+        const newNodes: CanvasNodeData[] = [];
+        const newConnections: CanvasConnection[] = [];
+        const updates = new Map<string, Partial<CanvasNodeMetadata>>();
+        const layoutUpdates = new Map<string, { position: { x: number; y: number }; width: number; height: number }>();
+        const nextPages = pages.map((page, index) => {
+            const baseIndex = pages.findIndex((item) => item.imageNodeId && item.imageNodeId === page.imageNodeId);
+            const layoutIndex = baseIndex >= 0 ? baseIndex : index;
+            const idealImage = slots.images[layoutIndex] || slots.images[index];
+            const videoBase = slots.videos[layoutIndex] || slots.videos[index];
+            const imageNode = page.imageNodeId ? nodesRef.current.find((node) => node.id === page.imageNodeId) : undefined;
+            const imageAnchor = imageNode?.position || idealImage;
+            const segmentOffset = page.segmentIndex || 0;
+            // Anchor video slots to the real image cards so moving the agent card cannot shift the video queue away from its image.
+            const videoSlot = {
+                ...videoBase,
+                x: imageAnchor.x + (videoBase.x - idealImage.x),
+                y: imageAnchor.y + (videoBase.y - idealImage.y) + segmentOffset * (videoBase.height + 24),
+            };
+            const prompt = page.videoPrompt || page.videoHint || "";
+            const seconds = resolvePageVideoSeconds(page, settings);
+            let videoNodeId = page.videoNodeId;
+            if (!videoNodeId || !existingNodes.has(videoNodeId)) {
+                videoNodeId = `automation-video-${nanoid()}`;
+                newNodes.push({
+                    id: videoNodeId,
+                    type: CanvasNodeType.Video,
+                    title: page.videoTitle || `第 ${layoutIndex + 1} 页 · 视频`,
+                    position: { x: videoSlot.x, y: videoSlot.y },
+                    width: videoSlot.width,
+                    height: videoSlot.height,
+                    metadata: {
+                        status: NODE_STATUS_IDLE,
+                        model: videoModel,
+                        videoMode: "reference",
+                        size: settings.aspect,
+                        seconds,
+                        vquality: settings.vquality,
+                        generateAudio: settings.generateAudio ? "true" : "false",
+                        count: 1,
+                        prompt,
+                    },
+                });
+            } else {
+                updates.set(videoNodeId, { prompt, model: videoModel, videoMode: "reference", frameMode: undefined, size: settings.aspect, seconds, vquality: settings.vquality, generateAudio: settings.generateAudio ? "true" : "false" });
+                layoutUpdates.set(videoNodeId, { position: { x: videoSlot.x, y: videoSlot.y }, width: videoSlot.width, height: videoSlot.height });
+            }
+            const videoManifest = buildAutomationVideoReference(page, sheets, sceneSheets);
+            videoManifest.characters.forEach((reference) => {
+                const link = `${reference.nodeId}->${videoNodeId}`;
+                if (existingConnections.has(link)) return;
+                newConnections.push({ id: nanoid(), fromNodeId: reference.nodeId, toNodeId: videoNodeId });
+                existingConnections.add(link);
+            });
+            if (videoManifest.scene) {
+                const sceneLink = `${videoManifest.scene.nodeId}->${videoNodeId}`;
+                if (!existingConnections.has(sceneLink)) {
+                    newConnections.push({ id: nanoid(), fromNodeId: videoManifest.scene.nodeId, toNodeId: videoNodeId });
+                    existingConnections.add(sceneLink);
+                }
+            }
+            if (page.imageNodeId) {
+                const link = `${page.imageNodeId}->${videoNodeId}`;
+                if (!existingConnections.has(link)) {
+                    newConnections.push({ id: nanoid(), fromNodeId: page.imageNodeId, toNodeId: videoNodeId });
+                    existingConnections.add(link);
+                }
+            }
+            return { ...page, videoSeconds: seconds, videoNodeId };
+        });
+        if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
+        if (newConnections.length) setConnections((prev) => [...prev, ...newConnections]);
+        if (updates.size) {
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (!updates.has(node.id)) return node;
+                    const layout = layoutUpdates.get(node.id);
+                    return { ...node, ...(layout ? layout : {}), metadata: { ...node.metadata, ...updates.get(node.id) } };
+                }),
+            );
+        }
+        return nextPages;
+    }, []);
+
+    const runAutomationCharacterSheet = useCallback(
+        async (parentId: string, character: CanvasAutomationCharacter, sheet: CanvasAutomationCharacterSheet, settings: CanvasAutomationSettings, mossModel: string, signal: AbortSignal) => {
+            const node = nodesRef.current.find((item) => item.id === sheet.nodeId);
+            if (!node) throw new Error(`角色设定卡不存在：${character.name}`);
+            const prompt = node.metadata?.prompt || automationCharacterSheetPrompt(character, settings.style);
+            const baseImageConfig = buildGenerationConfig(effectiveConfig, node, "image");
+            const imageConfig = { ...baseImageConfig, model: mossModel, count: "1", size: "1024x768", params: { ...(baseImageConfig.params || {}), mossTier: settings.mossSteps === "50" ? "ultra" : "fast", mossPrecision: "auto" } };
+            if (!isAiConfigReady(imageConfig, imageConfig.model)) throw new Error("MOSS 模型不可用，无法生成角色四视图");
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, prompt, model: mossModel, size: "1024x768" } } : item)));
+            const controller = startGenerationRequest(node.id, parentId, node.id);
+            const abortGeneration = () => controller.abort("user-stop");
+            if (signal.aborted) abortGeneration();
+            else signal.addEventListener("abort", abortGeneration, { once: true });
+            try {
+                const image = await requestGeneration(imageConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                if (!image) throw new Error("MOSS 没有返回角色四视图");
+                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id
+                            ? { ...item, metadata: { ...item.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, generationType: "generation", model: mossModel, size: "1024x768", prompt } }
+                            : item,
+                    ),
+                );
+            } catch (error) {
+                const canceled = isGenerationCanceled(error);
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id && !item.metadata?.content
+                            ? { ...item, metadata: { ...item.metadata, status: canceled ? NODE_STATUS_IDLE : NODE_STATUS_ERROR, errorDetails: canceled ? undefined : error instanceof Error ? error.message : "角色四视图生成失败" } }
+                            : item,
+                    ),
+                );
+                throw error;
+            } finally {
+                signal.removeEventListener("abort", abortGeneration);
+                finishGenerationRequest(node.id, controller);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, startGenerationRequest],
+    );
+
+
+    const runAutomationImage = useCallback(
+        async (parentId: string, page: CanvasAutomationPage, settings: CanvasAutomationSettings, storyboardModel: string, signal: AbortSignal) => {
+            const imageNode = nodesRef.current.find((node) => node.id === page.imageNodeId);
+            if (!imageNode) throw new Error(`第 ${page.index + 1} 页漫画卡不存在`);
+            let layout = page.layout;
+            const textNode = nodesRef.current.find((node) => node.id === page.textNodeId);
+            if (textNode?.metadata?.content) {
+                try {
+                    const parsed = JSON.parse(textNode.metadata.content) as {
+                        moss?: unknown;
+                        layout?: unknown;
+                        style?: string;
+                        styleLock?: string;
+                        styleNegative?: string;
+                        grid?: CanvasAutomationGrid;
+                        panels?: CanvasAutomationPanelSpec[];
+                        characters?: CanvasAutomationCharacter[];
+                    };
+                    if (Array.isArray(parsed.panels) && parsed.panels.length && parsed.grid) {
+                        layout = buildGridMoss({
+                            style: parsed.style || page.style || settings.style,
+                            styleLock: parsed.styleLock || page.styleLock,
+                            styleNegative: parsed.styleNegative || page.styleNegative,
+                            characters: parsed.characters || page.characters || [],
+                            panels: parsed.panels,
+                            grid: parsed.grid,
+                            aspect: settings.aspect,
+                            storyboard: settings.storyboardWhiteModel !== false,
+                        });
+                    } else {
+                        const raw = parsed.moss || parsed.layout;
+                        if (raw) layout = normalizeMossLayout(raw, settings.aspect);
+                    }
+                } catch {
+                    // The text card may be edited mid-write; keep the last valid layout.
+                }
+            }
+            if (settings.storyboardWhiteModel !== false && layout.storyboardVersion !== STORYBOARD_PROMPT_VERSION) {
+                throw new Error("当前页的故事板仍是旧版白模提示词，请新建自动化任务后再生成");
+            }
+            const imageConfig = {
+                ...buildGenerationConfig(effectiveConfig, imageNode, "image"),
+                model: storyboardModel,
+                count: "1",
+                size: `${layout.width || 1024}x${layout.height || 1024}`,
+                imageMode: "t2i" as const,
+            };
+            if (!isAiConfigReady(imageConfig, imageConfig.model)) throw new Error("Qwen Image 2.1 故事板模型不可用，请检查本地 ComfyUI");
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === imageNode.id
+                        ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, imageMode: "t2i", layout, model: imageConfig.model, size: imageConfig.size, prompt: layout.summary } }
+                        : node,
+                ),
+            );
+            const controller = startGenerationRequest(imageNode.id, parentId, imageNode.id);
+            const abortGeneration = () => controller.abort("user-stop");
+            if (signal.aborted) abortGeneration();
+            else signal.addEventListener("abort", abortGeneration, { once: true });
+            try {
+                const image = await requestGeneration(imageConfig, layout.summary, { signal: controller.signal, negative: STORYBOARD_NEGATIVE_PROMPT }).then((items) => items[0]);
+                if (!image) throw new Error("Qwen Image 2.1 没有返回故事板");
+                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === imageNode.id
+                            ? {
+                                  ...node,
+                                  width: imageNode.width,
+                                  height: imageNode.height,
+                                  position: imageNode.position,
+                                  metadata: { ...node.metadata, ...imageMetadata(uploaded), generationType: "generation", imageMode: "t2i", layout, model: imageConfig.model, size: imageConfig.size, prompt: layout.summary },
+                              }
+                            : node,
+                    ),
+                );
+            } catch (error) {
+                const canceled = isGenerationCanceled(error);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === imageNode.id && !node.metadata?.content
+                            ? { ...node, metadata: { ...node.metadata, status: canceled ? NODE_STATUS_IDLE : NODE_STATUS_ERROR, errorDetails: canceled ? undefined : error instanceof Error ? error.message : "故事板生成失败" } }
+                            : node,
+                    ),
+                );
+                throw error;
+            } finally {
+                signal.removeEventListener("abort", abortGeneration);
+                finishGenerationRequest(imageNode.id, controller);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, startGenerationRequest],
+    );
+
+    const runAutomationVideo = useCallback(
+        async (parentId: string, page: CanvasAutomationPage, settings: CanvasAutomationSettings, videoModel: string, sheets: CanvasAutomationCharacterSheet[], sceneSheets: CanvasAutomationSceneSheet[], signal: AbortSignal) => {
+            const imageNode = nodesRef.current.find((node) => node.id === page.imageNodeId);
+            const videoNode = nodesRef.current.find((node) => node.id === page.videoNodeId);
+            if (!imageNode?.metadata?.content) throw new Error(`第 ${page.index + 1} 页漫画图不存在`);
+            if (!videoNode) throw new Error(`第 ${page.index + 1} 页视频卡不存在`);
+            const prompt = page.videoPrompt || "";
+            if (!isRef2VAPrompt(prompt)) throw new Error(`第 ${page.index + 1} 页缺少 Ref2VA 多参提示词，请先重新生成提示词`);
+            const speechSeconds = pageSpeechSeconds(page);
+            if (speechSeconds > 25) throw new Error(`第 ${page.index + 1} 页台词约 ${Math.ceil(speechSeconds)} 秒，超过 25 秒硬上限；不会删改台词，请拆页后重试。`);
+            const seconds = resolvePageVideoSeconds(page, settings);
+            const videoConfig = {
+                ...buildGenerationConfig(effectiveConfig, videoNode, "video"),
+                model: videoModel,
+                count: "1",
+                size: settings.aspect,
+                videoSeconds: seconds,
+                vquality: settings.vquality,
+                videoGenerateAudio: settings.generateAudio ? "true" : "false",
+                videoMode: "reference" as const,
+            };
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === videoNode.id
+                        ? {
+                              ...node,
+                              metadata: {
+                                  ...node.metadata,
+                                  status: NODE_STATUS_LOADING,
+                                  errorDetails: undefined,
+                                  prompt,
+                                  model: videoModel,
+                                  size: settings.aspect,
+                                  seconds,
+                                  vquality: settings.vquality,
+                                  generateAudio: settings.generateAudio ? "true" : "false",
+                                  videoMode: "reference",
+                                  frameMode: undefined,
+                              },
+                          }
+                        : node,
+                ),
+            );
+            const controller = startGenerationRequest(videoNode.id, parentId, videoNode.id);
+            const abortGeneration = () => controller.abort("user-stop");
+            if (signal.aborted) abortGeneration();
+            else signal.addEventListener("abort", abortGeneration, { once: true });
+            const videoTimeout = window.setTimeout(() => controller.abort("user-stop"), 10 * 60_000);
+            try {
+                const dataUrl = await imageToDataUrl({ url: imageNode.metadata.content, storageKey: imageNode.metadata.storageKey });
+                if (!dataUrl) throw new Error("无法读取漫画图作为多参故事板");
+                const manifest = buildAutomationVideoReference(page, sheets, sceneSheets);
+                const references: ReferenceImage[] = [];
+                for (const reference of manifest.characters) {
+                    const sheetNode = nodesRef.current.find((node) => node.id === reference.nodeId);
+                    if (!sheetNode?.metadata?.content) throw new Error(`第 ${page.index + 1} 页角色参考图缺失：${reference.name}`);
+                    const sheetDataUrl = await imageToDataUrl({ url: sheetNode.metadata.content, storageKey: sheetNode.metadata.storageKey });
+                    if (!sheetDataUrl) throw new Error(`无法读取角色参考图：${reference.name}`);
+                    references.push({
+                        id: sheetNode.id,
+                        name: `${reference.name}-四视图.png`,
+                        type: sheetNode.metadata.mimeType || "image/png",
+                        dataUrl: sheetDataUrl,
+                        url: sheetDataUrl,
+                        storageKey: sheetNode.metadata.storageKey,
+                    });
+                }
+                if (manifest.scene) {
+                    const sceneNode = nodesRef.current.find((node) => node.id === manifest.scene?.nodeId);
+                    if (!sceneNode?.metadata?.content) throw new Error(`第 ${page.index + 1} 页场景参考图缺失：${manifest.scene.name}`);
+                    const sceneDataUrl = await imageToDataUrl({ url: sceneNode.metadata.content, storageKey: sceneNode.metadata.storageKey });
+                    if (!sceneDataUrl) throw new Error(`无法读取场景参考图：${manifest.scene.name}`);
+                    references.push({
+                        id: sceneNode.id,
+                        name: `${manifest.scene.name}-场景.png`,
+                        type: sceneNode.metadata.mimeType || "image/png",
+                        dataUrl: sceneDataUrl,
+                        url: sceneDataUrl,
+                        storageKey: sceneNode.metadata.storageKey,
+                    });
+                }
+                references.push({
+                    id: imageNode.id,
+                    name: `${page.title || `page-${page.index + 1}`}.png`,
+                    type: imageNode.metadata.mimeType || "image/png",
+                    dataUrl,
+                    url: dataUrl,
+                    storageKey: imageNode.metadata.storageKey,
+                });
+                await completeVideoNodeTask(videoNode.id, videoConfig, prompt, references, controller.signal, {
+                    videoMode: "reference",
+                    size: settings.aspect,
+                    seconds,
+                    vquality: settings.vquality,
+                    model: videoModel,
+                    generateAudio: settings.generateAudio ? "true" : "false",
+                });
+                // Keep the video card in its storyboard slot so rows stay aligned with the comic page.
+                const slot = automationImageSize(settings.aspect);
+                setNodes((prev) => prev.map((node) => (node.id === videoNode.id ? { ...node, width: slot.width, height: slot.height } : node)));
+            } catch (error) {
+                const canceled = isGenerationCanceled(error);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === videoNode.id && !node.metadata?.content
+                            ? { ...node, metadata: { ...node.metadata, status: canceled ? NODE_STATUS_IDLE : NODE_STATUS_ERROR, errorDetails: canceled ? undefined : error instanceof Error ? error.message : "视频生成失败" } }
+                            : node,
+                    ),
+                );
+                throw error;
+            } finally {
+                window.clearTimeout(videoTimeout);
+                signal.removeEventListener("abort", abortGeneration);
+                finishGenerationRequest(videoNode.id, controller);
+            }
+        },
+        [completeVideoNodeTask, effectiveConfig, finishGenerationRequest, startGenerationRequest],
+    );
+
+    const startAutomation = useCallback(
+        async (parentId: string, input: CanvasAutomationStartInput) => {
+            if (automationControllersRef.current.has(parentId)) return;
+            const parent = nodesRef.current.find((node) => node.id === parentId);
+            if (!parent || parent.type !== CanvasNodeType.Automation) return;
+            const settings = input.settings;
+            const controller = new AbortController();
+            automationControllersRef.current.set(parentId, controller);
+            setAutomationRunningIds((prev) => new Set(prev).add(parentId));
+            const existing = parent.metadata?.automation;
+            // 旧任务可能保存了未拆分的长事件；重跑时先按当前规则重新拆事件，避免一直复用同一个 16 秒页。
+            let existingScript: CanvasAutomationScript | undefined;
+            try {
+                existingScript = existing?.script ? normalizeScript(existing.script) : undefined;
+            } catch {
+                existingScript = existing?.script;
+            }
+            const resumeCharacters = (existing?.characters || []).filter((character) => !isCrowdCharacterName(character.name)).slice(0, 4);
+            const resumeCharacterIds = new Set(resumeCharacters.map((character) => character.id));
+            const removedCharacter = (existing?.characters || []).some((character) => !resumeCharacterIds.has(character.id));
+            const resumeSheets = (existing?.characterSheets || []).filter((sheet) => resumeCharacterIds.has(sheet.characterId));
+            const resumePages = existing?.pages?.length
+                ? existing.pages.map((page) => ({
+                      ...page,
+                      characters: (page.characters || []).filter((character) => resumeCharacterIds.has(character.id)),
+                      panels: (page.panels || []).map((panel) => ({
+                          ...panel,
+                          characters: (panel.characters || []).filter((id) => resumeCharacterIds.has(id)),
+                      })),
+                  }))
+                : [];
+            let state: CanvasAutomationState = {
+                template: "novel-comic-video",
+                stage: resumePages.length ? "images" : "planning",
+                sourceText: input.sourceText,
+                sourceUrl: input.sourceUrl,
+                settings,
+                script: existingScript,
+                scriptText: existingScript ? formatScriptForPlanning(existingScript) : existing?.scriptText,
+                style: existing?.style,
+                characters: resumeCharacters,
+                characterSheets: resumeSheets,
+                scenes: existing?.scenes,
+                sceneSheets: existing?.sceneSheets,
+                pages: resumePages,
+                videoPromptVersion: removedCharacter ? 0 : existing?.videoPromptVersion,
+                warnings: [],
+                errors: [],
+                startedAt: existing?.startedAt || Date.now(),
+                updatedAt: Date.now(),
+            };
+            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+            try {
+                const models = resolveAutomationModels(settings);
+                const runText = async (messages: Parameters<typeof requestImageQuestion>[1], timeoutMs: number, label: string) => {
+                    const request = new AbortController();
+                    const forwardAbort = () => request.abort(controller.signal.reason);
+                    if (controller.signal.aborted) forwardAbort();
+                    else controller.signal.addEventListener("abort", forwardAbort, { once: true });
+                    let timedOut = false;
+                    const timer = window.setTimeout(() => {
+                        timedOut = true;
+                        request.abort("timeout");
+                    }, timeoutMs);
+                    try {
+                        return await requestImageQuestion(models.textConfig, messages, () => undefined, { signal: request.signal });
+                    } catch (error) {
+                        if (timedOut && !controller.signal.aborted) throw new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒没有返回，已中止；请检查文本模型网络或降低分镜页数后重试。`);
+                        throw error;
+                    } finally {
+                        window.clearTimeout(timer);
+                        controller.signal.removeEventListener("abort", forwardAbort);
+                    }
+                };
+                const overflowMessage = (pages: CanvasAutomationPage[], pageCount: number, resumed: boolean) =>
+                    `第 ${pages.map((page) => `${page.index + 1}（约 ${Math.ceil(pageSpeechSeconds(page))} 秒）`).join("、")} 页台词超过 25 秒硬上限，不会删改台词。${
+                        resumed ? "当前任务已有生成卡片，请新建自动化任务并提高分镜页数。" : `已尝试拆页到 ${pageCount} 页仍超出，请提高分镜页数或拆分正文后分多次任务生成。`
+                    }`;
+                if (!resumePages.length) {
+                    let script: CanvasAutomationScript | undefined = state.script;
+                    if (!script) {
+                        state.stage = "script";
+                        state.progress = "第 1 轮：改写剧本与剧情结构…";
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        const sourceChunks = splitAutomationSource(input.sourceText);
+                        const adaptedParts: CanvasAutomationScript[] = [];
+                        let adaptationError: unknown;
+                        for (let chunkIndex = 0; chunkIndex < sourceChunks.length; chunkIndex += 1) {
+                            const adaptationMessages = buildScriptAdaptationMessages(sourceChunks[chunkIndex]);
+                            let part: CanvasAutomationScript | undefined;
+                            for (let attempt = 0; attempt < 2; attempt += 1) {
+                                try {
+                                    const answer = await runText(adaptationMessages, 120000, `剧本改写（${chunkIndex + 1}/${sourceChunks.length}）`);
+                                    part = normalizeScript(extractJson(answer));
+                                    adaptationError = undefined;
+                                    break;
+                                } catch (error) {
+                                    adaptationError = error;
+                                    if (controller.signal.aborted) throw error;
+                                    if (attempt === 1 || (error instanceof Error && error.message.includes("没有返回"))) break;
+                                    console.info("剧本改写返回格式不正确，自动重试一次");
+                                    adaptationMessages.push({ role: "user", content: "上一次没有返回可解析的 JSON。请严格按系统消息的结构只输出 JSON，不要解释、不要 markdown。" });
+                                }
+                            }
+                            if (!part) {
+                                adaptationError = new Error(`第 ${chunkIndex + 1} 段剧本改写失败`);
+                                break;
+                            }
+                            adaptedParts.push(part);
+                        }
+                        if (adaptedParts.length && adaptedParts.length === sourceChunks.length) {
+                            script = mergeAutomationScripts(adaptedParts);
+                        }
+                        if (!script) {
+                            const detail = adaptationError instanceof Error ? adaptationError.message : "剧本改写失败";
+                            state.warnings = [...(state.warnings || []), `剧本改写失败（${detail}），已直接用原文拆分`];
+                            state.script = undefined;
+                            state.scriptText = input.sourceText;
+                            console.warn("剧本改写失败，已改用原文继续拆分");
+                        } else {
+                            state.script = script;
+                            state.scriptText = formatScriptForPlanning(script);
+                            const stats = scriptStats(script);
+                            console.info(`剧本改写完成：${script.beats.length} 个事件，约 ${Math.ceil(stats.dialogueSeconds)} 秒台词`);
+                        }
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    } else if (!state.scriptText) {
+                        state.scriptText = script ? formatScriptForPlanning(script) : input.sourceText;
+                    }
+                    const planningSource = state.scriptText || (script ? formatScriptForPlanning(script) : input.sourceText);
+                    state.stage = "planning";
+                    state.progress = "正在拆分分镜…";
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    let planSettings = settings;
+                    let parsed: ReturnType<typeof normalizeComicPlan> | null = null;
+                    const planningBatches = script && planningSource.length > 60000
+                        ? splitScriptIntoBatches(script, 50000).map((batchScript) => ({ source: formatScriptForPlanning(batchScript), script: batchScript }))
+                        : [{ source: planningSource, script }];
+                    if (planningBatches.length > 1) {
+                        const batchPlans: ReturnType<typeof normalizeComicPlan>[] = [];
+                        for (let batchIndex = 0; batchIndex < planningBatches.length; batchIndex += 1) {
+                            const batch = planningBatches[batchIndex];
+                            const batchSettings = { ...planSettings, pageCountAuto: true };
+                            state.progress = `第 2 轮：设计分镜框架（${batchIndex + 1}/${planningBatches.length}）…`;
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                            let batchFramework: unknown;
+                            try {
+                                batchFramework = extractJson(await runText(buildComicFrameworkMessages(batch.source, batchSettings, batch.script), 120000, `分镜框架（${batchIndex + 1}/${planningBatches.length}）`));
+                            } catch (error) {
+                                if (controller.signal.aborted) throw error;
+                                batchFramework = undefined;
+                                console.warn(`第 ${batchIndex + 1} 批分镜框架失败，继续下一批`);
+                            }
+                            state.progress = `第 3 轮：补全分镜细节（${batchIndex + 1}/${planningBatches.length}）…`;
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                            let raw: unknown = batchFramework;
+                            try {
+                                raw = extractJson(await runText(buildNovelToComicMessages(batch.source, batchSettings, batch.script, false, [], batchFramework), 180000, `分镜细节（${batchIndex + 1}/${planningBatches.length}）`));
+                            } catch (error) {
+                                if (controller.signal.aborted) throw error;
+                                if (!batchFramework) {
+                                    console.warn(`第 ${batchIndex + 1} 批分镜细节失败，跳过`);
+                                    continue;
+                                }
+                                console.warn(`第 ${batchIndex + 1} 批细节失败，使用框架保底`);
+                            }
+                            let batchPlan: ReturnType<typeof normalizeComicPlan>;
+                            try {
+                                batchPlan = normalizeComicPlan(raw, batchSettings);
+                            } catch (error) {
+                                if (!batchFramework) {
+                                    console.warn(`第 ${batchIndex + 1} 批分镜无法解析，跳过`);
+                                    continue;
+                                }
+                                batchPlan = normalizeComicPlan(batchFramework, batchSettings);
+                            }
+                            batchPlans.push(applyComicFrameworkHints(batchPlan, batchFramework));
+                        }
+                        if (!batchPlans.length) throw new Error("长剧本分批分镜失败");
+                        parsed = mergeComicPlans(batchPlans, planSettings);
+                        state.progress = "第 4 轮：查错…";
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        const review = reviewComicPlan(parsed, planSettings, script);
+                        const freshWarnings = review.warnings.filter((warning) => !(state.warnings || []).includes(warning));
+                        if (freshWarnings.length) state.warnings = [...(state.warnings || []), ...freshWarnings];
+                    } else {
+                    let strictEvents = false;
+                    let reviewRetried = false;
+                    let overlongPages: number[] = [];
+                    let framework: unknown;
+                    for (let attempt = 0; attempt < 2; attempt += 1) {
+                        if (!framework) {
+                            state.progress = `第 2 轮：设计分镜框架（第 ${attempt + 1} 次）…`;
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                            try {
+                                const frameworkAnswer = await runText(buildComicFrameworkMessages(planningSource, planSettings, script, strictEvents, overlongPages), 120000, `分镜框架（第 ${attempt + 1} 次）`);
+                                framework = extractJson(frameworkAnswer);
+                            } catch (error) {
+                                if (controller.signal.aborted) throw error;
+                                framework = undefined;
+                                state.warnings = [...(state.warnings || []), `第 2 轮分镜框架失败，已回退到一次性分镜：${error instanceof Error ? error.message : "未知错误"}`];
+                                console.warn("分镜框架生成失败，回退到一次性分镜");
+                                syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                            }
+                        }
+                        if (framework) {
+                            state.progress = `第 3 轮：补全分镜细节（第 ${attempt + 1} 次）…`;
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        }
+                        let answer: string;
+                        try {
+                            answer = await runText(buildNovelToComicMessages(planningSource, planSettings, script, strictEvents, overlongPages, framework), 180000, `分镜细节（第 ${attempt + 1} 次）`);
+                        } catch (error) {
+                            if (controller.signal.aborted) throw error;
+                            if (parsed) {
+                                state.warnings = [...(state.warnings || []), `分镜第 ${attempt + 1} 次请求失败，沿用上一版分镜`];
+                                break;
+                            }
+                            throw error;
+                        }
+                        try {
+                            parsed = normalizeComicPlan(extractJson(answer), planSettings);
+                        } catch (error) {
+                            if (!framework) throw error;
+                            parsed = normalizeComicPlan(framework, planSettings);
+                            state.warnings = [...(state.warnings || []), `第 3 轮细节返回不完整，已用第 2 轮框架保底：${error instanceof Error ? error.message : "未知错误"}`];
+                        }
+                        parsed = applyComicFrameworkHints(parsed, framework);
+                        state.progress = "第 4 轮：查错…";
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        const review = reviewComicPlan(parsed, planSettings, script, framework);
+                        const freshWarnings = review.warnings.filter((warning) => !(state.warnings || []).includes(warning));
+                        if (freshWarnings.length) state.warnings = [...(state.warnings || []), ...freshWarnings];
+                        const duplicates = duplicatePageEvents(parsed.pages);
+                        const missing = script ? missingPageEvents(parsed.pages, script) : [];
+                        const overlong = parsed.pages.filter((page) => pageSpeechSeconds(page) > 25).map((page) => page.index);
+                        if ((review.needsRetry || duplicates.length || missing.length || overlong.length) && !reviewRetried) {
+                            reviewRetried = true;
+                            strictEvents = true;
+                            overlongPages = overlong;
+                            framework = undefined;
+                            console.info("第 4 轮查错发现问题，正在重做一次框架和细节");
+                            continue;
+                        }
+                        if (duplicates.length) state.warnings = [...(state.warnings || []), `分镜页重复了事件：${duplicates.join("、")}，已继续生成`];
+                        if (missing.length) state.warnings = [...(state.warnings || []), `分镜漏掉事件：${missing.join("、")}`];
+                        break;
+                    }
+                    }
+                    if (!parsed) throw new Error("模型没有返回分镜页");
+                    state = { ...state, settings: planSettings, style: parsed.style, styleNegative: parsed.styleNegative, characters: parsed.characters, scenes: parsed.scenes, pages: parsed.pages, stage: "images", progress: undefined, updatedAt: Date.now() };
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                } else {
+                    state.pages = resumePages.map(sanitizePageDialogue);
+                }
+                const characters = state.characters || [];
+                state.pages = (state.pages || []).map((page) => {
+                    const cleaned = sanitizePageDialogue(page);
+                    if (cleaned.grid && cleaned.panels?.length) {
+                        cleaned.layout = buildGridMoss({
+                            style: cleaned.style || state.style || settings.style,
+                            styleLock: cleaned.styleLock,
+                            styleNegative: cleaned.styleNegative,
+                            characters: cleaned.characters || [],
+                            panels: cleaned.panels,
+                            grid: cleaned.grid,
+                            aspect: settings.aspect,
+                            storyboard: settings.storyboardWhiteModel !== false,
+                        });
+                    }
+                    return cleaned;
+                });
+                if (settings.generateCharacterSheets !== false && characters.length) {
+                    state.stage = "characters";
+                    state.progress = "正在生成角色四视图…";
+                    state.characterSheets = await createAutomationCharacterSheets(parent, characters, state.characterSheets || [], settings, models.mossModel);
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    await waitAutomationRender();
+                    for (const sheet of state.characterSheets) {
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                        const node = nodesRef.current.find((item) => item.id === sheet.nodeId);
+                        if (sheet.state === "done" && node?.metadata?.content) continue;
+                        const character = characters.find((item) => item.id === sheet.characterId);
+                        if (!character) continue;
+                        sheet.state = "loading";
+                        sheet.error = undefined;
+                        state.progress = `生成角色四视图：${character.name}`;
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        try {
+                            await runAutomationCharacterSheet(parentId, character, sheet, settings, models.mossModel, controller.signal);
+                            sheet.state = "done";
+                        } catch (error) {
+                            if (controller.signal.aborted) throw error;
+                            sheet.state = "error";
+                            sheet.error = error instanceof Error ? error.message : "角色四视图生成失败";
+                            state.warnings = [...(state.warnings || []), `角色 ${character.name}：${sheet.error}（已跳过）`];
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        }
+                        state.updatedAt = Date.now();
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    }
+                }
+                const scenes = state.scenes?.length ? state.scenes : collectAutomationScenes(state.pages || []);
+                state.scenes = scenes;
+                state.progress = undefined;
+                if (settings.generateSceneSheets !== false && scenes.length) {
+                    state.stage = "scenes";
+                    state.progress = "正在生成场景图…";
+                    state.sceneSheets = await createAutomationSceneSheets(parent, scenes, state.sceneSheets || [], settings, models.mossModel, state.characterSheets?.length || 0);
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    await waitAutomationRender();
+                    for (const sheet of state.sceneSheets) {
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                        const node = nodesRef.current.find((item) => item.id === sheet.nodeId);
+                        if (sheet.state === "done" && node?.metadata?.content) continue;
+                        const scene = scenes.find((item) => item.id === sheet.sceneId);
+                        if (!scene) continue;
+                        sheet.state = "loading";
+                        sheet.error = undefined;
+                        state.progress = `生成场景图：${scene.name}`;
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        try {
+                            await runAutomationSceneSheet(parentId, scene, sheet, settings, models.mossModel, controller.signal);
+                            sheet.state = "done";
+                        } catch (error) {
+                            if (controller.signal.aborted) throw error;
+                            sheet.state = "error";
+                            sheet.error = error instanceof Error ? error.message : "场景图生成失败";
+                            state.warnings = [...(state.warnings || []), `场景 ${scene.name}：${sheet.error}（已跳过）`];
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        }
+                        state.updatedAt = Date.now();
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    }
+                }
+                if (settings.generateCharacterSheets !== false) {
+                    const missing = (state.pages || []).flatMap((page) => buildAutomationVideoReference(page, state.characterSheets || []).missing.map((name) => `第 ${page.index + 1} 页 ${name}`));
+                    if (missing.length) state.warnings = [...(state.warnings || []), `多参视频缺少角色参考图：${missing.slice(0, 8).join("、")}（已跳过缺失参考，继续生成）`];
+                }
+                const sheetColumnOffset = (settings.generateCharacterSheets !== false && (state.characterSheets?.length || 0) > 0) || (settings.generateSceneSheets !== false && (state.sceneSheets?.length || 0) > 0) ? 320 + 120 : 0;
+                state.pages = await createAutomationChildren(parent, state.pages || [], settings, models.storyboardModel, sheetColumnOffset);
+                const textPages = new Map(state.pages.filter((page) => page.textNodeId).map((page) => [page.textNodeId, page]));
+                const imagePages = new Map(state.pages.filter((page) => page.imageNodeId).map((page) => [page.imageNodeId, page]));
+                setNodes((prev) =>
+                    prev.map((node) => {
+                        const textPage = textPages.get(node.id);
+                        if (textPage) return { ...node, metadata: { ...node.metadata, content: formatPageCard(textPage), prompt: textPage.layout.summary } };
+                        const imagePage = imagePages.get(node.id);
+                        if (imagePage) return { ...node, metadata: { ...node.metadata, layout: imagePage.layout, prompt: imagePage.layout.summary } };
+                        return node;
+                    }),
+                );
+                syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                await waitAutomationRender();
+                state.stage = "images";
+                syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                for (const page of state.pages) {
+                    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                    const imageNode = nodesRef.current.find((node) => node.id === page.imageNodeId);
+                    if (page.imageState === "done" && imageNode?.metadata?.content) continue;
+                    page.imageState = "loading";
+                    page.error = undefined;
+                    state.progress = `生成漫画：第 ${page.index + 1}/${state.pages.length} 页`;
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    try {
+                        await runAutomationImage(parentId, page, settings, models.storyboardModel, controller.signal);
+                        page.imageState = "done";
+                    } catch (error) {
+                        if (controller.signal.aborted) throw error;
+                        page.imageState = "error";
+                        page.error = error instanceof Error ? error.message : "漫画生成失败";
+                        state.warnings = [...(state.warnings || []), `第 ${page.index + 1} 页漫画：${page.error}（已跳过）`];
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    }
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                }
+                state.progress = undefined;
+                const expandedPages: CanvasAutomationPage[] = [];
+                for (const page of state.pages) {
+                    if (pageSpeechSeconds(page) <= 25) {
+                        expandedPages.push(page);
+                        continue;
+                    }
+                    const drafts = splitPageVideoSegments(page, settings.grid, 25);
+                    if (!drafts.length) {
+                        state.warnings = [...(state.warnings || []), `第 ${page.index + 1} 页超过 25 秒且无法按镜头拆分视频段，将保留单段`];
+                        expandedPages.push(page);
+                        continue;
+                    }
+                    drafts.forEach((draft, segmentIndex) => {
+                        expandedPages.push({
+                            ...page,
+                            index: 0,
+                            title: `${page.title} · 视频段 ${segmentIndex + 1}/${drafts.length}`,
+                            videoTitle: `第 ${page.index + 1} 页 · 视频段 ${segmentIndex + 1}/${drafts.length}`,
+                            panels: draft.panels,
+                            dialogue: draft.dialogue,
+                            shotGroups: draft.shotGroups,
+                            videoSeconds: draft.seconds,
+                            panelRange: draft.panelRange,
+                            segmentIndex,
+                            segmentCount: drafts.length,
+                            videoPrompt: undefined,
+                            videoPromptVersion: 0,
+                            videoNodeId: undefined,
+                            videoSegments: undefined,
+                            textNodeId: undefined,
+                            imageState: "done",
+                            videoState: "pending",
+                            error: undefined,
+                        });
+                    });
+                    console.info(`第 ${page.index + 1} 页超过 25 秒，已拆成 ${drafts.length} 个视频段共用同一张故事板`);
+                }
+                if (expandedPages.some((page) => page.segmentCount)) {
+                    state.pages = expandedPages.map((page, index) => ({ ...page, index }));
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    await waitAutomationRender();
+                }
+                const pendingPages = state.pages.filter((page) => !page.videoPrompt || !isRef2VAPrompt(page.videoPrompt) || (page.videoPromptVersion || state.videoPromptVersion || 0) < AUTOMATION_VIDEO_PROMPT_VERSION);
+                if (pendingPages.length) {
+                    state.stage = "videoPrompts";
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    let promptReasons: Record<number, string> = {};
+                    const promptError = (indices: number[]) => {
+                        const detail = [...new Set(indices.map((index) => promptReasons[index]).filter(Boolean))].join("；");
+                        return `H3 视频提示词生成失败：第 ${indices.map((index) => index + 1).join("、")} 页${detail ? `（${detail}）` : ""}`;
+                    };
+                    const applyPromptResult = (normalized: ReturnType<typeof normalizeVideoPrompts>) => {
+                        normalized.pages.forEach((page) => {
+                            const target = state.pages?.find((item) => item.index === page.index);
+                            if (target && page.videoPrompt) {
+                                target.videoPrompt = page.videoPrompt;
+                                target.videoPromptVersion = AUTOMATION_VIDEO_PROMPT_VERSION;
+                            }
+                        });
+                        promptReasons = { ...promptReasons, ...normalized.reasons };
+                        const freshWarnings = normalized.warnings.filter((warning) => !(state.warnings || []).includes(warning));
+                        if (freshWarnings.length) state.warnings = [...(state.warnings || []), ...freshWarnings];
+                        return normalized.failed;
+                    };
+                    const generatePromptBatch = async (batch: CanvasAutomationPage[], strictCamera: boolean, timeoutMs: number) => {
+                        const label = `第 ${batch[0].index + 1}–${batch[batch.length - 1].index + 1} 页 H3 提示词`;
+                        const answer = await runText(buildComicToVideoMessages(batch, state.style || settings.style, settings, state.characterSheets || [], state.sceneSheets || [], strictCamera), timeoutMs, label);
+                        let raw: unknown = { pages: [] };
+                        try {
+                            raw = extractJson(answer);
+                        } catch (error) {
+                            state.warnings = [...(state.warnings || []), `${label} JSON 解析失败，已使用保底提示词`];
+                        }
+                        return applyPromptResult(normalizeVideoPrompts(raw, batch, state.characterSheets || [], state.sceneSheets || []));
+                    };
+                    const generatePromptChunk = async (batch: CanvasAutomationPage[], strictCamera = false): Promise<number[]> => {
+                        try {
+                            let failed = await generatePromptBatch(batch, strictCamera, batch.length > 1 ? 180000 : 90000);
+                            if (failed.length) {
+                                if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                                const retryPages = (state.pages || []).filter((page) => failed.includes(page.index));
+                                failed = await generatePromptBatch(retryPages, strictCamera, 90000);
+                            }
+                            return failed;
+                        } catch (error) {
+                            if (controller.signal.aborted) throw error;
+                            if (batch.length <= 1) {
+                                console.warn(`第 ${batch[0].index + 1} 页提示词请求失败，使用保底提示词`);
+                                return applyPromptResult(normalizeVideoPrompts({ pages: [] }, batch, state.characterSheets || [], state.sceneSheets || []));
+                            }
+                            const mid = Math.ceil(batch.length / 2);
+                            console.warn(`第 ${batch[0].index + 1}–${batch[batch.length - 1].index + 1} 页提示词批次失败，拆成小批重试`);
+                            const left = await generatePromptChunk(batch.slice(0, mid), strictCamera);
+                            const right = await generatePromptChunk(batch.slice(mid), strictCamera);
+                            return [...left, ...right];
+                        }
+                    };
+                    const chunkSize = 3;
+                    const chunks: CanvasAutomationPage[][] = [];
+                    for (let start = 0; start < pendingPages.length; start += chunkSize) chunks.push(pendingPages.slice(start, start + chunkSize));
+                    let failed: number[] = [];
+                    for (let index = 0; index < chunks.length; index += 1) {
+                        const batch = chunks[index];
+                        state.progress = `生成 H3 提示词：第 ${batch[0].index + 1}–${batch[batch.length - 1].index + 1} 页（${index + 1}/${chunks.length} 批）`;
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                        failed = [...failed, ...await generatePromptChunk(batch)];
+                        state.updatedAt = Date.now();
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    }
+                    if (failed.length) state.warnings = [...(state.warnings || []), promptError(failed)];
+                    const promptPages = pendingPages.filter((page) => page.videoPrompt);
+                    const movingPages = promptPages.filter((page) => cameraMoveCount(page.videoPrompt || "") > 0).length;
+                    if (movingPages > Math.max(1, Math.ceil(promptPages.length / 2))) {
+                        console.info(`运镜页 ${movingPages}/${promptPages.length} 偏多，按短剧切镜头重写一次`);
+                        for (let start = 0; start < promptPages.length; start += chunkSize) {
+                            const batch = promptPages.slice(start, start + chunkSize);
+                            state.progress = `重写镜头：第 ${batch[0].index + 1}–${batch[batch.length - 1].index + 1} 页`;
+                            syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                            failed = await generatePromptChunk(batch, true);
+                            if (failed.length) state.warnings = [...(state.warnings || []), promptError(failed)];
+                        }
+                        const stillMoving = pendingPages.filter((page) => page.videoPrompt && cameraMoveCount(page.videoPrompt) > 0).length;
+                        if (stillMoving > Math.max(1, Math.ceil(pendingPages.length / 2))) {
+                            state.warnings = [...(state.warnings || []), `运镜页仍偏多：${stillMoving}/${pendingPages.length}，已按切镜头重写一次`];
+                        }
+                    }
+                    state.videoPromptVersion = AUTOMATION_VIDEO_PROMPT_VERSION;
+                    state.progress = undefined;
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                }
+                state.pages = await createAutomationVideoNodes(parent, state.pages, settings, models.videoModel, state.characterSheets || [], state.sceneSheets || []);
+                state.stage = "videos";
+                syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                await waitAutomationRender();
+                for (const page of state.pages) {
+                    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                    const videoNode = nodesRef.current.find((node) => node.id === page.videoNodeId);
+                    if (page.videoState === "done" && videoNode?.metadata?.content) continue;
+                    page.videoState = "loading";
+                    page.error = undefined;
+                    state.progress = `生成视频：第 ${page.index + 1}/${state.pages.length} 页`;
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    try {
+                        await runAutomationVideo(parentId, page, settings, models.videoModel, state.characterSheets || [], state.sceneSheets || [], controller.signal);
+                        page.videoState = "done";
+                    } catch (error) {
+                        if (controller.signal.aborted) throw error;
+                        page.videoState = "error";
+                        page.error = error instanceof Error ? error.message : "视频生成失败";
+                        state.warnings = [...(state.warnings || []), `第 ${page.index + 1} 页视频：${page.error}（已跳过）`];
+                        syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                    }
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_LOADING);
+                }
+                state.stage = "done";
+                state.progress = undefined;
+                state.finishedAt = Date.now();
+                state.updatedAt = Date.now();
+                const failedPages = (state.pages || []).filter((page) => page.imageState === "error" || page.videoState === "error");
+                const failedSheets = [...(state.characterSheets || []), ...(state.sceneSheets || [])].filter((sheet) => sheet.state === "error");
+                const unfinished = failedPages.length + failedSheets.length;
+                if (unfinished) {
+                    state.warnings = [...(state.warnings || []), `有 ${unfinished} 项未完成，可点“重试失败页”继续`];
+                    console.warn(`任务已跑完，但有 ${unfinished} 项未完成`);
+                } else {
+                    console.info(t("canvas.automation.stage.done"));
+                }
+                syncAutomation(parentId, state, NODE_STATUS_SUCCESS);
+            } catch (error) {
+                state.progress = undefined;
+                if (controller.signal.aborted) {
+                    state.stage = "stopped";
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_IDLE);
+                    message.info(t("canvas.automation.stage.stopped"));
+                } else {
+                    state.stage = "error";
+                    const detail = error instanceof Error ? error.message : "自动化失败";
+                    state.errors = [...(state.errors || []), detail];
+                    state.updatedAt = Date.now();
+                    syncAutomation(parentId, state, NODE_STATUS_ERROR, detail);
+                    message.error(detail);
+                }
+            } finally {
+                automationControllersRef.current.delete(parentId);
+                setAutomationRunningIds((prev) => {
+                    const next = new Set(prev);
+                    next.delete(parentId);
+                    return next;
+                });
+            }
+        },
+        [createAutomationCharacterSheets, createAutomationChildren, createAutomationVideoNodes, message, resolveAutomationModels, runAutomationCharacterSheet, runAutomationImage, runAutomationVideo, syncAutomation, t, waitAutomationRender],
+    );
+
+    const stopAutomation = useCallback((parentId: string) => {
+        automationControllersRef.current.get(parentId)?.abort("user-stop");
+    }, []);
+
+    const retryAutomation = useCallback(
+        async (parentId: string) => {
+            const parent = nodesRef.current.find((node) => node.id === parentId);
+            const current = parent?.metadata?.automation;
+            if (!current || !parent) return;
+            if (current.pages?.length || current.characterSheets?.length || current.sceneSheets?.length) {
+                const pages = (current.pages || []).map((page) => ({
+                    ...page,
+                    imageState: page.imageState === "error" ? ("pending" as const) : page.imageState,
+                    videoState: page.videoState === "error" ? ("pending" as const) : page.videoState,
+                    error: undefined,
+                }));
+                const characterSheets = (current.characterSheets || []).map((sheet) => ({
+                    ...sheet,
+                    state: sheet.state === "error" ? ("pending" as const) : sheet.state,
+                    error: undefined,
+                }));
+                const sceneSheets = (current.sceneSheets || []).map((sheet) => ({
+                    ...sheet,
+                    state: sheet.state === "error" ? ("pending" as const) : sheet.state,
+                    error: undefined,
+                }));
+                setNodes((prev) => prev.map((node) => (node.id === parentId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_IDLE, errorDetails: undefined, automation: { ...current, pages, characterSheets, sceneSheets, errors: [] } } } : node)));
+                await waitAutomationRender();
+            }
+            await startAutomation(parentId, { sourceText: current.sourceText, sourceUrl: current.sourceUrl, settings: current.settings });
+        },
+        [startAutomation, waitAutomationRender],
+    );
+
+
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) =>
-            getNodeDefinition(panelNode.type)?.Panel ? (
+            // 短剧 / 自动化：渲染带编排回调的专用卡片，不走通用插件面板。
+            panelNode.type === CanvasNodeType.Drama ? (
+                <ShortDramaCard
+                    node={panelNode}
+                    onChange={(patch) => handleConfigNodeChange(panelNode.id, patch)}
+                    onStartCreation={async (episodeId) => {
+                        clearDramaPause(panelNode);
+                        try {
+                            await startDramaCreation(panelNode, episodeId);
+                        } finally {
+                            updateDramaCardProgress(setNodes, panelNode.id, null, 0, 0);
+                        }
+                    }}
+                    onGenerateStoryboard={async (episodeId, options) => {
+                        clearDramaPause(panelNode);
+                        try {
+                            await generateDramaStoryboards(panelNode, episodeId, options);
+                        } finally {
+                            updateDramaCardProgress(setNodes, panelNode.id, null, 0, 0);
+                        }
+                    }}
+                    onPauseCreation={() => pauseDramaCreation(panelNode)}
+                    onFocusAsset={(nodeId) => focusNode(nodeId)}
+                    onAddStage={(characterName, stageName, description) => addDramaStage(panelNode, characterName, stageName, description)}
+                    onSetSceneRefMode={(name, mode) => setDramaSceneRefMode(panelNode, name, mode)}
+                />
+            ) : panelNode.type === CanvasNodeType.Automation ? (
+                <CanvasAutomationPanel
+                    node={panelNode}
+                    isRunning={automationRunningIds.has(panelNode.id)}
+                    onChange={(patch) => handleConfigNodeChange(panelNode.id, patch)}
+                    onStart={(input) => startAutomation(panelNode.id, input)}
+                    onStop={() => stopAutomation(panelNode.id)}
+                    onRetry={() => retryAutomation(panelNode.id)}
+                />
+            ) : getNodeDefinition(panelNode.type)?.Panel ? (
                 renderPluginPanel(panelNode)
             ) : panelNode.type === CanvasNodeType.FreeCard ? (
                 <CanvasFreeCardPanel
@@ -5002,7 +7791,7 @@ function InfiniteCanvasPage() {
                     }}
                 />
             ),
-        [configInputsById, confirmStopGeneration, connectedNodesByNodeId, disconnectNodeReference, generateFreeCard, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, hasActiveGeneration, mentionReferencesByNodeId, nodes, renderPluginPanel, startNodeReferenceSelection],
+        [addDramaStage, automationRunningIds, clearDramaPause, configInputsById, confirmStopGeneration, connectedNodesByNodeId, disconnectNodeReference, focusNode, generateDramaStoryboards, generateFreeCard, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, hasActiveGeneration, mentionReferencesByNodeId, nodes, pauseDramaCreation, renderPluginPanel, retryAutomation, setDramaSceneRefMode, startAutomation, startDramaCreation, startNodeReferenceSelection, stopAutomation],
     );
 
     const renderNodeContentPanel = useCallback(

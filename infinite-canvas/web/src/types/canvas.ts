@@ -107,6 +107,8 @@ export type CanvasMossLayout = {
     regions: CanvasMossLayoutRegion[];
     width?: number;
     height?: number;
+    /** 上游 v0.25.x：分镜提示词版本，用于判断是否需要用新版提示词重绘。 */
+    storyboardVersion?: number;
 };
 
 export type CanvasNodeMetadata = {
@@ -140,6 +142,8 @@ export type CanvasNodeMetadata = {
     customTexts?: Record<string, string>;
     // 上游 v0.25.x：短剧卡片数据
     dramaCard?: CanvasDramaCardData;
+    // 上游 v0.25.x：短剧/自动化编排用到的节点字段
+    referenceAcceleration?: boolean;
     // 上游 v0.25.x：自动化（automation）节点状态
     automation?: CanvasAutomationState;
     customTextActive?: string;

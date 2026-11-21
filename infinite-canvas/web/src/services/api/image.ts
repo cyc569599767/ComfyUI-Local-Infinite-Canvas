@@ -107,7 +107,7 @@ type GeminiPayload = {
     promptFeedback?: { blockReason?: string };
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
-type RequestOptions = { signal?: AbortSignal; params?: Record<string, unknown> };
+type RequestOptions = { signal?: AbortSignal; params?: Record<string, unknown>; negative?: string };
 
 const IMAGE_QUALITY_VALUES = ["low", "medium", "high", "xhigh", "max"];
 const DEFAULT_IMAGE_SHORT_SIDE = 1024;
@@ -815,6 +815,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 ...(background ? { background } : {}),
                 ...(imageMode ? { mode: imageMode } : {}),
                 ...(Object.keys(requestParams).length ? { params: requestParams } : {}),
+                // 负面提示词：仅短剧故事板等场景显式传入，缺省不影响既有请求。
+                ...(options?.negative ? { negative: options.negative } : {}),
                 // gpt-image models reject response_format; they always return b64.
                 ...(/gpt-image/.test(requestConfig.model) ? {} : { response_format: "b64_json" }),
                 output_format: IMAGE_OUTPUT_FORMAT,
