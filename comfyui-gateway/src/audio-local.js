@@ -132,7 +132,7 @@ export async function synthesizeSpeechH3({ comfy, config, logger, text, voiceDes
   const seedValue = Number.isFinite(seed) ? Math.trunc(seed) : Math.floor(Math.random() * 2 ** 31);
   const workflow = {
     "1": { class_type: "UNETLoader", inputs: { unet_name: "minimax_h3_fl2va_pruned_int8_convrot.safetensors", weight_dtype: "default" } },
-    "2": { class_type: "CLIPLoader", inputs: { clip_name: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", type: "minimax", device: "default" } },
+    "2": { class_type: "CLIPLoader", inputs: { clip_name: "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors", type: "minimax", device: "default" } },
     "3": { class_type: "VAELoader", inputs: { vae_name: "minimax_h3_video_vae_fp16.safetensors" } },
     "4": { class_type: "VAELoader", inputs: { vae_name: "minimax_h3_audio_vae_fp32.safetensors" } },
     "5": {

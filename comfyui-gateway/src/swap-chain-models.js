@@ -17,7 +17,7 @@ export const SWAP_CHAIN_MODELS = {
     clip: { file: "qwen3vl_8b_int8_convrot.safetensors", label: "Qwen3-VL 8B 文本编码器" },
     vae: { file: "qwen_image_2.1_vae_bf16.safetensors", label: "Qwen 2.1 VAE" },
     swapUnet: { file: "viggle_remake_swap_pruned_int8_convrot.safetensors", label: "Viggle Remake 换人底模" },
-    h3Clip: { file: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", label: "H3 文本编码器（32B）" },
+    h3Clip: { file: "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors", label: "H3 文本编码器（32B）" },
     h3VideoVae: { file: "minimax_h3_video_vae_fp16.safetensors", label: "H3 视频 VAE" },
     h3AudioVae: { file: "minimax_h3_audio_vae_fp32.safetensors", label: "H3 音频 VAE" },
 };

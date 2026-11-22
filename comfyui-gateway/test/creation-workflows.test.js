@@ -68,7 +68,11 @@ test("既有注册项和工作流内容保持原样", () => {
   const files = [...new Set(legacy.flatMap((entry) => [entry.file, ...Object.values(entry.variants || {}).map((variant) => variant.file)]).filter(Boolean))].sort();
   // 规范化换行，避免 Windows Git autocrlf 造成无意义差异。
   const canonical = files.map((file) => [file, digest(JSON.stringify(read(file)))]);
-  assert.equal(digest(JSON.stringify(canonical)), "9d4a168d77a1a73465e23233f124910669c87c6e294edbbce8bb5dae93f4cf97");
+  // 2026-11-22：H3 文本编码器按本机实际情况从
+  // qwen3vl_32b_minimax_h3_int8_convrot（缺失）换成
+  // qwen3vl_32b_heretic_minimax_h3_nvfp4，13 个工作流内容据此更新；
+  // 注册表本身未动，第一个摘要不变。
+  assert.equal(digest(JSON.stringify(canonical)), "18b20d0be5bd43112210ff47d4f1344ad9e0e17eb5200cc7a502a87e3148627c");
   for (const file of files) assert.equal(fs.existsSync(path.join(dir, file)), true);
 });
 
