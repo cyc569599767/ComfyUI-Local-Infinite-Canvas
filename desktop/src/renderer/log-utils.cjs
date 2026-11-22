@@ -61,10 +61,18 @@ const NOISE_PATTERNS = [
   /\/api\/models\/events/i,
   /\/api\/progress\//i,
   /\/api\/session\/status/i,
+  // ComfyUI 侧资产库扫描（[comfy] 前缀）。这几类每轮扫描成组出现、字段全是
+  // 计数与耗时，正常时 created=0 / skipped≈全部，没有任何可操作信息。
+  // 注意：只匹配「扫描过程」本身，扫描**失败**带 failed/error 仍会被 error 分支留下。
+  /Fast scan complete:/i,
+  /\bScan\(\('models'/i,
+  /\[assets-event\] seeder\.scan_(completed|started)/i,
+  /Seeder start \(roots=/i,
+  /Asset scan \[[^\]]+\] director(y|ies):/i,
 ];
 
 /** 扫描结果摘要：统计数字里常含 skipped/missing，不该被当成警告。 */
-const SCAN_SUMMARY_PATTERN = /setup scan ready:|auto-imported workflows:/i;
+const SCAN_SUMMARY_PATTERN = /setup scan ready:|auto-imported workflows:|Fast scan complete:|seeder\.scan_completed/i;
 
 /** 重要信息：启动、端口、就绪、任务产出。 */
 const NOTICE_PATTERNS = [

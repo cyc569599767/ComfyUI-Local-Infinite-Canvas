@@ -148,3 +148,44 @@ test('filterDesktopLogs 对空输入安全', () => {
   assert.deepEqual(filterDesktopLogs(null), []);
   assert.deepEqual(filterDesktopLogs(undefined), []);
 });
+
+test('ComfyUI 资产库扫描日志（[comfy] 前缀）全部过滤', () => {
+  // 现场：这组日志每轮扫描成组出现，字段全是计数与耗时，
+  // 正常时 created=0 / skipped≈全部，没有任何可操作信息。
+  const noise = [
+    '[comfy] [INFO] Fast scan complete: 0.130s total (created=0, skipped=951, total_paths=966)',
+    "[comfy] [INFO] Scan(('models', 'input', 'output'), full) done 0.322s: created=0 enriched=0 skipped=951",
+    '[comfy] [INFO] [assets-event] seeder.scan_completed cpu_ms=297 created=0 dirs_listed_count=45 elapsed_ms=322 enrich_failed=0 enriched=0 files_statted_count=950',
+    "[comfy] [INFO] Seeder start (roots=('models', 'input', 'output'), phase=full)",
+    '[comfy] [INFO] [assets-event] seeder.scan_started phase=full',
+    '[comfy] [INFO] Asset scan [models] directory: D:////software////ComfyUI_windows_portable////ComfyUI////models',
+    "[comfy] [INFO] Asset scan [input] directories: ['D:////////software////////ComfyUI////////input']",
+    "[comfy] [INFO] Asset scan [output] directories: ['D:////////software////////ComfyUI////////output']",
+  ];
+  for (const line of noise) {
+    assert.equal(shows(line), false, `应被过滤：${line}`);
+    assert.equal(level(line), 'noise');
+  }
+});
+
+test('ComfyUI 扫描相关的真实错误不会被误杀', () => {
+  // 这些行同样带扫描字样，但含错误/警告特征，必须留下
+  const mustShow = [
+    '[comfy] [INFO] Seeder scan failed: permission denied',
+    '[comfy] [ERROR] Asset scan [models] directory: not found',
+    '[comfy] [INFO] Scan models done 0.3s: skipped=0 error=2',
+    '[comfy] [ERROR] Prompt outputs failed validation',
+    '[comfy] [WARN] CUDA out of memory',
+  ];
+  for (const line of mustShow) assert.equal(shows(line), true, `不能误杀：${line}`);
+});
+
+test('ComfyUI 启动与运行的重要信息仍然显示', () => {
+  const kept = [
+    '[comfy] Starting server',
+    '[comfy] To see the GUI go to: http://127.0.0.1:8188',
+    '[comfy] Import times for custom nodes:',
+    '[comfy] [INFO] Total VRAM 24564 MB, total RAM 65536 MB',
+  ];
+  for (const line of kept) assert.equal(shows(line), true, `必须保留：${line}`);
+});
