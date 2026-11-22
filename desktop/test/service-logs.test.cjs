@@ -15,19 +15,24 @@ test('timestamps are recorded once, multiline logs are stamped, ANSI stripped, h
   const manager = new ServiceManager();
   let notifications = 0;
   manager.on('change', () => notifications++);
-  manager.log('\u001b[32mline one\u001b[0m\r\nline two');
+  // 多行一次写入 → 每行各自打时间戳；ANSI 颜色要清掉。
+  // 注意用「会显示」的内容：服务面板现在会过滤掉扫描/心跳类噪音。
+  manager.log('\u001b[32m正在加载模型\u001b[0m\r\n画布服务已就绪');
   const first = manager.snapshot().logs[0];
-  assert.match(first, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] line one\n\[.*\] line two$/);
+  assert.match(first, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] 正在加载模型\n\[.*\] 画布服务已就绪$/);
   assert.equal(first.includes('\u001b'), false);
   manager.update({ phase: 'connecting' });
   assert.equal(manager.snapshot().logs[0], first);
-  for (let i = 0; i < 110; i++) manager.log(`entry ${i}`);
+  // 版本号只在真正写入时递增：这条是噪音，不该产生新版本
+  const before = manager.snapshot().logsVersion;
+  manager.log('setup scan ready: 42/58 workflows');
+  assert.equal(manager.snapshot().logsVersion, before, '噪音日志不应写入也不应递增版本');
+  for (let i = 0; i < 110; i++) manager.log(`已生成第 ${i} 张图片`);
   const snapshot = manager.snapshot();
   assert.equal(snapshot.logs.length, 100);
-  assert.equal(snapshot.logsVersion, 111);
-  assert.equal(notifications, 112);
-  assert.match(snapshot.logs[0], /entry 10$/);
-  assert.match(snapshot.logs.at(-1), /entry 109$/);
+  assert.equal(snapshot.logsVersion, before + 110);
+  assert.match(snapshot.logs[0], /已生成第 10 张图片$/);
+  assert.match(snapshot.logs.at(-1), /已生成第 109 张图片$/);
   snapshot.logs.pop();
   assert.equal(manager.snapshot().logs.length, 100);
 });

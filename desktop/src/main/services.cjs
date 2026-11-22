@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
-const { timestampDesktopLog } = require('../renderer/log-utils.cjs');
+const { classifyDesktopLog, timestampDesktopLog } = require('../renderer/log-utils.cjs');
 
 function localUrl(value) {
   const url = new URL(value);
@@ -121,9 +121,22 @@ class ServiceManager extends EventEmitter {
 
   snapshot() { return structuredClone(this.state); }
   update(patch) { Object.assign(this.state, patch); this.emit('change', this.snapshot()); }
+  /**
+   * 追加一条服务日志。
+   *
+   * 只保留「值得给人看」的行：异常报错、提醒、重要信息、过程日志。
+   * 扫描/心跳/轮询/文件监听这类例行噪音直接丢弃 —— 面板只有 100 行缓冲，
+   * 让它们进来会把真错误顶掉（详见 renderer/log-utils.cjs 的分类规则）。
+   *
+   * 多行文本逐行判定：一次 chunk 里可能既有噪音也有报错，不能整块丢或整块留。
+   */
   log(message) {
     const text = String(message).replace(/\u001b\[[0-9;]*m/g, '').slice(0, 2000);
-    this.state.logs.push(timestampDesktopLog(text));
+    // 逐行过滤但保持「一次写入 = 一个数组项」的结构（多行用 \n 连接）：
+    // 前端 log-view 依赖这个形状，拆成多项会改变历史的语义。
+    const kept = text.split(/\r\n|[\r\n]/).filter(line => line.trim() && classifyDesktopLog(line).show);
+    if (!kept.length) return;
+    this.state.logs.push(timestampDesktopLog(kept.join('\n')));
     this.state.logs = this.state.logs.slice(-100);
     this.state.logsVersion += 1;
     this.emit('change', this.snapshot());
