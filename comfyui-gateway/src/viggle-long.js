@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { runWorkflow, GenerationError } from "./runner.js";
 import { uploadImages } from "./uploads.js";
 import { alignViggleFramesUp, deepClone } from "./util.js";
+import { isUnrecognizedOptionError, parseFfmpegVersion, passthroughFrameArgs } from "./ffmpeg-compat.js";
 
 const execFileAsync = promisify(execFile);
 const PREFIX_FRAMES = 17;
@@ -59,7 +60,8 @@ export async function padSourceForSegment(sourceFile, sourceTotalFrames, targetF
   return fsp.readFile(output);
 }
 
-function findFfmpeg(config = {}) {  const candidates = [
+function findFfmpeg(config = {}) {
+  const candidates = [
     process.env.FFMPEG_PATH,
     "ffmpeg",
     config.comfyDir && path.join(config.comfyDir, "ffmpeg.exe"),
@@ -75,6 +77,42 @@ function findFfmpeg(config = {}) {  const candidates = [
     }
   }
   return "";
+}
+
+// ffmpeg 版本只需探测一次；探测失败记 null，走「新参数优先 + 失败重试」兜底。
+const ffmpegVersionCache = new Map();
+
+function ffmpegVersion(binary) {
+  if (ffmpegVersionCache.has(binary)) return ffmpegVersionCache.get(binary);
+  let version = null;
+  try {
+    const output = execFileSync(binary, ["-version"], { encoding: "utf8", timeout: 5000 });
+    version = parseFfmpegVersion(output);
+  } catch {
+    version = null;
+  }
+  ffmpegVersionCache.set(binary, version);
+  return version;
+}
+
+/**
+ * 抽指定帧号。默认帧率同步会把 select 出来的帧再重复/丢弃，必须关掉；
+ * 但关它的参数名在 ffmpeg 5.1 变了（-vsync → -fps_mode），9.x 已删掉旧名。
+ * 先按版本选，选错（版本探测不准）就换另一套参数重试一次。
+ */
+async function runFrameExtract(binary, input, filter, output, { timeout = 180000, extra = [] } = {}) {
+  const version = ffmpegVersion(binary);
+  const primary = passthroughFrameArgs(version);
+  const alternate = primary[0] === "-fps_mode" ? ["-vsync", "0"] : ["-fps_mode", "passthrough"];
+  const build = (flag) => ["-y", "-i", input, "-vf", filter, ...flag, ...extra, output];
+  try {
+    return await execFileAsync(binary, build(primary), { timeout, maxBuffer: 16 * 1024 * 1024 });
+  } catch (cause) {
+    const stderr = String(cause?.stderr || cause?.message || cause);
+    if (!isUnrecognizedOptionError(stderr, primary[0].replace(/^-/, ""))) throw cause;
+    // 版本探测错了或参数名对不上，换另一套再试一次。
+    return await execFileAsync(binary, build(alternate), { timeout, maxBuffer: 16 * 1024 * 1024 });
+  }
 }
 
 function ffmpegBinary(config) {
@@ -115,7 +153,7 @@ export async function extractVideoFrames(file, { frames = [], config = {} } = {}
     await fsp.writeFile(input, file.buffer);
     const expression = indices.map((index) => `eq(n\\,${index})`).join("+");
     try {
-      await execFileAsync(binary, ["-y", "-i", input, "-vf", `select='${expression}'`, "-vsync", "0", path.join(tempDir, "cand-%03d.png")], { timeout: 180000, maxBuffer: 16 * 1024 * 1024 });
+      await runFrameExtract(binary, input, `select='${expression}'`, path.join(tempDir, "cand-%03d.png"));
     } catch (cause) {
       const detail = String(cause?.stderr || cause?.message || cause).slice(0, 300);
       throw new GenerationError(`源视频候选帧抽取失败：${detail}；请手动抽帧、编辑后上传`, { status: 422, code: "frame_extract_failed" });
@@ -251,7 +289,7 @@ export async function extractVideoFrame(file, { frame = 0, config = {} } = {}) {
     const output = path.join(tempDir, `frame-${index}.png`);
     await fsp.writeFile(input, file.buffer);
     try {
-      await execFileAsync(binary, ["-y", "-i", input, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-vsync", "0", output], { timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
+      await runFrameExtract(binary, input, `select=eq(n\\,${index})`, output, { timeout: 120000, extra: ["-frames:v", "1"] });
     } catch (cause) {
       const detail = String(cause?.stderr || cause?.message || cause).slice(0, 300);
       throw new GenerationError(`源视频抽帧失败：${detail}；请手动抽帧、编辑后上传`, { status: 422, code: "frame_extract_failed" });
