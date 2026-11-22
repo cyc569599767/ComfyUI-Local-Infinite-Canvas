@@ -553,6 +553,18 @@ export async function createGatewayApp(overrides = {}) {
     retryDelayMs: config.comfyRetryDelayMs,
     logger,
     previewHub,
+    // 把网关自身端口交给客户端，避免自动嗅探把自己当成 ComfyUI。
+    selfPorts: [config.port],
+    // ComfyUI 输出的本地目录：/view 端点坏掉时直接读磁盘兜底
+    // （现场：/view 回 200 但响应体 0 字节，重试到超时也拿不到文件）。
+    // 惰性求值 —— setup 在本 client 之后才创建，构造时还拿不到 ComfyUI 根目录。
+    localOutputDirs: () => {
+      // setup 在本 client 之后才用 const 声明；调用发生在运行期，此时已可用，
+      // 但仍用 typeof 兜一下，避免初始化早期被调用时踩 TDZ。
+      const root =
+        (typeof setup !== "undefined" ? setup?.comfyRootForScan?.() : "") || config.comfyDir || "";
+      return root ? [path.join(root, "output"), path.join(root, "temp"), path.join(root, "input")] : [];
+    },
   });
   const mainModels = createMainModelStore({ dataDir: config.dataDir, logger });
   await mainModels.load();

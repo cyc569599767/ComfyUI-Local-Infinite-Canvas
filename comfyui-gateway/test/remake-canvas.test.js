@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { alignUp32, pickRemakeShortEdge, remakeCanvas } from "../src/remake-canvas.js";
+import { alignUp32, pickImageCanvas, pickRemakeShortEdge, remakeCanvas } from "../src/remake-canvas.js";
 
 test("alignUp32 向上对齐到 32 的倍数", () => {
     assert.equal(alignUp32(480), 480);
@@ -75,4 +75,57 @@ test("1080p 源片不会被压到 480，而是保住 736 短边", () => {
     const canvas = remakeCanvas(1920, 1080, se);
     assert.equal(canvas.height, 736);
     assert.ok(canvas.width > 832, "宽度也应大于旧的 832");
+});
+
+// ── 图像画布必须跟随源片朝向 ──────────────────────────────────────────
+//
+// 现场缺陷：图像画布写死 832x480（横屏）。竖屏 1080x1878 的源片被
+// force_original_aspect_ratio=increase + crop 裁成 832x480，只留下画面
+// 中间约 27% 的高度 —— 正是胸口领带那一条，人脸完全没了。图像门在这种
+// 「无脸图」上仍判通过（整幅框下没有框外像素可比），于是送进视频模型的
+// 是一张领带特写，模型只好凭空编一个新场景（实测编出了钢铁侠）。
+
+test("竖屏源片不能裁成横屏条带（人脸会丢）", () => {
+  const canvas = pickImageCanvas(1080, 1878);
+  assert.ok(canvas.height > canvas.width, `竖屏必须是竖向画布，实得 ${canvas.width}x${canvas.height}`);
+  // 比例要贴近源片，偏差超过 5% 就会裁掉大片画面
+  const srcAspect = 1080 / 1878;
+  const canvasAspect = canvas.width / canvas.height;
+  assert.ok(
+    Math.abs(canvasAspect - srcAspect) / srcAspect < 0.05,
+    `宽高比失真过大：源 ${srcAspect.toFixed(3)} vs 画布 ${canvasAspect.toFixed(3)}`,
+  );
+});
+
+test("横屏源片仍出横屏画布", () => {
+  const canvas = pickImageCanvas(1920, 1080);
+  assert.ok(canvas.width > canvas.height);
+  assert.ok(Math.abs(canvas.width / canvas.height - 1920 / 1080) / (1920 / 1080) < 0.05);
+});
+
+test("方形源片出方形画布", () => {
+  const canvas = pickImageCanvas(1080, 1080);
+  assert.equal(canvas.width, canvas.height);
+});
+
+test("图像画布两边都是 32 的倍数（模型对对齐敏感）", () => {
+  for (const [w, h] of [[1080, 1878], [1920, 1080], [720, 1280], [1080, 1080], [640, 360]]) {
+    const canvas = pickImageCanvas(w, h);
+    assert.equal(canvas.width % 32, 0, `${w}x${h} 宽未对齐: ${canvas.width}`);
+    assert.equal(canvas.height % 32, 0, `${w}x${h} 高未对齐: ${canvas.height}`);
+  }
+});
+
+test("图像画布面积不超预算太多（显存可控）", () => {
+  for (const [w, h] of [[1080, 1878], [1920, 1080], [720, 1280]]) {
+    const canvas = pickImageCanvas(w, h);
+    const mp = (canvas.width * canvas.height) / 1e6;
+    assert.ok(mp <= 1.15, `${w}x${h} 超预算: ${mp.toFixed(2)}MP`);
+    assert.ok(mp >= 0.9, `${w}x${h} 分辨率过低: ${mp.toFixed(2)}MP`);
+  }
+});
+
+test("源尺寸未知时退回横屏兜底，不报错", () => {
+  assert.deepEqual(pickImageCanvas(0, 0), { width: 832, height: 480 });
+  assert.deepEqual(pickImageCanvas(null, undefined), { width: 832, height: 480 });
 });

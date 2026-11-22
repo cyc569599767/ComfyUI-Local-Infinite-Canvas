@@ -1,3 +1,6 @@
+import fsp from "node:fs/promises";
+import path from "node:path";
+
 import { estimateStepPlan } from "./step-plan.js";
 import { randomId, sleep, truncate } from "./util.js";
 
@@ -25,7 +28,7 @@ function formatNodeErrors(nodeErrors) {
   return messages.slice(0, 8).join("；");
 }
 
-export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloadTimeoutMs = 60 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true } = {}) {
+export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloadTimeoutMs = 60 * 60 * 1000, retryAttempts = 3, retryDelayMs = 500, logger, previewHub, autoDiscover = true, selfPorts = [], localOutputDirs = [] } = {}) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   if (!base) throw new Error("ComfyUI baseUrl 不能为空");
   let activeBase = base;
@@ -54,9 +57,20 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloa
     }
     for (const port of [8188, 8000, 7860, 8080, 8888, 18000]) add(port);
     for (const value of String(process.env.COMFY_PORT_SCAN || "").split(",")) add(value.trim());
-    for (let port = 8189; port <= 8199; port += 1) add(port);
-    const selfPort = Number(process.env.PORT || 0);
-    if (selfPort) ports.delete(selfPort);
+    for (let port = 8190; port <= 8199; port += 1) add(port);
+    // 必须排掉网关自己：网关默认就监听 8190，而候选里正好包含 8190-8199。
+    // 不排除的话探活会打到网关自身，一旦某个路由恰好回 2xx 就会把
+    // activeBase 切到自己身上，之后所有 ComfyUI 调用（history/view/download）
+    // 全部打空 —— 现场表现为「视频早就生成好了，网关却一直卡在 s5_video
+    // 轮询到 20 分钟超时」。
+    // 自身端口来源有两个：显式传入（推荐，来自 config.port）与 PORT 环境变量。
+    const ownPorts = new Set(
+      [...selfPorts, process.env.PORT]
+        .map((value) => Number(value))
+        .filter((port) => Number.isInteger(port) && port > 0),
+    );
+    // 另外用监听地址兜底：base 若本身指向本机某端口，那个端口也不是 ComfyUI。
+    for (const port of ownPorts) ports.delete(port);
     return [...ports].map((port) => `http://127.0.0.1:${port}`);
   }
 
@@ -199,7 +213,12 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloa
       } catch (error) {
         lastError = error;
         if (attempt >= attempts || !isRetryable(error) || options.signal?.aborted) throw error;
-        if (error?.code === "comfy_unreachable") {
+        // 下载（raw）请求期间不做地址重定位。
+        // discoverBase 会并发 fetch 十几个候选端口、每个 1.5s 后 abort，
+        // 而大视频下载正好在慢速传输中 —— 这些探活请求会挤占同一个
+        // undici 连接池，把下载连接撞成 "terminated"，于是「视频早已生成好，
+        // 网关却反复重试下载直到 20 分钟超时」。下载失败只重试，不挪地址。
+        if (error?.code === "comfy_unreachable" && !options.raw) {
           // 已经是本机回环地址还报「连不上」，多半是 ComfyUI 正在重启或端口漂移；
           // 先重新定位，别盲目重试同一个死端口。
           const found = await discoverBase({ force: attempt > 1 });
@@ -240,14 +259,76 @@ export function createComfyClient({ baseUrl, timeoutMs = 10 * 60 * 1000, downloa
     return data?.[promptId] || data?.[String(promptId)] || null;
   }
 
+  /**
+   * 从本机磁盘直接读 ComfyUI 的输出文件。
+   *
+   * 为什么需要这条路：现场遇到 ComfyUI 的 /view 端点回 200、响应头里
+   * Content-Length 也正确（1472202），但**响应体是 0 字节**，连接不发数据；
+   * 同一次会话里 /object_info 能正常返回 6.6MB，说明服务整体是好的，
+   * 坏的只有 /view（Windows 上带反斜杠 subfolder 的大文件尤其容易触发）。
+   * 一旦走到这条路，重试多少次都没用，任务会卡死到超时。
+   *
+   * 本地目录可用时直接读文件，完全绕开这个端点。
+   */
+  async function readLocalOutput(file) {
+    // 支持惰性求值：setup 在 client 之后才创建，构造时还拿不到 ComfyUI 根目录。
+    const roots = typeof localOutputDirs === "function" ? (await localOutputDirs()) || [] : localOutputDirs;
+    if (!Array.isArray(roots) || !roots.length) return null;
+    const subfolder = String(file.subfolder || "").replace(/\\/g, "/");
+    const filename = String(file.filename || "");
+    if (!filename) return null;
+    for (const root of roots) {
+      if (!root) continue;
+      const candidate = path.resolve(root, subfolder, filename);
+      // 防目录穿越：解析后必须仍在 root 之内。
+      const rootResolved = path.resolve(root);
+      if (!candidate.startsWith(rootResolved + path.sep) && candidate !== rootResolved) continue;
+      try {
+        const stat = await fsp.stat(candidate);
+        if (!stat.isFile() || stat.size === 0) continue;
+        const buffer = await fsp.readFile(candidate);
+        if (!buffer.length) continue;
+        logger?.info?.(`ComfyUI /view 不可用，已从本地文件读取 ${path.basename(candidate)}（${buffer.length} 字节）`);
+        return { buffer, contentType: guessContentType(filename) };
+      } catch {
+        // 该目录下没有这个文件，试下一个。
+      }
+    }
+    return null;
+  }
+
+  function guessContentType(name) {
+    const ext = path.extname(String(name || "")).toLowerCase();
+    if (ext === ".png") return "image/png";
+    if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+    if (ext === ".webp") return "image/webp";
+    if (ext === ".mp4") return "video/mp4";
+    if (ext === ".webm") return "video/webm";
+    if (ext === ".mp3") return "audio/mpeg";
+    if (ext === ".wav") return "audio/wav";
+    return "application/octet-stream";
+  }
+
   async function view(file, { signal, timeout = downloadTimeoutMs } = {}) {
     const params = new URLSearchParams({
       filename: String(file.filename || ""),
       subfolder: String(file.subfolder || ""),
       type: String(file.type || "output"),
     });
+    // 先用本地文件：ComfyUI 的 /view 在 Windows 上会「200 + Content-Length 正确
+    // 但响应体 0 字节」，重试无解（详见 readLocalOutput 注释）。本地能读到就直接用，
+    // 既快又不会把任务卡死。
+    const local = await readLocalOutput(file).catch(() => null);
+    if (local) return local;
     // 下载用独立的超时预算：它比普通 API 慢得多，混用同一个 10 分钟会让大文件永远失败。
-    return request(`/view?${params.toString()}`, { raw: true, signal, timeout });
+    try {
+      return await request(`/view?${params.toString()}`, { raw: true, signal, timeout });
+    } catch (error) {
+      // HTTP 走不通时再兜一次本地（文件可能刚落盘）。
+      const retryLocal = await readLocalOutput(file).catch(() => null);
+      if (retryLocal) return retryLocal;
+      throw error;
+    }
   }
 
   async function uploadImage(buffer, filename = "input.png", mimeType = "image/png") {

@@ -42,6 +42,42 @@ export function pickRemakeShortEdge(sourceWidth, sourceHeight) {
 }
 
 /**
+ * 图像阶段的画布尺寸。
+ *
+ * 现场缺陷：这里原来固定 832x480（横屏）。竖屏 1080x1878 的源片被
+ * force_original_aspect_ratio=increase + crop 强裁成 832x480，只截到画面
+ * 中间约 27% 的高度 —— 正好是胸口领带那一块，人脸完全被裁掉。图像门在
+ * 这种「无脸图」上仍然判通过（整幅框下没有框外像素可比），结果送进视频
+ * 模型的就是一张领带特写，模型只能凭空编一个新场景。
+ *
+ * 所以画布必须跟随源片朝向，并按面积预算缩放（长边约 1024² 像素当量，
+ * 与 Qwen Image 的训练分辨率一致）。
+ */
+export const IMAGE_CANVAS_FALLBACK = { width: 832, height: 480 };
+const IMAGE_CANVAS_MAX_PIXELS = 1024 * 1024;
+
+/**
+ * 按源片朝向算图像画布。
+ *
+ * 规则：保持源片宽高比，面积贴近预算，两边都向下对齐到 32 的倍数
+ * （向下而非向上，保证不超预算、也不会比源片更大）。
+ */
+export function pickImageCanvas(sourceWidth, sourceHeight) {
+    const w = Math.round(Number(sourceWidth) || 0);
+    const h = Math.round(Number(sourceHeight) || 0);
+    if (w <= 0 || h <= 0) return { ...IMAGE_CANVAS_FALLBACK };
+    const aspect = w / h;
+    // 由面积预算反解两边，保持源片宽高比：
+    //   w' = sqrt(预算 * aspect), h' = sqrt(预算 / aspect)
+    // 再向下对齐到 32 —— 向下保证不超预算、也不会比源片更大。
+    const alignDown32 = (value) => Math.max(32, Math.floor(Math.round(value) / STEP) * STEP);
+    return {
+        width: alignDown32(Math.sqrt(IMAGE_CANVAS_MAX_PIXELS * aspect)),
+        height: alignDown32(Math.sqrt(IMAGE_CANVAS_MAX_PIXELS / aspect)),
+    };
+}
+
+/**
  * 算出 RemakeConditioning 实际会用的画布（与它内部逻辑保持一致），
  * 用于在日志/报错里说明「最终出片尺寸」。
  *

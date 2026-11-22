@@ -60,6 +60,19 @@ export function describeTarget(box) {
 }
 
 /**
+ * 英文版目标描述，给视频阶段（MiniMax H3）的英文提示词用。
+ *
+ * 不能把 describeTarget 的中文结果直接拼进英文提示词 —— 会得到
+ * "they replace the 画面中的人物 in <Video 1>" 这种中英混杂的句子。
+ */
+export function describeTargetEn(box) {
+    if (!box) return "target person";
+    if (isFullFrameBox(box)) return "person in the video";
+    const centerX = (Number(box.x) || 0) + (Number(box.width) || 0) / 2;
+    return centerX >= 0.5 ? "person on the right" : "person on the left";
+}
+
+/**
  * 单人影换人的提示词。
  *
  * 关键点：
@@ -77,4 +90,165 @@ export function buildSingleSwapPrompt(box) {
         `保持原图人物的姿势、动作、位置、尺度与构图不变；` +
         `保持背景、光照、色调与画面细节不变。只替换人物身份，其他区域保持原样。`
     );
+}
+
+/**
+ * 视频阶段（MiniMax H3）的换人提示词。
+ *
+ * 放在这里而不是 swap-chain.js，是为了让它可单独测试：
+ * 之前它引用了已删除的 targetLabel，任务一路跑到 s5_video（图像门都过了）
+ * 才报 ReferenceError，代价最大的一种失败。
+ */
+export function buildSwapVideoPrompt(job) {
+  if (job.mode === "double_swap") {
+    return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video showing both replacement people.\n<Subject 1> is the person on the left in <Video 1>, replaced by the left-side person in <Picture 1>.\n<Subject 2> is the person on the right in <Video 1>, replaced by the right-side person in <Picture 1>.\n\nsummary:\n[video editing + character replacement] The target video is an edited version of <Video 1> where the left person becomes <Subject 1> and the right person becomes <Subject 2>, keeping the same actions. Background, props, camera, motion and timing of <Video 1> are kept.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - shot structure, camera path, scene, lighting and action timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - identity and wardrobe for both Subjects.\n<Subject 1> (appears in [Shot 1]): fully_preserved - left figure matches the left side of <Picture 1> throughout.\n<Subject 2> (appears in [Shot 1]): fully_preserved - right figure matches the right side of <Picture 1> throughout.\n\ndetailed_description:\nThe target video matches <Video 1> in scene, colour grade and camera.\n[Shot 1] From 00:00.000 to about 00:05.167, the left person becomes <Subject 1> and the right person becomes <Subject 2>, each following their own body path, poses and timing from <Video 1>. Hair and clothes move naturally. Only these two figures change; everything else stays as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
+  }
+  const label = describeTargetEn(job.targetBoxes[0]);
+  return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video showing the replacement person.\n<Subject 1> is the person in <Picture 1>: they replace the ${label} in <Video 1>. No other person changes.\n\nsummary:\n[video editing + character replacement] The target video is an edited version of <Video 1> where only the ${label} becomes <Subject 1> exactly as in <Picture 1>, keeping the same actions. Background, props, camera, motion and timing of <Video 1> are kept.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - shot structure, camera path, scene, lighting and action timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - identity and wardrobe for <Subject 1> only.\n<Subject 1> (appears in [Shot 1]): fully_preserved - matches <Picture 1> throughout; no leftover original face, hair or clothes.\n\ndetailed_description:\nThe target video matches <Video 1> in scene, colour grade and camera.\n[Shot 1] From 00:00.000 to about 00:05.167, only the ${label} becomes <Subject 1>, following the same body path, poses and timing as <Video 1>. Hair and clothes move naturally. Everything else stays as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
+}
+
+
+/**
+ * 视频门的判定逻辑（纯函数，便于单测）。
+ *
+ * 现场缺陷：第 0 帧是模型的生成起点，天然最接近源片。实测四个采样帧
+ * 的 targetDiff 是 [3.82, 32.28, 48.09, 52.07] —— 换人整体成功，
+ * 但原实现取「所有帧的最小值」做门槛，3.82 直接判不合格，白白重试一次
+ * 视频（每次 10 分钟）。起始帧应当单独记录，不参与硬性门槛。
+ */
+export function judgeVideoGate({ readings, mode = "", thresholds = {} }) {
+    const minMid = thresholds.minMid ?? 6;
+    const maxOutside = thresholds.maxOutside ?? 60;
+    const minLuma = thresholds.minLuma ?? 8;
+    const list = Array.isArray(readings) ? readings : [];
+    if (!list.length) {
+        return {
+            targetMin: 0,
+            startDiff: 0,
+            outsideMax: 0,
+            backgroundMax: 0,
+            lumaMin: 0,
+            targetOk: false,
+            backgroundOk: false,
+            blackOk: false,
+            pass: false,
+        };
+    }
+    const startDiff = Number(list[0].targetDiff) || 0;
+    const mid = list.slice(1);
+    const targetMin = mid.length
+        ? Math.min(...mid.map((item) => Number(item.targetDiff) || 0))
+        : Math.min(...list.map((item) => Number(item.targetDiff) || 0));
+    const outsideMax = Math.max(...list.map((item) => Number(item.outsideDiff) || 0));
+    // 背景只看前半段：后半段模型可能在合法地改变场景光效。
+    const early = list.filter((item) => Number(item.frame) < 80);
+    const backgroundMax = early.length
+        ? Math.max(...early.map((item) => Number(item.outsideDiff) || 0))
+        : outsideMax;
+    const lumaMin = Math.min(...list.map((item) => Number(item.luma) || 0));
+    const editTime = mode === "edit_time" || mode === "edit_light";
+    const targetOk = targetMin > minMid;
+    const backgroundOk = editTime ? true : backgroundMax < maxOutside;
+    const blackOk = lumaMin > minLuma;
+    return {
+        targetMin: Number(targetMin.toFixed(2)),
+        startDiff: Number(startDiff.toFixed(2)),
+        outsideMax: Number(outsideMax.toFixed(2)),
+        backgroundMax: Number(backgroundMax.toFixed(2)),
+        lumaMin: Number(lumaMin.toFixed(1)),
+        targetOk,
+        backgroundOk,
+        blackOk,
+        pass: targetOk && backgroundOk && blackOk,
+    };
+}
+
+/**
+ * 从 ComfyUI /queue 的返回里判断某个 prompt 是否还活着。
+ *
+ * 用途：waitPrompt 查不到历史记录时要区分「还在排队/执行」与「已经被丢了」。
+ * 现场踩过：ComfyUI 长时间运行后 /view 劣化，任务其实早已结束，网关却一直
+ * 空转到超时，用户只能干等 20 分钟。
+ *
+ * 队列项结构是 [number, prompt_id, prompt, extra_data, outputs]。
+ * 查不到队列信息（接口异常）时返回 true —— 宁可继续等，也不要误判任务丢失。
+ */
+export function isPromptInQueue(queueData, promptId) {
+    if (!queueData || typeof queueData !== "object") return true;
+    const target = String(promptId ?? "");
+    if (!target) return true;
+    // 两个字段都不是数组（包括双双缺失）→ 接口结构不是我们认识的 /queue 格式，
+    // 按「未知」处理（继续等）。误判任务丢失的代价是白白中断一次十几分钟的生成，
+    // 而多等一分钟几乎没有代价。
+    const rawRunning = queueData.queue_running;
+    const rawPending = queueData.queue_pending;
+    if (!Array.isArray(rawRunning) && !Array.isArray(rawPending)) return true;
+    const running = Array.isArray(rawRunning) ? rawRunning : [];
+    const pending = Array.isArray(rawPending) ? rawPending : [];
+    return [...running, ...pending].some((item) => {
+        if (!Array.isArray(item)) return false;
+        return String(item[1]) === target;
+    });
+}
+
+/**
+ * 逐像素相关性：判断「是不是同一张构图」。
+ *
+ * 与直方图相关性的关键区别：直方图只看颜色分布，不看空间位置。
+ * 现场事故：模型把「西装男近景」重画成「古风人物在海面旋涡中施法」，
+ * 两者都是低饱和冷色调 —— 直方图相关 0.7807（被判成结构保持），
+ * 逐像素相关只有 0.3658（构图其实早就崩了）。
+ */
+export function pixelCorrelation(a, b) {
+    const n = Math.min(a?.length || 0, b?.length || 0);
+    if (!n) return 0;
+    let meanA = 0;
+    let meanB = 0;
+    for (let i = 0; i < n; i += 1) {
+        meanA += a[i];
+        meanB += b[i];
+    }
+    meanA /= n;
+    meanB /= n;
+    let num = 0;
+    let da = 0;
+    let db = 0;
+    for (let i = 0; i < n; i += 1) {
+        const x = a[i] - meanA;
+        const y = b[i] - meanB;
+        num += x * y;
+        da += x * x;
+        db += y * y;
+    }
+    return da && db ? num / Math.sqrt(da * db) : 0;
+}
+
+/**
+ * 图像门判定（纯函数）。
+ *
+ * 整幅框时「框外」是空集合，outsideDiff 恒为 0，必须靠结构相关性兜底；
+ * 而结构相关性必须用逐像素口径，否则整图重画也能过（见 pixelCorrelation）。
+ */
+export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, structureCorr = 1, fullFrame = false, mode = "", identity = [], thresholds = {} }) {
+    const minChanged = thresholds.minChanged ?? 7;
+    const minStructure = thresholds.minStructure ?? 0.55;
+    const maxOutside = thresholds.maxOutside ?? 40;
+    const maxOutsideEdit = thresholds.maxOutsideEdit ?? 55;
+    const isEdit = String(mode || "").startsWith("edit_");
+    const editLightTime = mode === "edit_light" || mode === "edit_time";
+    const outsideOk = editLightTime
+        ? true
+        : isEdit
+            ? outsideDiff < maxOutsideEdit
+            : fullFrame
+                ? structureCorr > minStructure
+                : outsideDiff < maxOutside;
+    const changedOk = targetDiff > minChanged;
+    const identityOk = !identity.length || identity.every((item) => item.hit);
+    return {
+        outsideOk,
+        changedOk,
+        identityOk,
+        pass: changedOk && outsideOk && identityOk,
+    };
 }

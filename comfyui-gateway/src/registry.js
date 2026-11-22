@@ -669,6 +669,20 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
     return { workflow: publicEntry(saved) };
   }
 
+  /**
+   * 扫描 registry 目录，把尚未登记的工作流文件导入。
+   *
+   * 去重必须按**内容**，不能只看文件名：
+   * setup.js 的 importComfyWorkflows() 是按内容去重的，它会把「内容与已有条目
+   * 重复的自动导入条目」移除。两边规则不一致就会互相拉扯 —— 现场故障：
+   *   1. 目录里有一份旧名副本 hyperflow-ref2va-6p2.json，内容与已登记的
+   *      video-hyperflow-ref2va-6p2.json 完全相同；
+   *   2. 本函数按文件名判断「未登记」，每轮都把它导入成 -2 条目；
+   *   3. importComfyWorkflows 按内容判定 -2 是重复副本，立即移除（顺带删文件）；
+   *   4. 下一轮本函数又把它导入…… 导入/删除无限反弹，网关启动卡死。
+   *
+   * 所以这里也按内容比对，内容已存在就跳过并记为 skipped，让两边结论一致。
+   */
   async function scan() {
     const entries = await readRegistryData();
     const usedFiles = new Set(entries.flatMap((entry) => [entry.file, ...Object.values(entry.variants || {}).map((variant) => variant?.file)]).filter(Boolean));
@@ -679,14 +693,40 @@ export function createRegistry({ dir, maxWorkflowBytes = 5 * 1024 * 1024, logger
         .filter(Boolean)
         .map((sourcePath) => path.resolve(dir, sourcePath)),
     );
+    // 已登记条目的内容指纹：用于识别「换了文件名的同一份工作流」。
+    const usedContent = new Set();
+    for (const entry of entries) {
+      const file = entry.file;
+      if (!file) continue;
+      const absolute = path.isAbsolute(file) ? file : path.resolve(dir, file);
+      try {
+        const raw = JSON.parse(await fsp.readFile(absolute, "utf8"));
+        usedContent.add(JSON.stringify(raw));
+      } catch {
+        // 文件缺失或损坏：跳过，不影响其它条目的判定。
+      }
+    }
     const files = (await fsp.readdir(dir)).filter((file) => file.toLowerCase().endsWith(".json") && file !== REGISTRY_FILE && !usedFiles.has(file));
     const summary = { added: [], skipped: [], failed: [] };
     for (const file of files) {
       const absolute = path.resolve(dir, file);
       if (usedSources.has(absolute)) continue;
+      let contentKey = null;
+      try {
+        contentKey = JSON.stringify(JSON.parse(await fsp.readFile(absolute, "utf8")));
+      } catch {
+        // 读不出来就交给 importWorkflow 去报错，保持原有错误路径。
+      }
+      // 内容与已登记条目相同 → 是换了名字的副本，跳过（否则会和
+      // setup 的内容去重互相反弹，见函数注释）。
+      if (contentKey && usedContent.has(contentKey)) {
+        summary.skipped.push({ file, reason: "内容与已登记工作流重复，跳过" });
+        continue;
+      }
       try {
         const result = await importWorkflow({ path: absolute, overwrite: false });
         summary.added.push(result.workflow.name);
+        if (contentKey) usedContent.add(contentKey);
       } catch (error) {
         if (error instanceof RegistryError && error.code === "ui_workflow_not_supported") summary.skipped.push({ file, reason: error.message });
         else summary.failed.push({ file, reason: error.message });

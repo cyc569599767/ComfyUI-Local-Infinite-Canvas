@@ -10,15 +10,17 @@ import { alignViggleFramesUp, randomId, sleep } from "./util.js";
 
 const execFileAsync = promisify(execFile);
 
-const IMAGE_SIZE = { width: 832, height: 480 };
+// 图像画布不再是常量：必须按源片朝向算，否则竖屏素材会被裁成横屏条带。
+// 具体尺寸由 pickImageCanvas(源宽, 源高) 在 run() 里算出后放进 job.imageSize。
+const IMAGE_SIZE = { width: 832, height: 480 }; // 仅作源尺寸未知时的兜底
 const DEFAULT_SEED = 98742863019142;
 const MAX_IMAGE_RETRIES = 2;
 const MAX_VIDEO_RETRIES = 1;
 const FRAMES = 124;
 const REMAKE_FRAMES_MIN = 90;
 const REMAKE_FRAMES_MAX = 345;
-import { pickRemakeShortEdge } from "./remake-canvas.js";
-import { buildSingleSwapPrompt, defaultTargetBoxes } from "./swap-chain-target.js";
+import { pickImageCanvas, pickRemakeShortEdge } from "./remake-canvas.js";
+import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, isFullFrameBox, isPromptInQueue, judgeImageGate, judgeVideoGate } from "./swap-chain-target.js";
 
 const DEFAULT_SHORT_EDGE = 480;
 const SWAP_SIGMAS = "1.0, 0.990476, 0.965243, 0.923077, 0.8, 0.631579, 0.0";
@@ -123,16 +125,8 @@ function buildEditPrompt(job) {
   return `${intent || "把时间改为夜晚"}；保持人物身份、脸、发型、服装、姿势、位置、尺度、构图和所有物体位置不变，只改变时间与夜景光照。`;
 }
 
-function buildSwapVideoPrompt(job) {
-  if (job.mode === "double_swap") {
-    return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video showing both replacement people.\n<Subject 1> is the person on the left in <Video 1>, replaced by the left-side person in <Picture 1>.\n<Subject 2> is the person on the right in <Video 1>, replaced by the right-side person in <Picture 1>.\n\nsummary:\n[video editing + character replacement] The target video is an edited version of <Video 1> where the left person becomes <Subject 1> and the right person becomes <Subject 2>, keeping the same actions. Background, props, camera, motion and timing of <Video 1> are kept.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - shot structure, camera path, scene, lighting and action timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - identity and wardrobe for both Subjects.\n<Subject 1> (appears in [Shot 1]): fully_preserved - left figure matches the left side of <Picture 1> throughout.\n<Subject 2> (appears in [Shot 1]): fully_preserved - right figure matches the right side of <Picture 1> throughout.\n\ndetailed_description:\nThe target video matches <Video 1> in scene, colour grade and camera.\n[Shot 1] From 00:00.000 to about 00:05.167, the left person becomes <Subject 1> and the right person becomes <Subject 2>, each following their own body path, poses and timing from <Video 1>. Hair and clothes move naturally. Only these two figures change; everything else stays as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
-  }
-  const label = targetLabel(job.targetBoxes[0]);
-  return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video showing the replacement person.\n<Subject 1> is the person in <Picture 1>: they replace the ${label} in <Video 1>. The other person is not replaced.\n\nsummary:\n[video editing + character replacement] The target video is an edited version of <Video 1> where only the ${label} becomes <Subject 1> exactly as in <Picture 1>, keeping the same actions. Background, props, camera, motion and timing of <Video 1> are kept.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - shot structure, camera path, scene, lighting, the other person, and action timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - identity and wardrobe for <Subject 1> only.\n<Subject 1> (appears in [Shot 1]): fully_preserved - matches <Picture 1> throughout; no leftover original face, hair or clothes.\nThe other person (not a Subject): fully_preserved.\n\ndetailed_description:\nThe target video matches <Video 1> in scene, colour grade and camera.\n[Shot 1] From 00:00.000 to about 00:05.167, only the ${label} becomes <Subject 1>, following the same body path, poses and timing as <Video 1>. Hair and clothes move naturally. Everything else stays as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
-}
-
 function buildEditVideoPrompt(job) {
-  if (job.mode === "edit_clothes") return buildSwapVideoPrompt({ ...job, mode: "single_swap", targetBoxes: [job.targetBoxes[0] || { x: 0.51, y: 0.03, width: 0.45, height: 0.94 }] }).replace(/replacement person/g, "target clothing").replace(/character replacement/g, "clothing edit");
+  if (job.mode === "edit_clothes") return buildSwapVideoPrompt({ ...job, mode: "single_swap", targetBoxes: [job.targetBoxes[0] || { x: 0, y: 0, width: 1, height: 1 }] }).replace(/replacement person/g, "target clothing").replace(/character replacement/g, "clothing edit");
   if (job.mode === "edit_light") return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video with the target lighting.\n<Subject 1> is the lighting of the scene: it becomes the lighting in <Picture 1>. All people, clothing, poses and geometry stay as in <Video 1>.\n\nsummary:\n[video editing] Only the lighting changes to match <Picture 1>; people, clothing, poses, objects, camera, motion and timing stay as in <Video 1>.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - people, clothing, poses, objects, camera and timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - lighting only.\n\ndetailed_description:\n[Shot 1] From 00:00.000 to about 00:05.167, the lighting matches <Picture 1>; all people, clothing, poses and object positions stay as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
   return `subject_definitions:\n<Video 1> is the source video.\n<Picture 1> is a frame of the target video at night.\n<Subject 1> is the time of the scene: it becomes night as in <Picture 1>. All people, clothing, poses and geometry stay as in <Video 1>.\n\nsummary:\n[video editing] Only the time and lighting change to night as in <Picture 1>; people, clothing, poses, objects, camera, motion and timing stay as in <Video 1>.\n\nretention_analysis:\n<Video 1> (source video editing): fully_preserved - people, clothing, poses, objects, camera and timing stay frame-accurate.\n<Picture 1> (appears in [Shot 1]): reference - night time and lighting only.\n\ndetailed_description:\n[Shot 1] From 00:00.000 to about 00:05.167, the scene becomes night with the lighting of <Picture 1>; all people, clothing, poses and object positions stay as in <Video 1>.\n\noverall_soundscape:\nThe source soundtrack continues throughout.\n\nnon_diegetic_music:\nN/A`;
 }
@@ -205,28 +199,38 @@ function formatComfyHistoryError(history) {
   return `ComfyUI 执行失败：${summary || "未知错误"}`;
 }
 
-async function resizeCover(buffer, config, outPath) {
+/**
+ * 把一帧缩放到目标画布。
+ *
+ * 尺寸必须按源片朝向传入（job.imageSize）：写死 832x480 会把竖屏素材
+ * 裁成一条横带，人脸整个丢掉。
+ */
+async function resizeCover(buffer, config, outPath, size = IMAGE_SIZE) {
   const binary = ffmpegOrThrow(config);
+  const width = size.width || IMAGE_SIZE.width;
+  const height = size.height || IMAGE_SIZE.height;
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "swap-chain-resize-"));
   try {
     const input = path.join(tempDir, "input.png");
     await fsp.writeFile(input, buffer);
-    await runFfmpeg(binary, ["-y", "-i", input, "-vf", `scale=${IMAGE_SIZE.width}:${IMAGE_SIZE.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${IMAGE_SIZE.width}:${IMAGE_SIZE.height}`, "-frames:v", "1", outPath]);
+    await runFfmpeg(binary, ["-y", "-i", input, "-vf", `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}`, "-frames:v", "1", outPath]);
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-async function maskImage(buffer, box, config, outPath) {
+async function maskImage(buffer, box, config, outPath, size = IMAGE_SIZE) {
   const binary = ffmpegOrThrow(config);
+  const width = size.width || IMAGE_SIZE.width;
+  const height = size.height || IMAGE_SIZE.height;
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "swap-chain-mask-"));
   try {
     const input = path.join(tempDir, "input.png");
     await fsp.writeFile(input, buffer);
-    const x = Math.round(box.x * IMAGE_SIZE.width);
-    const y = Math.round(box.y * IMAGE_SIZE.height);
-    const w = Math.max(8, Math.round(box.width * IMAGE_SIZE.width));
-    const h = Math.max(8, Math.round(box.height * IMAGE_SIZE.height));
+    const x = Math.round(box.x * width);
+    const y = Math.round(box.y * height);
+    const w = Math.max(8, Math.round(box.width * width));
+    const h = Math.max(8, Math.round(box.height * height));
     await runFfmpeg(binary, ["-y", "-i", input, "-vf", `drawbox=x=${x}:y=${y}:w=${w}:h=${h}:color=black@0.7:t=fill`, "-frames:v", "1", outPath]);
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -276,6 +280,36 @@ function histogram(buffer) {
   return Array.from(bins, (value) => value / total);
 }
 
+/**
+ * 逐像素相关性：真正反映「是不是同一张构图」。
+ *
+ * 与 histCorr 的区别：直方图相关只看颜色分布，冷色调海景和冷色调西装近景
+ * 会被判成「相似」；逐像素相关比较同一坐标上的颜色，构图一变就掉下来。
+ */
+function pixelCorr(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (!n) return 0;
+  let meanA = 0;
+  let meanB = 0;
+  for (let i = 0; i < n; i += 1) {
+    meanA += a[i];
+    meanB += b[i];
+  }
+  meanA /= n;
+  meanB /= n;
+  let num = 0;
+  let da = 0;
+  let db = 0;
+  for (let i = 0; i < n; i += 1) {
+    const x = a[i] - meanA;
+    const y = b[i] - meanB;
+    num += x * y;
+    da += x * x;
+    db += y * y;
+  }
+  return da && db ? num / Math.sqrt(da * db) : 0;
+}
+
 function histCorr(a, b) {
   const meanA = a.reduce((s, v) => s + v, 0) / a.length;
   const meanB = b.reduce((s, v) => s + v, 0) / b.length;
@@ -319,10 +353,32 @@ async function evaluateImageGate(job, paintedBuffer, config) {
     identity.push({ ref: job.refNames[i], paintedCorr: Number(paintedCorr.toFixed(4)), sourceCorr: Number(sourceCorr.toFixed(4)), delta: Number(delta.toFixed(4)), hit: delta >= -0.03, inconclusive: Math.abs(delta) < 0.02 });
   }
   const isEdit = job.mode.startsWith("edit_");
-  const outsideOk = job.mode === "edit_light" || job.mode === "edit_time" ? true : isEdit ? outsideDiff < 55 : outsideDiff < 40;
-  const changedOk = targetDiff > 7;
-  const identityOk = !identity.length || identity.every((item) => item.hit);
-  const pass = changedOk && outsideOk && identityOk;
+  // 整幅框时「框外」是空集合，regionDiff 返回 0，outsideOk 会恒真 ——
+  // 这样「框外必须不变」这条约束等于没有，只要画面整体变了就算过。
+  // 现场后果：一张被裁成领带特写的图（根本没有人脸）也能通过图像门，
+  // 错误只被推到最后的视频门才发现，白烧一次视频生成。
+  //
+  // 兜底：整幅框时改用「逐像素结构相关性」作为约束。
+  //
+  // 这里不能用直方图相关性 —— 它只看颜色分布、不看空间位置。现场踩过：
+  // 模型把「西装男近景」重画成「古风人物在海面旋涡中施法」，两者都是低饱和
+  // 冷色调，直方图相关高达 0.7807，被误判为「结构保持」放行，而逐像素相关
+  // 只有 0.3658 —— 构图早就崩了。白烧一次 30 分钟的视频生成。
+  //
+  // 阈值取 0.55：正常换人（只改人脸）实测在 0.80 以上，整图重画在 0.37 左右，
+  // 中间留足余量。
+  const fullFrame = boxes.every((box) => isFullFrameBox(box));
+  const structureCorr = fullFrame ? pixelCorr(targetGrid, paintedGrid) : 1;
+  // 判定细节见 swap-chain-target.js 的 judgeImageGate。
+  const verdict = judgeImageGate({
+    outsideDiff,
+    targetDiff,
+    structureCorr,
+    fullFrame,
+    mode: job.mode,
+    identity,
+  });
+  const { outsideOk, changedOk, identityOk, pass } = verdict;
   const negativeGrid = targetGrid;
   const negativeDiff = regionDiff(targetGrid, negativeGrid, boxes, { inside: true });
   return {
@@ -330,6 +386,8 @@ async function evaluateImageGate(job, paintedBuffer, config) {
     identityAdvisory: true,
     outsideDiff: Number(outsideDiff.toFixed(2)),
     targetDiff: Number(targetDiff.toFixed(2)),
+    fullFrame,
+    structureCorr: Number(structureCorr.toFixed(4)),
     identity,
     outsideOk,
     changedOk,
@@ -365,27 +423,22 @@ async function evaluateVideoGate(job, videoBuffer, config) {
       luma /= outGrid.length / 3;
       readings.push({ frame: frames[i], targetDiff: Number(targetDiff.toFixed(2)), outsideDiff: Number(outsideDiff.toFixed(2)), luma: Number(luma.toFixed(1)) });
     }
-    const targetMin = Math.min(...readings.map((item) => item.targetDiff));
-    const outsideMax = Math.max(...readings.map((item) => item.outsideDiff));
-    const backgroundMax = Math.max(...readings.filter((item) => item.frame < 80).map((item) => item.outsideDiff));
-    const lumaMin = Math.min(...readings.map((item) => item.luma));
-    const editTime = job.mode === "edit_time" || job.mode === "edit_light";
-    const targetOk = targetMin > 6;
-    const backgroundOk = editTime ? true : backgroundMax < 60;
-    const blackOk = lumaMin > 8;
+    // 判定细节（含「第 0 帧不参与门槛」的理由）见 swap-chain-target.js 的 judgeVideoGate。
+    const verdict = judgeVideoGate({ readings, mode: job.mode });
     const unchanged = { frame: 0, targetDiff: 0, outsideDiff: 0, luma: 0 };
     return {
       method: "rgb64x36-proxy (no face embedding)",
       samples: readings,
-      targetMin: Number(targetMin.toFixed(2)),
-      outsideMax: Number(outsideMax.toFixed(2)),
-      backgroundMax: Number(backgroundMax.toFixed(2)),
-      lumaMin: Number(lumaMin.toFixed(1)),
-      targetOk,
-      backgroundOk,
-      blackOk,
+      targetMin: verdict.targetMin,
+      startDiff: verdict.startDiff,
+      outsideMax: verdict.outsideMax,
+      backgroundMax: verdict.backgroundMax,
+      lumaMin: verdict.lumaMin,
+      targetOk: verdict.targetOk,
+      backgroundOk: verdict.backgroundOk,
+      blackOk: verdict.blackOk,
       negativeControl: { name: "unchanged-source", targetDiff: unchanged.targetDiff, wouldPass: unchanged.targetDiff > 6 },
-      pass: targetOk && backgroundOk && blackOk,
+      pass: verdict.pass,
     };
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -455,6 +508,9 @@ function swapVideoGraph(job, names) {
     "4": { class_type: "CLIPLoader", inputs: { clip_name: H3_CLIP, type: "minimax", device: "default" } },
     "5": { class_type: "VAELoader", inputs: { vae_name: H3_VIDEO_VAE } },
     "6": { class_type: "VAELoader", inputs: { vae_name: H3_AUDIO_VAE } },
+    // TensorRT 版视频 VAE 解码器：引擎文件已随包提供，解码比 torch 路径快得多。
+    // 注意 RemakeConditioning 仍要用原始 VAE（节点 5）做编码 —— TRT 只替换解码。
+    "91": { class_type: "MiniMaxH3TRTVAELoader", inputs: { decoder: "minimax_h3_vae_decoder.engine", encoder: "None" } },
     "9": { class_type: "LoadImage", inputs: { image: names.painted } },
     "9102": { class_type: "VHS_LoadVideo", inputs: { video: names.source, force_rate: 24, custom_width: 0, custom_height: 0, frame_load_cap: 345, skip_first_frames: 0, select_every_nth: 1, format: "AnimateDiff" } },
     "42": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["9102", 0], prompt: buildSwapVideoPrompt(job), ref_1: ["9", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, audio: ["9102", 2] } },
@@ -463,9 +519,10 @@ function swapVideoGraph(job, names) {
     "14": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
     "15": { class_type: "ManualSigmas", inputs: { sigmas: SWAP_SIGMAS } },
     "16": { class_type: "SamplerCustomAdvanced", inputs: { noise: ["12", 0], guider: ["13", 0], sampler: ["14", 0], sigmas: ["15", 0], latent_image: ["42", 1] } },
-    "17": { class_type: "VAEDecode", inputs: { samples: ["16", 0], vae: ["5", 0] } },
-    "18": { class_type: "VAEDecodeAudio", inputs: { samples: ["16", 0], vae: ["6", 0] } },
-    "19": { class_type: "CreateVideo", inputs: { images: ["17", 0], audio: ["18", 0], fps: 24, bit_depth: "auto", color_space: "sRGB", codec: "none" } },
+    // 一次 AVDecodeT8 同时解出画面与音频（原来要 VAEDecode + VAEDecodeAudio 两次），
+    // 视频走 TensorRT 引擎，音频仍用原始音频 VAE。
+    "17": { class_type: "MiniMaxH3AVDecodeT8", inputs: { av_latent: ["16", 0], video_vae: ["91", 0], audio_vae: ["6", 0] } },
+    "19": { class_type: "CreateVideo", inputs: { images: ["17", 0], audio: ["17", 1], fps: 24, bit_depth: "auto", color_space: "sRGB", codec: "none" } },
     "20": { class_type: "SaveVideo", inputs: { video: ["19", 0], filename_prefix: `swap-chain/${job.id}/video`, format: "mp4", codec: "h264" } },
   };
 }
@@ -616,11 +673,27 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
     logger?.warn?.(`swap-chain ${job.id} failed at ${job.stage}: ${job.error}`);
   }
 
+  /**
+   * prompt 是否还「活着」（在队列里或正在执行）。
+   * 查不到队列信息时返回 true，避免因为接口异常误判任务丢失。
+   */
+  async function isPromptAlive(promptId) {
+    const data = await comfy.queue().catch(() => null);
+    // 判定细节见 swap-chain-target.js 的 isPromptInQueue。
+    return isPromptInQueue(data, promptId);
+  }
+
   async function waitPrompt(job, graph, { stage, timeoutMs = 15 * 60 * 1000 }) {
     const submitted = await comfy.submit(graph, { clientId: `swap-chain-${job.id}`, signal: undefined });
     job.promptIds.push({ stage, promptId: submitted.promptId });
     update(job, {});
     const deadline = Date.now() + timeoutMs;
+    // 连续查不到历史记录时要区分两种情况：
+    //   · 任务在队列里正常等待/执行 —— 继续等
+    //   · 任务既不在队列也不在历史 —— 已经被 ComfyUI 丢掉了，再等也不会好
+    // 现场踩过：/view 坏掉期间任务看起来「卡在 s5_video」其实早已结束，
+    // 而现在这个循环会一直空转到超时，用户只能干等。
+    let missingStreak = 0;
     while (Date.now() < deadline) {
       if (job.cancelRequested) {
         await comfy.interrupt(submitted.promptId).catch(() => {});
@@ -628,12 +701,33 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       }
       await sleep(2000);
       const history = await comfy.history(submitted.promptId).catch(() => null);
-      if (!history) continue;
+      if (!history) {
+        missingStreak += 1;
+        // 连续 30 次（约 1 分钟）查不到，再确认一次它是否还在队列里。
+        if (missingStreak >= 30) {
+          const stillQueued = await isPromptAlive(submitted.promptId).catch(() => true);
+          if (!stillQueued) {
+            throw new SwapChainError(
+              `ComfyUI 里找不到这次任务（${stage}），可能已被中断或服务重启。请重试。`,
+              { status: 502, code: "comfy_prompt_lost" },
+            );
+          }
+          missingStreak = 0;
+        }
+        continue;
+      }
+      missingStreak = 0;
       if (history.status?.status_str === "error") throw new SwapChainError(formatComfyHistoryError(history), { status: 502, code: "comfy_failed" });
       if (history.outputs && Object.keys(history.outputs).length) return { history, promptId: submitted.promptId };
     }
     await comfy.interrupt(submitted.promptId).catch(() => {});
-    throw new SwapChainError("ComfyUI 执行超时", { status: 504, code: "comfy_timeout" });
+    // 说清楚是哪个阶段、等了多久：用户看到「执行超时」不知道是模型慢还是卡死。
+    const minutes = Math.round(timeoutMs / 60000);
+    throw new SwapChainError(
+      `ComfyUI 生成超时（${stage} 已等待 ${minutes} 分钟）。视频阶段通常需要 10-20 分钟，` +
+        `若 ComfyUI 刚启动还需先加载模型权重；可稍后重试。`,
+      { status: 504, code: "comfy_timeout" },
+    );
   }
 
   function outputFile(history) {
@@ -692,6 +786,8 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       // 1080p 源片用 480 会把细节砍掉一半，720p 用 480 也会损失比例。
       job.shortEdge = pickRemakeShortEdge(probe.width, probe.height);
       job.sourceSize = { width: probe.width, height: probe.height };
+      // 图像画布按源片朝向算：竖屏素材若按横屏裁，会把人脸裁掉。
+      job.imageSize = pickImageCanvas(probe.width, probe.height);
       update(job, {});
       let frame = await extractVideoFrame(source, { frame: 0, config });
       let score = null;
@@ -705,9 +801,19 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       } catch { /* 选帧打分为可选，失败仍用首帧 */ }
       job.frame = frame.frame;
       job.frameScore = score ? { score: score.score, similarity: score.similarity, black: score.black, fallback: score.fallback } : null;
-      await resizeCover(frame.buffer, config, job.paths.target);
-      if (job.mode === "single_swap") {
-        await maskImage(await fsp.readFile(job.paths.target), job.targetBoxes[0], config, job.paths.masked);
+      await resizeCover(frame.buffer, config, job.paths.target, job.imageSize);
+      // 遮罩只对「局部区域」有意义。
+      //
+      // 现场事故：single_swap 的默认框改成了整幅 (0,0,1,1) 之后，这里仍然
+      // 按框涂黑 —— 等于把整张底图压暗 70%。模型收到一张几乎全黑的图，
+      // 又被要求「保持背景不变」，于是干脆重画了一整张（实测产出「古风人物
+      // 在海面旋涡中施法」，与原片的西装近景毫无关系），再送去做视频就出现
+      // 了从领带变成钢铁侠反应堆的离谱过渡。
+      //
+      // 整幅框时保留原图：换人靠 prompt 与 LoRA 引导，底图必须完整可见。
+      const fullFrameTarget = job.targetBoxes.length === 1 && isFullFrameBox(job.targetBoxes[0]);
+      if (job.mode === "single_swap" && !fullFrameTarget) {
+        await maskImage(await fsp.readFile(job.paths.target), job.targetBoxes[0], config, job.paths.masked, job.imageSize);
       } else {
         await fsp.copyFile(job.paths.target, job.paths.masked);
       }
@@ -761,7 +867,10 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
           ? editVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name })
           : swapVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name });
         if (attempt > 0) graph[Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise")]?.inputs && (graph[Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise")].inputs.seed = job.seed + attempt);
-        const { history, promptId } = await waitPrompt(job, graph, { stage: `s5_video_${attempt}`, timeoutMs: 20 * 60 * 1000 });
+        // 视频阶段超时要给足：H3 换人实测一次约 17 分钟（175 帧 736x1280），
+        // 而 ComfyUI 刚重启时还要重新加载权重，首次更慢。原来设 20 分钟只有
+        // 3 分钟余量，正常生成会被误杀成「执行超时」，白烧一次 17 分钟。
+        const { history, promptId } = await waitPrompt(job, graph, { stage: `s5_video_${attempt}`, timeoutMs: 45 * 60 * 1000 });
         const file = outputFile(history);
         if (!file) throw new SwapChainError("视频生成没有输出", { status: 502, code: "video_no_output" });
         const view = await comfy.view(file);
