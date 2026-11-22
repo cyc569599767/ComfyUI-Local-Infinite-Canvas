@@ -7,6 +7,7 @@ import { clampVideoSeconds, computeVideoSize, draftLongSideSize, draftShortSideS
 import { buildAcceleratedReference } from "@/lib/canvas/reference-acceleration";
 import { isFinalVideoResult, isStillImageUrl, rejectStillImageBlob } from "@/lib/video-result";
 import { baseVideoWorkflowId, videoWorkflowId, resolveVideoWorkflowMode } from "@/lib/canvas/video-model-mode";
+import { checkH3CanvasLimit } from "@/lib/canvas/h3-canvas-limit";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
@@ -22,6 +23,7 @@ type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: strin
 type RequestOptions = { signal?: AbortSignal; params?: Record<string, unknown> };
 type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: ReferenceAudio[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
+
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
 export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin"; model: string };
@@ -382,6 +384,11 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     const selectedVideos = mode === "reference" ? (options?.videos || []).slice(0, creationH3 ? 3 : 1) : [];
     const selectedAudios = mode === "reference" ? (options?.audios || []).slice(0, creationH3 ? 3 : 2) : [];
     const requestSize = fastDraft ? normalizeFastDraftSize(config.size, config.vquality) : normalizeVideoSize(config.size, config.vquality) || "1280x720";
+    // H3 画布的硬上限是 1920×1088 = 2,088,960 像素（模型侧 MAX_PIXELS）。
+    // 4K 卡片会算出 3840x2176（上限的 4 倍），以前要跑到 ComfyUI 才报错。
+    // 这里提前拦下，并算出建议尺寸，省掉一轮 GPU 排队。
+    const limitCheck = checkH3CanvasLimit(requestSize);
+    if (limitCheck.exceeded) throw new Error(limitCheck.message);
     const accelerateReference = Boolean(config.referenceAcceleration) && !creationH3 && mode === "reference" && !fastDraft && selectedImages.length > 1;
     let images: File[];
     if (accelerateReference) {

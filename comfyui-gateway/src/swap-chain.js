@@ -17,7 +17,9 @@ const MAX_VIDEO_RETRIES = 1;
 const FRAMES = 124;
 const REMAKE_FRAMES_MIN = 90;
 const REMAKE_FRAMES_MAX = 345;
-const SHORT_EDGE = 480;
+import { pickRemakeShortEdge } from "./remake-canvas.js";
+
+const DEFAULT_SHORT_EDGE = 480;
 const SWAP_SIGMAS = "1.0, 0.990476, 0.965243, 0.923077, 0.8, 0.631579, 0.0";
 const EDIT_SIGMAS = "1.0, 0.983607, 0.96, 0.923077, 0.857143, 0.705882, 0.0";
 const QWEN_SIGMAS = "1.0, 0.961054, 0.918949, 0.769302, 0.545554, 0.35, 0.152292, 0";
@@ -160,27 +162,34 @@ function fitRemakeFrames(sourceFrameCount) {
   return alignViggleFramesUp(count);
 }
 
-async function probeSourceFrames(file, config) {
+/**
+ * 一次 ffprobe 同时取帧数与真实尺寸。
+ * 尺寸是必须的：换人画布要按源片短边选，硬编码 480 会把 1080p 压掉一半细节。
+ */
+async function probeSource(file, config) {
+  const empty = { frames: 0, width: 0, height: 0 };
   let binary = findBinary("ffprobe", config);
   if (!binary) {
     try {
       binary = path.join(path.dirname(ffmpegOrThrow(config)), process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
     } catch {
-      return 0;
+      return empty;
     }
   }
-  const { stdout } = await execFileAsync(binary, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=nb_frames,duration,avg_frame_rate", "-show_entries", "format=duration", "-of", "json", file], { timeout: 15000, maxBuffer: 1024 * 1024, encoding: "utf8" });
+  const { stdout } = await execFileAsync(binary, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=nb_frames,duration,avg_frame_rate,width,height", "-show_entries", "format=duration", "-of", "json", file], { timeout: 15000, maxBuffer: 1024 * 1024, encoding: "utf8" });
   const data = JSON.parse(stdout) || {};
   const stream = data.streams?.[0] || {};
+  const width = Number(stream.width) || 0;
+  const height = Number(stream.height) || 0;
   const duration = Number(stream.duration) > 0 ? Number(stream.duration) : Number(data.format?.duration);
-  if (Number.isFinite(duration) && duration > 0) return Math.round(duration * 24);
+  if (Number.isFinite(duration) && duration > 0) return { frames: Math.round(duration * 24), width, height };
   const rate = String(stream.avg_frame_rate || "0/1").split("/").map(Number);
   const fps = rate[1] ? rate[0] / rate[1] : rate[0];
   const sourceFrames = Number(stream.nb_frames);
   if (Number.isFinite(sourceFrames) && sourceFrames > 0) {
-    return Number.isFinite(fps) && fps > 0 ? Math.round((sourceFrames * 24) / fps) : Math.round(sourceFrames);
+    return { frames: Number.isFinite(fps) && fps > 0 ? Math.round((sourceFrames * 24) / fps) : Math.round(sourceFrames), width, height };
   }
-  return 0;
+  return { frames: 0, width, height };
 }
 
 async function padSourceToFrames(sourcePath, outputPath, sourceFrameCount, targetFrames, config) {
@@ -464,7 +473,7 @@ function swapVideoGraph(job, names) {
     "6": { class_type: "VAELoader", inputs: { vae_name: H3_AUDIO_VAE } },
     "9": { class_type: "LoadImage", inputs: { image: names.painted } },
     "9102": { class_type: "VHS_LoadVideo", inputs: { video: names.source, force_rate: 24, custom_width: 0, custom_height: 0, frame_load_cap: 345, skip_first_frames: 0, select_every_nth: 1, format: "AnimateDiff" } },
-    "42": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["9102", 0], prompt: buildSwapVideoPrompt(job), ref_1: ["9", 0], pins: "", frames: job.frames || FRAMES, short_edge: SHORT_EDGE, audio: ["9102", 2] } },
+    "42": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["9102", 0], prompt: buildSwapVideoPrompt(job), ref_1: ["9", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, audio: ["9102", 2] } },
     "12": { class_type: "RemakeNoise", inputs: { positive: ["42", 0], seed: job.seed } },
     "13": { class_type: "BasicGuider", inputs: { model: ["3", 0], conditioning: ["42", 0] } },
     "14": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
@@ -488,7 +497,7 @@ function editVideoGraph(job, names) {
     "7": { class_type: "VHS_LoadVideo", inputs: { video: names.source, force_rate: 24, custom_width: 0, custom_height: 0, frame_load_cap: 345, skip_first_frames: 0, select_every_nth: 1, format: "AnimateDiff" } },
     "8": { class_type: "LoadImage", inputs: { image: names.painted } },
     "30": { class_type: "PathchSageAttentionKJ", inputs: { model: ["3", 0], sage_attention: "auto", allow_compile: false } },
-    "9": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["7", 0], ref_1: ["8", 0], pins: "", frames: job.frames || FRAMES, short_edge: SHORT_EDGE, prompt: buildEditVideoPrompt(job), audio: ["7", 2] } },
+    "9": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["7", 0], ref_1: ["8", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, prompt: buildEditVideoPrompt(job), audio: ["7", 2] } },
     "10": { class_type: "RemakeNoise", inputs: { positive: ["9", 0], seed: job.seed } },
     "11": { class_type: "BasicGuider", inputs: { model: ["30", 0], conditioning: ["9", 0] } },
     "12": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
@@ -547,6 +556,10 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       seed: job.seed,
       sourceFrameCount: job.sourceFrameCount ?? null,
       frames: job.frames ?? null,
+      // 源片真实尺寸与选定的画布短边：前端可据此提前告知「会输出多大」，
+      // 也便于排查「为什么出片不是原分辨率」。
+      sourceSize: job.sourceSize || null,
+      shortEdge: job.shortEdge ?? null,
       promptIds: job.promptIds,
       gates: job.gates,
       error: job.error || null,
@@ -682,14 +695,19 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
     update(job, { stage: "s2_frame", progress: 8 });
     try {
       const source = { buffer: await fsp.readFile(job.paths.source), originalname: "source.mp4" };
-      let sourceFrameCount = 0;
+      let probe = { frames: 0, width: 0, height: 0 };
       try {
-        sourceFrameCount = await probeSourceFrames(job.paths.source, config);
+        probe = await probeSource(job.paths.source, config);
       } catch (error) {
-        logger?.warn?.(`swap-chain 源帧数探测失败：${error.message}`);
+        logger?.warn?.(`swap-chain 源片探测失败：${error.message}`);
       }
+      const sourceFrameCount = probe.frames;
       job.sourceFrameCount = sourceFrameCount;
       job.frames = sourceFrameCount > 0 ? fitRemakeFrames(sourceFrameCount) : FRAMES;
+      // 画布短边按源片真实尺寸选，不再硬编码 480：
+      // 1080p 源片用 480 会把细节砍掉一半，720p 用 480 也会损失比例。
+      job.shortEdge = pickRemakeShortEdge(probe.width, probe.height);
+      job.sourceSize = { width: probe.width, height: probe.height };
       update(job, {});
       let frame = await extractVideoFrame(source, { frame: 0, config });
       let score = null;

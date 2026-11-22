@@ -60,6 +60,7 @@ import { createWorkflowLabelStore } from "./workflow-labels.js";
 import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWorkflowModelPatch, workflowModelFields } from "./workflow-model-overrides.js";
 import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, alignViggleFramesUp, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep, VIGGLE_MAX_FRAMES, VIGGLE_MIN_FRAMES } from "./util.js";
+import { exceedsH3PixelLimit, h3PixelLimitMessage, snap32 } from "./h3-canvas-limit.js";
 
 class HttpError extends Error {
   constructor(message, { status = 400, code = "bad_request", details } = {}) {
@@ -3369,6 +3370,17 @@ export async function createGatewayApp(overrides = {}) {
     const uploadedImages = await uploadImages(comfy, files);
     const uploadedVideos = await uploadImages(comfy, videoFiles);
     const uploadedAudios = await uploadImages(comfy, audioFiles);
+    // H3 有硬性像素上限（1920x1088 = 2,088,960）。4K 卡片会算出 3840x2176
+    // = 8,355,840（上限的 4 倍），以前要跑到 ComfyUI 才由 conditioning 节点抛
+    // ValueError，白等一轮 GPU。这里在入口就拦住并给出可用尺寸。
+    const requestedSize = parseSize(body.size);
+    if (requestedSize && exceedsH3PixelLimit(requestedSize.width, requestedSize.height)) {
+      throw new HttpError(h3PixelLimitMessage(requestedSize.width, requestedSize.height), {
+        status: 400,
+        code: "h3_canvas_too_large",
+        details: { limit: 1920 * 1088, requested: { width: snap32(requestedSize.width), height: snap32(requestedSize.height) } },
+      });
+    }
     const context = buildContext({
       prompt: body.prompt,
       size: body.size,

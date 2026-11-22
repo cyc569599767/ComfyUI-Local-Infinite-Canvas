@@ -13,6 +13,12 @@ export type SwapChainJob = {
     targetBoxes: SwapChainTargetSelection[];
     seed: number;
     promptIds: Array<{ stage: string; promptId: string }>;
+    /** 源片真实尺寸（探测失败时为 null）。 */
+    sourceSize?: { width: number; height: number } | null;
+    /** 实际使用的画布短边（480–736，32 的倍数）。 */
+    shortEdge?: number | null;
+    sourceFrameCount?: number | null;
+    frames?: number | null;
     gates: Record<string, unknown>;
     error: string | null;
     createdAt: string;
