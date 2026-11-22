@@ -454,6 +454,22 @@
         top: 21px;
     }
 
+    /* 详情弹窗全屏时，把弹窗自身的边框/内边距/遮罩让开，让媒体真正铺满。
+       只留媒体本身（img/video 由 dialog 的最小化容器承载）。 */
+    .canvas-preview-fullscreen .ant-modal-content {
+        padding: 0;
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .canvas-preview-fullscreen .ant-modal-header {
+        display: none;
+    }
+
+    .canvas-preview-fullscreen .ant-modal-body {
+        padding: 0;
+    }
+
     @keyframes canvas-batch-child-in {
         from {
             opacity: 0;

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Box, ChevronLeft, ChevronRight, Globe, Group, Mountain, Users, Video } from "lucide-react";
+import { Box, ChevronLeft, ChevronRight, Globe, Group, Maximize2, Mountain, Users, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
 import { requestScene3DPanorama, type Scene3DOffset } from "@/services/api/scene3d-panorama";
 import { requestSwapChain } from "@/services/api/swap-chain-job";
+import { formatDetailMediaSize, resolveDetailMediaSize } from "@/lib/canvas/detail-media-size";
 import type { SwapChainMode } from "@/services/api/swap-chain";
 import { createFreeWorkflowVideoTask, fetchFreeWorkflow, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
@@ -1233,6 +1234,18 @@ function InfiniteCanvasPage() {
     const previewImage = previewImages[previewImageIndex];
     const previewContent = previewImage?.content || ((!previewImageId || !previewImages.length) ? previewNode?.metadata?.content : undefined);
     const canSwitchPreviewImage = previewNode?.type === CanvasNodeType.Image && previewImages.length > 1 && Boolean(previewContent);
+    // 详情弹窗要显示当前这张的真实分辨率：优先批次里具体那张，再回落节点级。
+    const previewMediaSize = resolveDetailMediaSize(previewImage, previewNode?.metadata);
+    const previewMediaSizeLabel = formatDetailMediaSize(previewMediaSize);
+    // 全屏：图片走 <img>、视频走 <video>，两者都能 requestFullscreen。
+    const previewFullscreenRef = useRef<HTMLImageElement | HTMLVideoElement | null>(null);
+    const [previewFullscreen, setPreviewFullscreen] = useState(false);
+    // 跟踪真实全屏状态：用户按 Esc 退出时按钮状态和弹窗样式要跟着恢复。
+    useEffect(() => {
+        const onChange = () => setPreviewFullscreen(Boolean(document.fullscreenElement));
+        document.addEventListener("fullscreenchange", onChange);
+        return () => document.removeEventListener("fullscreenchange", onChange);
+    }, []);
     const goPreviewImage = (offset: -1 | 1) => {
         const nextIndex = previewImageIndex + offset;
         const next = previewImages[nextIndex];
@@ -8630,9 +8643,39 @@ function InfiniteCanvasPage() {
                 <CanvasImageCompareModal open={Boolean(compareNodeIds)} items={compareItems} onClose={() => setCompareNodeIds(null)} />
 
                 <Modal
-                    title={previewNode?.type === CanvasNodeType.Video ? t("canvas.projectPage.videoDetails") : t("canvas.projectPage.imageDetails")}
+                    title={
+                        <div className="flex min-w-0 items-center gap-2 pr-2">
+                            <span className="shrink-0">{previewNode?.type === CanvasNodeType.Video ? t("canvas.projectPage.videoDetails") : t("canvas.projectPage.imageDetails")}</span>
+                            {/* 分辨率放标题后：看画面比例只能猜，确认「是不是 1080p」不该还得再开节点信息。 */}
+                            {previewMediaSizeLabel ? (
+                                <span className="shrink-0 text-xs font-normal tabular-nums opacity-45" data-preview-resolution>
+                                    {previewMediaSizeLabel}
+                                </span>
+                            ) : null}
+                            <Button
+                                type="text"
+                                size="small"
+                                className="ml-auto shrink-0"
+                                aria-label={t("canvas.projectPage.fullscreen")}
+                                data-preview-fullscreen
+                                icon={<Maximize2 className="size-4" />}
+                                onClick={() => {
+                                    const element = previewFullscreenRef.current;
+                                    if (!element) return;
+                                    if (document.fullscreenElement) {
+                                        void document.exitFullscreen().catch(() => undefined);
+                                        return;
+                                    }
+                                    void element.requestFullscreen?.().catch(() => undefined);
+                                }}
+                            />
+                        </div>
+                    }
                     open={Boolean(previewContent)}
                     centered
+                    // 全屏时把弹窗本身藏掉：否则 requestFullscreen 只放大元素，
+                    // 弹窗的遮罩和边框还压在画面上，看着还是「没反应」。
+                    className={previewFullscreen ? "canvas-preview-fullscreen" : undefined}
                     onCancel={() => {
                         const video = previewVideoRef.current;
                         if (video) {
@@ -8647,22 +8690,33 @@ function InfiniteCanvasPage() {
                     destroyOnHidden
                     footer={null}
                     width="auto"
-                    styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "80vh" } }}
+                    styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: previewFullscreen ? "100vh" : "80vh" } }}
                 >
                     {previewContent ? (
                         previewNode?.type === CanvasNodeType.Video ? (
                             <video
-                                ref={previewVideoRef}
+                                ref={(element) => {
+                                    previewVideoRef.current = element;
+                                    previewFullscreenRef.current = element;
+                                }}
                                 src={previewContent}
                                 controls
                                 autoPlay
                                 playsInline
-                                style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain" }}
+                                style={{ maxWidth: "100%", maxHeight: previewFullscreen ? "100vh" : "80vh", objectFit: "contain" }}
                                 data-testid="canvas-video-preview"
                             />
                         ) : (
                             <div style={{ position: "relative", display: "inline-flex", alignItems: "center", justifyContent: "center", maxWidth: "100%", maxHeight: "80vh" }}>
-                                <img src={previewContent} alt={previewNode?.title || t("assets.kinds.image")} style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain" }} />
+                                <img
+                                    ref={(element) => {
+                                        previewFullscreenRef.current = element;
+                                    }}
+                                    src={previewContent}
+                                    alt={previewNode?.title || t("assets.kinds.image")}
+                                    style={{ maxWidth: "100%", maxHeight: previewFullscreen ? "100vh" : "80vh", objectFit: "contain" }}
+                                    data-testid="canvas-image-preview"
+                                />
                                 {canSwitchPreviewImage ? (
                                     <>
                                         <Button
