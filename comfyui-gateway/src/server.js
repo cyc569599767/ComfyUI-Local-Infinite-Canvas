@@ -61,7 +61,7 @@ import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWork
 import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, alignViggleFramesUp, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep, VIGGLE_MAX_FRAMES, VIGGLE_MIN_FRAMES } from "./util.js";
 import { exceedsH3PixelLimit, h3PixelLimitMessage, snap32 } from "./h3-canvas-limit.js";
-import { findMissingSwapChainModels, missingSwapChainMessage } from "./swap-chain-models.js";
+import { findMissingSwapChainModels, isModelCatalogReady, missingSwapChainMessage } from "./swap-chain-models.js";
 
 class HttpError extends Error {
   constructor(message, { status = 400, code = "bad_request", details } = {}) {
@@ -3971,6 +3971,15 @@ export async function createGatewayApp(overrides = {}) {
     const unetOptions = optionsFor("UNETLoader", "unet_name");
     const clipOptions = optionsFor("CLIPLoader", "clip_name");
     const vaeOptions = optionsFor("VAELoader", "vae_name");
+    // 清单没就绪时（网关刚启动 / ComfyUI 离线）不能断言「缺模型」——
+    // 那种情况下 loaderOptions() 是空的，会把 9 个全判成缺失，严重误导。
+    if (!isModelCatalogReady(catalog)) {
+      throw new HttpError(
+        "暂时读不到本地模型清单（ComfyUI 未连接或仍在扫描），请稍后重试；" +
+          "如果一直如此，请检查 ComfyUI 是否在运行。",
+        { status: 503, code: "model_catalog_unavailable" },
+      );
+    }
     const { missing } = findMissingSwapChainModels({
       hasLora: (file) => loraOptions.has(normalizeName(file)),
       hasModel: (file) => unetOptions.has(normalizeName(file)) || clipOptions.has(normalizeName(file)) || vaeOptions.has(normalizeName(file)),

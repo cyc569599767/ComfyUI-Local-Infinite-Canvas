@@ -52,6 +52,31 @@ export function findMissingSwapChainModels({ hasLora, hasModel }) {
     return { missing };
 }
 
+/**
+ * 模型清单是否可用。
+ *
+ * 网关刚启动、或 ComfyUI 离线时，loaderOptions() 会返回空/不全 ——
+ * 这时候「一个都找不到」并不意味着用户真的没装，而是**查不到**。
+ * 必须区分这两种情况，否则会给出「缺少 9 个模型」这种严重误导的报错。
+ *
+ * 判定方式：三个 loader 目录里至少要有一个非空列表，才算清单已就绪。
+ */
+export function isModelCatalogReady(catalog) {
+    if (!catalog || typeof catalog !== "object") return false;
+    const keys = [
+        "LoraLoaderModelOnly\u0000lora_name",
+        "UNETLoader\u0000unet_name",
+        "CLIPLoader\u0000clip_name",
+        "VAELoader\u0000vae_name",
+        // 聚合键（loaderOptionsFor 支持无 input 的退化读取）
+        "LoraLoaderModelOnly",
+        "UNETLoader",
+        "CLIPLoader",
+        "VAELoader",
+    ];
+    return keys.some((key) => Array.isArray(catalog[key]) && catalog[key].length > 0);
+}
+
 /** 把缺失项拼成一段可操作的报错文本。 */
 export function missingSwapChainMessage(missing) {
     if (!missing.length) return "";

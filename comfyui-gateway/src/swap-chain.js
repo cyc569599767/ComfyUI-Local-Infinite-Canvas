@@ -18,6 +18,7 @@ const FRAMES = 124;
 const REMAKE_FRAMES_MIN = 90;
 const REMAKE_FRAMES_MAX = 345;
 import { pickRemakeShortEdge } from "./remake-canvas.js";
+import { buildSingleSwapPrompt, defaultTargetBoxes } from "./swap-chain-target.js";
 
 const DEFAULT_SHORT_EDGE = 480;
 const SWAP_SIGMAS = "1.0, 0.990476, 0.965243, 0.923077, 0.8, 0.631579, 0.0";
@@ -107,26 +108,9 @@ function inferMode(intent, explicitMode) {
   return "single_swap";
 }
 
-function targetLabel(box) {
-  if (!box) return "目标人物";
-  return box.x + box.width / 2 >= 0.5 ? "画面右侧人物" : "画面左侧人物";
-}
-
-function defaultBoxes(mode, intent) {
-  if (mode === "double_swap") return [
-    { x: 0.04, y: 0.03, width: 0.45, height: 0.94 },
-    { x: 0.51, y: 0.03, width: 0.45, height: 0.94 },
-  ];
-  if (mode === "edit_clothes" || mode === "edit_light" || mode === "edit_time") return [];
-  const text = String(intent || "");
-  const left = /左/.test(text) && !/右/.test(text);
-  return [left ? { x: 0.04, y: 0.03, width: 0.45, height: 0.94 } : { x: 0.51, y: 0.03, width: 0.45, height: 0.94 }];
-}
-
-function buildSinglePrompt(job) {
-  const label = targetLabel(job.targetBoxes[0]);
-  return `<rwth>, 将${label}替换为参考图中的人物；严格保持参考人物的脸、发型和服装特征，保持另一人物、脸部、姿势、动作、位置、尺度、构图、茶具、背景和光照不变。只替换${label}，其他区域保持原样。`;
-}
+// defaultBoxes / targetLabel / buildSinglePrompt 已移到 swap-chain-target.js：
+// 原实现里 single_swap 默认取右半幅、提示词说「画面右侧人物」，
+// 单人物居中视频会因此换不到人（模型把参考图整个吐出来）。
 
 function buildDoublePrompt(job) {
   return `将画面左侧人物替换为图2中的人物，将画面右侧人物替换为图3中的人物；两人各自保持原姿势、动作、位置、尺度与持杯动作，保持构图、茶具、背景和光照不变；不要串脸、漏换或增加人物。`;
@@ -444,7 +428,7 @@ function imageGraph(job, names) {
   if (single) {
     graph["10"].inputs["images.image_1"] = ["7", 0];
     graph["10"].inputs["images.image_2"] = ["6", 0];
-    graph["10"].inputs.prompt = buildSinglePrompt(job);
+    graph["10"].inputs.prompt = buildSingleSwapPrompt(job.targetBoxes[0]);
   } else if (double) {
     graph["10"].inputs["images.image_1"] = ["6", 0];
     graph["10"].inputs["images.image_2"] = ["7", 0];
@@ -593,7 +577,7 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
     if (selectedMode !== "double_swap" && selectedMode.endsWith("_swap") && !refs.length) throw new SwapChainError("换人需要至少 1 张参考图", { status: 400, code: "missing_reference" });
     const parsed = parseBox(targetSelection);
     const explicitBoxes = Array.isArray(targetSelection?.boxes) ? targetSelection.boxes.map(parseBox).filter(Boolean) : [];
-    const boxes = explicitBoxes.length ? explicitBoxes : parsed ? [parsed] : defaultBoxes(selectedMode, intent);
+    const boxes = explicitBoxes.length ? explicitBoxes : parsed ? [parsed] : defaultTargetBoxes(selectedMode, intent);
     const id = randomId("swap_");
     const dir = jobDir(id);
     await fsp.writeFile(path.join(dir, "source.mp4"), source.buffer);

@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findMissingSwapChainModels, missingSwapChainMessage, SWAP_CHAIN_MODELS } from "../src/swap-chain-models.js";
+import { findMissingSwapChainModels, isModelCatalogReady, missingSwapChainMessage, SWAP_CHAIN_MODELS } from "../src/swap-chain-models.js";
 
 const allPresent = () => true;
 const nonePresent = () => false;
@@ -64,4 +64,31 @@ test("归一化交给调用方：大小写/子目录差异不应误判缺失", (
     });
     const missingLoras = missing.filter((item) => item.file.endsWith(".safetensors"));
     assert.ok(!missingLoras.some((item) => item.file === SWAP_CHAIN_MODELS.lora6.file), "大小写不同应视为已存在");
+});
+
+test("清单未就绪时必须能识别出来（否则会误报全缺）", () => {
+  // 网关刚启动 / ComfyUI 离线：loaderOptions 返回空对象
+  assert.equal(isModelCatalogReady({}), false);
+  assert.equal(isModelCatalogReady(null), false);
+  assert.equal(isModelCatalogReady(undefined), false);
+  // 目录存在但列表都是空的，同样算未就绪
+  assert.equal(isModelCatalogReady({ "LoraLoaderModelOnly\u0000lora_name": [], "UNETLoader\u0000unet_name": [] }), false);
+});
+
+test("清单就绪时返回 true", () => {
+  assert.equal(isModelCatalogReady({ "LoraLoaderModelOnly\u0000lora_name": ["a.safetensors"] }), true);
+  // 聚合键也算
+  assert.equal(isModelCatalogReady({ VAELoader: ["b.safetensors"] }), true);
+});
+
+test("离线场景：清单为空时不应该断言「缺 9 个模型」", () => {
+  // 模拟现场：catalog = {} 导致所有 predicate 返回 false
+  const empty = new Set();
+  const { missing } = findMissingSwapChainModels({
+    hasLora: (f) => empty.has(f),
+    hasModel: (f) => empty.has(f),
+  });
+  // 这就是病态结果：9 个全缺。调用方必须先判 isModelCatalogReady 再下结论。
+  assert.equal(missing.length, 9);
+  assert.equal(isModelCatalogReady({}), false, "调用方据此改成「读不到清单」");
 });
