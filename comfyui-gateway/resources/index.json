@@ -933,9 +933,10 @@
         "viggle_edit_lora",
         "h3_unet_fl2va_pruned_int8_convrot",
         "h3_unet_singularity_ref2va_v13_int8_unpruned",
-        "viggle_remake_node"
+        "viggle_remake_node",
+        "qwen21_oldx_character_swap_lora"
       ],
-      "optionalLabel": "视频编辑 / 低显存替代（可选）",
+      "optionalLabel": "视频编辑 / 低显存替代 / Qwen 换人 LoRA（可选）",
       "workflowDependencies": {
         "video-h3-viggle-swap": [
           "viggle_swap_int8",
