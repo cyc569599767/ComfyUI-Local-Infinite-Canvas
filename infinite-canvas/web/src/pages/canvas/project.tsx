@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Box, ChevronLeft, ChevronRight, Globe, Group, Mountain, Video } from "lucide-react";
+import { Box, ChevronLeft, ChevronRight, Globe, Group, Mountain, Users, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageAngle, requestImageFourView, requestImageQuestion, requestImageTo3D, requestSceneTo3D, requestUpscale } from "@/services/api/image";
 import { requestScene3DPanorama, type Scene3DOffset } from "@/services/api/scene3d-panorama";
+import { requestSwapChain } from "@/services/api/swap-chain-job";
+import type { SwapChainMode } from "@/services/api/swap-chain";
 import { createFreeWorkflowVideoTask, fetchFreeWorkflow, fetchFreeWorkflows, requestFreeWorkflowAudio, requestFreeWorkflowImage, type FreeWorkflowSummary } from "@/services/api/free-workflow";
 import { bindStepProgress, unbindStepProgress } from "@/services/api/step-progress";
 import { generateCanvasAudio, resolveReferenceAudioBlob, storeGeneratedAudio, takeAudioWarnings } from "@/services/api/audio";
@@ -443,6 +445,10 @@ function InfiniteCanvasPage() {
     // 「3D 场景」全景背景：画布上的目标图片卡 + 生成中状态（进度/取消）。
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
     const [panoramaPrompt, setPanoramaPrompt] = useState("");
+    // 角色替换（swap-chain）：源视频卡 + 参考图 + 意图。
+    const [swapChainNodeId, setSwapChainNodeId] = useState<string | null>(null);
+    const [swapChainRefFiles, setSwapChainRefFiles] = useState<File[]>([]);
+    const [swapChainIntent, setSwapChainIntent] = useState("");
     // 主体在展开图里的水平位置，0–1。0.5 = 居中；落在接缝上时左右挪开。
     const [panoramaOffset, setPanoramaOffset] = useState(0.5);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
@@ -3630,6 +3636,96 @@ function InfiniteCanvasPage() {
                 patchChild({ status: NODE_STATUS_ERROR, errorDetails, stepProgress: undefined });
             } finally {
                 if (panoramaAbortRef.current === controller) panoramaAbortRef.current = null;
+            }
+        },
+        [message, t],
+    );
+
+    // 角色替换（swap-chain）：源视频 + 1–2 张参考图 → 逐帧换人 → 出片。
+    // 产物是一张新视频卡（带来源连线），不是覆盖源视频 —— 源片保留下来可反复试。
+    const swapChainAbortRef = useRef<AbortController | null>(null);
+    const runSwapChain = useCallback(
+        async (sourceNode: CanvasNodeData, options: { refs: File[]; intent: string; mode?: SwapChainMode }) => {
+            if (!sourceNode.metadata?.content) {
+                message.warning(t("canvas.nodeToolbar.swapChainNeedVideo"));
+                return;
+            }
+            if (!options.refs.length) {
+                message.warning(t("canvas.nodeToolbar.swapChainNeedRef"));
+                return;
+            }
+            const childId = nanoid();
+            setNodes((prev) => [
+                ...prev,
+                {
+                    id: childId,
+                    type: CanvasNodeType.Video,
+                    title: t("canvas.nodeToolbar.swapChain"),
+                    position: { x: sourceNode.position.x + sourceNode.width + 96, y: sourceNode.position.y },
+                    width: sourceNode.width,
+                    height: sourceNode.height,
+                    metadata: { status: NODE_STATUS_LOADING, prompt: options.intent },
+                },
+            ]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            window.setTimeout(() => focusNodeRef.current?.(childId), 120);
+
+            const controller = new AbortController();
+            swapChainAbortRef.current = controller;
+            const patchChild = (patch: Partial<CanvasNodeData["metadata"]>) =>
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, ...patch } } : item)));
+            try {
+                // 源视频转 File 不能复用 dataUrlToFile：那个函数用 atob 解 base64，
+                // 只适合图片，且 split(",",2) 遇到 base64 里的逗号会截断。
+                // 走 fetch(blob) 对 data: / blob: / http: 三种来源都成立。
+                const sourceUrl = await resolveImageUrl(sourceNode.metadata.storageKey, sourceNode.metadata.content || "");
+                if (!sourceUrl) throw new Error(t("canvas.nodeToolbar.swapChainNeedVideo"));
+                const sourceBlob = await (await fetch(sourceUrl)).blob();
+                const sourceFile = new File([sourceBlob], `${sourceNode.title || sourceNode.id}.mp4`, {
+                    type: sourceNode.metadata.mimeType || sourceBlob.type || "video/mp4",
+                });
+                if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                const result = await requestSwapChain(
+                    { source: sourceFile, refs: options.refs, intent: options.intent, mode: options.mode || "single_swap" },
+                    {
+                        signal: controller.signal,
+                        onProgress: (job, label) => patchChild({ stepProgress: { step: Math.round((job.progress || 0)), total: 100, complete: false }, generationStageLabel: label }),
+                    },
+                );
+                const video = await storeGeneratedVideo({ url: result.videoUrl, mimeType: "video/mp4" } as never).catch(() => null);
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === childId
+                            ? {
+                                  ...item,
+                                  metadata: {
+                                      ...item.metadata,
+                                      ...(video ? { content: video.url, storageKey: video.storageKey, mimeType: video.mimeType, bytes: video.bytes, naturalWidth: video.width, naturalHeight: video.height } : {}),
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                      stepProgress: undefined,
+                                      generationStageLabel: undefined,
+                                      swapChain: { jobId: result.jobId, videoUrl: result.videoUrl, mode: result.mode, intent: options.intent, sourceNodeId: sourceNode.id },
+                                  },
+                              }
+                            : item,
+                    ),
+                );
+                message.success(t("canvas.nodeToolbar.swapChain"));
+            } catch (error) {
+                if (isGenerationCanceled(error)) {
+                    setNodes((prev) => prev.filter((item) => item.id !== childId));
+                    setConnections((prev) => prev.filter((item) => item.toNodeId !== childId));
+                    message.info(t("canvas.nodeToolbar.swapChainInterrupted"));
+                    return;
+                }
+                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                message.error(errorDetails);
+                patchChild({ status: NODE_STATUS_ERROR, errorDetails, stepProgress: undefined, generationStageLabel: undefined });
+            } finally {
+                if (swapChainAbortRef.current === controller) swapChainAbortRef.current = null;
             }
         },
         [message, t],
@@ -8159,6 +8255,7 @@ function InfiniteCanvasPage() {
                     }}
                     onInterpolateVideo={(node) => void interpolateVideoNode(node)}
                     onDraftVideo={(node) => void draftVideoNode(node)}
+                    onSwapChain={(node) => setSwapChainNodeId(node.id)}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onSaveStyle={(node) => void stageNodeStyle(node)}
@@ -8337,6 +8434,74 @@ function InfiniteCanvasPage() {
                                     const node = panoramaNodeId ? nodesRef.current.find((item) => item.id === panoramaNodeId) : null;
                                     setPanoramaNodeId(null);
                                     if (node) void runScene3DPanorama(node, { prompt: panoramaPrompt.trim(), offset: { x: panoramaOffset, y: 0.5 } });
+                                }}
+                            >
+                                {t("canvas.model3d.panoramaStart")}
+                            </Button>
+                        </div>
+                    </div>
+                </Modal>
+
+                {/* 角色替换：源视频卡 + 1–2 张角色参考图 + 可选补充要求。
+                    主体定位交给后端的意图解析（不传 target_selection 时按全图处理）。 */}
+                <Modal
+                    open={Boolean(swapChainNodeId)}
+                    title={t("canvas.nodeToolbar.swapChain")}
+                    onCancel={() => {
+                        setSwapChainNodeId(null);
+                        setSwapChainRefFiles([]);
+                    }}
+                    footer={null}
+                    width={560}
+                    centered
+                >
+                    <div className="flex flex-col gap-4">
+                        <p className="text-xs leading-5 opacity-65">{t("canvas.nodeToolbar.swapChainHowTo")}</p>
+                        <label className="grid gap-1.5 text-xs">
+                            {t("canvas.nodeToolbar.swapChainRefs")}
+                            <input
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                data-swapchain-refs
+                                className="block w-full text-xs file:mr-3 file:rounded-md file:border-0 file:bg-stone-200 file:px-3 file:py-1.5 file:text-xs dark:file:bg-stone-700"
+                                onChange={(event) => {
+                                    const files = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/"));
+                                    // 后端只取前 2 张，这里先截断并告知，避免用户以为全用上了。
+                                    if (files.length > 2) message.warning(t("canvas.nodeToolbar.swapChainRefsLimit"));
+                                    setSwapChainRefFiles(files.slice(0, 2));
+                                }}
+                            />
+                            {swapChainRefFiles.length ? <span className="text-[11px] opacity-60">{swapChainRefFiles.map((file) => file.name).join("、")}</span> : null}
+                        </label>
+                        <label className="grid gap-1.5 text-xs">
+                            {t("canvas.nodeToolbar.swapChainIntentLabel")}
+                            <Input.TextArea
+                                value={swapChainIntent}
+                                data-swapchain-intent
+                                onChange={(event) => setSwapChainIntent(event.target.value)}
+                                placeholder={t("canvas.nodeToolbar.swapChainIntentPlaceholder")}
+                                autoSize={{ minRows: 2, maxRows: 5 }}
+                            />
+                        </label>
+                        <div className="flex justify-end gap-2">
+                            <Button
+                                onClick={() => {
+                                    setSwapChainNodeId(null);
+                                    setSwapChainRefFiles([]);
+                                }}
+                            >
+                                {t("common.cancel")}
+                            </Button>
+                            <Button
+                                type="primary"
+                                icon={<Users className="size-4" />}
+                                onClick={() => {
+                                    const node = swapChainNodeId ? nodesRef.current.find((item) => item.id === swapChainNodeId) : null;
+                                    const refs = swapChainRefFiles;
+                                    setSwapChainNodeId(null);
+                                    setSwapChainRefFiles([]);
+                                    if (node && refs.length) void runSwapChain(node, { refs, intent: swapChainIntent.trim() });
                                 }}
                             >
                                 {t("canvas.model3d.panoramaStart")}

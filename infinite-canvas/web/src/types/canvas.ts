@@ -204,6 +204,10 @@ export type CanvasNodeMetadata = {
     seedFixed?: string;
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
+    /** 角色替换（swap-chain）产物信息，便于回溯任务与源片。 */
+    swapChain?: { jobId: string; videoUrl: string; mode: "single_swap" | "double_swap" | "edit_clothes" | "edit_light" | "edit_time"; intent: string; sourceNodeId: string };
+    /** 生成中显示的阶段短语（如「逐帧换人」），仅 loading 期间有意义。 */
+    generationStageLabel?: string;
     /** 「3D 场景」全景背景的产物来源，便于回溯是哪张图、什么描述生成的。 */
     panoramaSource?: { nodeId: string; prompt: string; offset?: { x: number; y: number } };
     /** 工作台节点承载哪种工具：storyboard = 故事分镜导演台，digital-human = 数字人工作台 V2，video-editor = 视频编辑工作台，novel = 网文卷轴，agent-creation = Agent 无限创作。 */

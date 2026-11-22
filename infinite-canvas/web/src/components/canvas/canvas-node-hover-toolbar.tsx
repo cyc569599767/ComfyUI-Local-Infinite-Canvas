@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Modal, Segmented, Tooltip } from "antd";
-import { ChevronDown, Clapperboard, Cpu, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Maximize2, MessageSquare, Minus, Music2, Palette, Plus, RefreshCw, Settings2, Sparkles, Trash2, Ungroup, Upload, Video, Zap } from "lucide-react";
+import { ChevronDown, Clapperboard, Cpu, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Maximize2, MessageSquare, Minus, Music2, Palette, Plus, RefreshCw, Settings2, Sparkles, Trash2, Ungroup, Upload, Users, Video, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 
@@ -29,6 +29,8 @@ type CanvasNodeHoverToolbarProps = {
     onVideoUpscale: (node: CanvasNodeData, method: CanvasVideoUpscaleMethod) => void;
     onInterpolateVideo: (node: CanvasNodeData) => void;
     onDraftVideo: (node: CanvasNodeData) => void;
+    /** 角色替换（swap-chain）：把视频里的人换成参考图中的角色。 */
+    onSwapChain: (node: CanvasNodeData) => void;
     onDownload: (node: CanvasNodeData) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
     onSaveStyle: (node: CanvasNodeData) => void;
@@ -74,6 +76,7 @@ export function CanvasNodeHoverToolbar({
     onVideoUpscale,
     onInterpolateVideo,
     onDraftVideo,
+    onSwapChain,
     onDownload,
     onSaveAsset,
     onSaveStyle,
@@ -177,6 +180,7 @@ export function CanvasNodeHoverToolbar({
         ...(isVideo ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isAudio ? [{ id: "audioEdit", title: t("canvas.nodeToolbar.audioEditTitle"), label: t("canvas.nodeToolbar.audioEdit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isVideo ? [{ id: "videoDraft", title: t("canvas.nodeToolbar.draftTitle"), label: t("canvas.nodeToolbar.draft"), icon: <Zap className="size-4" />, onClick: () => onDraftVideo(node) }] : []),
+        ...(hasVideo ? [{ id: "swapChain", title: t("canvas.nodeToolbar.swapChainTitle"), label: t("canvas.nodeToolbar.swapChain"), icon: <Users className="size-4" />, onClick: () => onSwapChain(node) }] : []),
         ...(hasVideo ? [{ id: "videoInterpolate", title: t("canvas.nodeToolbar.interpolateTitle"), label: t("canvas.nodeToolbar.interpolate"), icon: <Clapperboard className="size-4" />, onClick: () => onInterpolateVideo(node) }] : []),
         ...(hasVideo ? [{
             id: "videoUpscale",
