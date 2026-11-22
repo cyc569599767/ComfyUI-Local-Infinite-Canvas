@@ -224,13 +224,37 @@ export function pixelCorrelation(a, b) {
 }
 
 /**
+ * 「有没有真的改动」——必须看局部峰值，不能看整图平均。
+ *
+ * 换人本质上是局部改动：脸在整幅画面里只占十几个百分点。
+ * 现场实测（男孩换成年男性，脸已完全换掉）：
+ *   整图平均差异 5.47  → 低于旧阈值 7，被判「没换」
+ *   前 5% 格子均值 54.33、最大单格 185.67 → 改动其实非常显著
+ * 用整图平均衡量，等于把「脸换了」这件事按面积稀释掉，必然误杀。
+ *
+ * 采用两个口径取其一（满足任一即算改过）：
+ *   · 局部峰值 peakDiff 超过阈值（局部改动，如换脸）
+ *   · 整图平均 avgDiff 超过阈值（整片改动，如换装/换场景）
+ * 两者都设下限，避免「只动了一两个像素」也算通过。
+ */
+export function judgeChanged({ peakDiff = 0, avgDiff = 0, thresholds = {} }) {
+    const minPeak = thresholds.minPeak ?? 18;
+    const minAvg = thresholds.minAvg ?? 7;
+    const peakOk = Number(peakDiff) > minPeak;
+    const avgOk = Number(avgDiff) > minAvg;
+    return { changedOk: peakOk || avgOk, peakOk, avgOk };
+}
+
+/**
  * 图像门判定（纯函数）。
  *
  * 整幅框时「框外」是空集合，outsideDiff 恒为 0，必须靠结构相关性兜底；
  * 而结构相关性必须用逐像素口径，否则整图重画也能过（见 pixelCorrelation）。
+ *
+ * targetDiff 传入整图平均，peakDiff 传入局部峰值（前 5% 格子均值）。
+ * 只传 targetDiff 时退回旧行为，便于兼容既有调用。
  */
-export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, structureCorr = 1, fullFrame = false, mode = "", identity = [], thresholds = {} }) {
-    const minChanged = thresholds.minChanged ?? 7;
+export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, peakDiff = null, structureCorr = 1, fullFrame = false, mode = "", identity = [], thresholds = {} }) {
     const minStructure = thresholds.minStructure ?? 0.55;
     const maxOutside = thresholds.maxOutside ?? 40;
     const maxOutsideEdit = thresholds.maxOutsideEdit ?? 55;
@@ -243,12 +267,17 @@ export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, structureCorr 
             : fullFrame
                 ? structureCorr > minStructure
                 : outsideDiff < maxOutside;
-    const changedOk = targetDiff > minChanged;
+    // 有局部峰值就用它判定，否则退回整图平均 + 旧阈值。
+    const changed = peakDiff === null || peakDiff === undefined
+        ? { changedOk: targetDiff > (thresholds.minChanged ?? 7) }
+        : judgeChanged({ peakDiff, avgDiff: targetDiff, thresholds });
     const identityOk = !identity.length || identity.every((item) => item.hit);
     return {
         outsideOk,
-        changedOk,
+        changedOk: changed.changedOk,
+        peakOk: changed.peakOk,
+        avgOk: changed.avgOk,
         identityOk,
-        pass: changedOk && outsideOk && identityOk,
+        pass: changed.changedOk && outsideOk && identityOk,
     };
 }

@@ -254,6 +254,30 @@ function inBox(x, y, box) {
   return x + 0.5 >= box.x * 64 && x + 0.5 < (box.x + box.width) * 64 && y + 0.5 >= box.y * 36 && y + 0.5 < (box.y + box.height) * 36;
 }
 
+/**
+ * 区域内差异的「局部峰值」：取差异最大的前 5% 格子的均值。
+ *
+ * 为什么需要它：换人只改脸，脸在整幅画面里只占十几个百分点。
+ * 现场实测（脸已完全换掉）：整图平均差异 5.47，前 5% 格子均值 54.33。
+ * 用整图平均判定会把改动按面积稀释，必然误杀。
+ */
+function peakRegionDiff(a, b, boxes, ratio = 0.05) {
+  const diffs = [];
+  for (let y = 0; y < 36; y += 1) {
+    for (let x = 0; x < 64; x += 1) {
+      const px = (y * 64 + x) * 3;
+      if (!boxes.some((box) => inBox(x, y, box))) continue;
+      const d = Math.abs(a[px] - b[px]) + Math.abs(a[px + 1] - b[px + 1]) + Math.abs(a[px + 2] - b[px + 2]);
+      diffs.push(d / 3);
+    }
+  }
+  if (!diffs.length) return 0;
+  diffs.sort((left, right) => right - left);
+  const take = Math.max(1, Math.floor(diffs.length * ratio));
+  const head = diffs.slice(0, take);
+  return head.reduce((sum, value) => sum + value, 0) / head.length;
+}
+
 function regionDiff(a, b, boxes, { inside = true } = {}) {
   let sum = 0, count = 0;
   for (let y = 0; y < 36; y += 1) {
@@ -369,10 +393,14 @@ async function evaluateImageGate(job, paintedBuffer, config) {
   // 中间留足余量。
   const fullFrame = boxes.every((box) => isFullFrameBox(box));
   const structureCorr = fullFrame ? pixelCorr(targetGrid, paintedGrid) : 1;
+  // 局部峰值差异：换人只改脸，脸在整幅画面里占比很小，
+  // 用整图平均会把改动稀释到阈值以下（实测整图 5.47 vs 前5%格子 54.33）。
+  const peakDiff = peakRegionDiff(targetGrid, paintedGrid, boxes);
   // 判定细节见 swap-chain-target.js 的 judgeImageGate。
   const verdict = judgeImageGate({
     outsideDiff,
     targetDiff,
+    peakDiff,
     structureCorr,
     fullFrame,
     mode: job.mode,
@@ -386,6 +414,7 @@ async function evaluateImageGate(job, paintedBuffer, config) {
     identityAdvisory: true,
     outsideDiff: Number(outsideDiff.toFixed(2)),
     targetDiff: Number(targetDiff.toFixed(2)),
+    peakDiff: Number(peakDiff.toFixed(2)),
     fullFrame,
     structureCorr: Number(structureCorr.toFixed(4)),
     identity,

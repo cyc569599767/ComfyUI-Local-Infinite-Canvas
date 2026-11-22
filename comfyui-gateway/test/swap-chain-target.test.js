@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, describeTarget, describeTargetEn, FULL_FRAME_BOX, isFullFrameBox, isPromptInQueue, judgeImageGate, judgeVideoGate, pixelCorrelation } from "../src/swap-chain-target.js";
+import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, describeTarget, describeTargetEn, FULL_FRAME_BOX, isFullFrameBox, isPromptInQueue, judgeChanged, judgeImageGate, judgeVideoGate, pixelCorrelation } from "../src/swap-chain-target.js";
 
 test("单人影默认用整幅框，不再赌半幅", () => {
   const boxes = defaultTargetBoxes("single_swap", "把视频里的人换成参考图中的角色");
@@ -278,4 +278,61 @@ test("编辑光效/时间允许整图改变（此时不看结构相关）", () =
   });
   assert.equal(verdict.outsideOk, true);
   assert.equal(verdict.pass, true);
+});
+
+// ── 换人是局部改动，必须用局部峰值判定 ──────────────────────────────
+//
+// 现场：男孩换成年男性，脸已完全换掉，但整图平均差异只有 5.47（旧阈值 7
+// 直接判「没换」）；前 5% 格子均值 54.33、最大单格 185.67。
+// 用整图平均衡量等于把「脸换了」按面积稀释掉。
+
+test("局部峰值足够高就该判改过（现场数据）", () => {
+  const result = judgeChanged({ peakDiff: 54.33, avgDiff: 5.47 });
+  assert.equal(result.changedOk, true, "脸换了但整图平均低，不该误杀");
+  assert.equal(result.peakOk, true);
+  assert.equal(result.avgOk, false);
+});
+
+test("整片改动但局部峰值不高时，整图平均也能救", () => {
+  const result = judgeChanged({ peakDiff: 10, avgDiff: 25 });
+  assert.equal(result.changedOk, true, "比如换装/换场景，差异摊在整图");
+  assert.equal(result.avgOk, true);
+});
+
+test("真没换人必须拦下（放宽后不能失效）", () => {
+  // 原样返回：峰值和平均都接近 0
+  assert.equal(judgeChanged({ peakDiff: 1.2, avgDiff: 0.8 }).changedOk, false);
+  // 只有极小噪点（比如压缩噪点）：峰值也不该过线
+  assert.equal(judgeChanged({ peakDiff: 12, avgDiff: 1.5 }).changedOk, false);
+});
+
+test("图像门整幅框：局部换脸通过，整图重画仍被结构相关拦下", () => {
+  // 情形 A：只换脸 —— 峰值高、结构保持
+  const faceSwap = judgeImageGate({
+    outsideDiff: 0, targetDiff: 5.47, peakDiff: 54.33,
+    structureCorr: 0.82, fullFrame: true, mode: "single_swap",
+    identity: [{ hit: true }],
+  });
+  assert.equal(faceSwap.pass, true, "只换脸应该过");
+
+  // 情形 B：整图重画 —— 峰值高但结构崩了
+  const repaint = judgeImageGate({
+    outsideDiff: 0, targetDiff: 75.84, peakDiff: 90,
+    structureCorr: 0.3658, fullFrame: true, mode: "single_swap",
+    identity: [{ hit: true }],
+  });
+  assert.equal(repaint.pass, false, "整图重画必须拦下");
+});
+
+test("不传 peakDiff 时退回旧行为（兼容既有调用）", () => {
+  const legacy = judgeImageGate({
+    outsideDiff: 0, targetDiff: 20, structureCorr: 0.9,
+    fullFrame: true, mode: "single_swap",
+  });
+  assert.equal(legacy.changedOk, true);
+  const legacyLow = judgeImageGate({
+    outsideDiff: 0, targetDiff: 3, structureCorr: 0.9,
+    fullFrame: true, mode: "single_swap",
+  });
+  assert.equal(legacyLow.changedOk, false);
 });
