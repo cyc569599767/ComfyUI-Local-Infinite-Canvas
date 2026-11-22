@@ -61,6 +61,7 @@ import { assertModelConfigurable, createWorkflowModelOverrideStore, validateWork
 import { missingNodeClasses, workflowAvailabilityProblem } from "./workflow-availability.js";
 import { alignH3Frames, alignViggleFramesUp, capH3ReferenceFrames, framesFromSeconds, extFromMime, jsonError, nowIso, parseSize, randomId, safeFileName, sleep, VIGGLE_MAX_FRAMES, VIGGLE_MIN_FRAMES } from "./util.js";
 import { exceedsH3PixelLimit, h3PixelLimitMessage, snap32 } from "./h3-canvas-limit.js";
+import { findMissingSwapChainModels, missingSwapChainMessage } from "./swap-chain-models.js";
 
 class HttpError extends Error {
   constructor(message, { status = 400, code = "bad_request", details } = {}) {
@@ -3954,6 +3955,33 @@ export async function createGatewayApp(overrides = {}) {
     const source = files.find((file) => file.fieldname === "source_video" || String(file.mimetype || "").startsWith("video/"));
     const refs = files.filter((file) => file !== source && String(file.mimetype || "").startsWith("image/")).slice(0, 2);
     if (!source) throw new HttpError("缺少源视频", { status: 400, code: "missing_source_video" });
+    // 提交前查模型，别等 ComfyUI 回「节点 2/3: Value not in list」——
+    // 那种报错既没说缺哪个文件，也白占一次队列。
+    // ComfyUI 的 loader 选项里常带子目录（如 "Qwen-功能2.1\\xxx.safetensors"），
+    // 统一取 basename 后小写比较，避免因为路径写法差异误判缺失。
+    const normalizeName = (value) => String(value || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
+    const catalog = typeof setup.loaderOptions === "function" ? setup.loaderOptions() || {} : {};
+    const optionsFor = (classType, input) => {
+      const keyed = catalog[`${classType}\u0000${input}`];
+      const list = Array.isArray(keyed) ? keyed : catalog[classType];
+      return new Set((Array.isArray(list) ? list : []).map(normalizeName));
+    };
+    // 按 swap-chain.js 里实际用的 loader 逐个查，粒度比「一个大集合」准。
+    const loraOptions = optionsFor("LoraLoaderModelOnly", "lora_name");
+    const unetOptions = optionsFor("UNETLoader", "unet_name");
+    const clipOptions = optionsFor("CLIPLoader", "clip_name");
+    const vaeOptions = optionsFor("VAELoader", "vae_name");
+    const { missing } = findMissingSwapChainModels({
+      hasLora: (file) => loraOptions.has(normalizeName(file)),
+      hasModel: (file) => unetOptions.has(normalizeName(file)) || clipOptions.has(normalizeName(file)) || vaeOptions.has(normalizeName(file)),
+    });
+    if (missing.length) {
+      throw new HttpError(missingSwapChainMessage(missing), {
+        status: 409,
+        code: "swap_chain_missing_models",
+        details: { missing: missing.map((item) => ({ label: item.label, file: item.file })) },
+      });
+    }
     const job = await swapChain.create({
       source,
       refs,
