@@ -147,7 +147,7 @@ function fitRemakeFrames(sourceFrameCount) {
  * 尺寸是必须的：换人画布要按源片短边选，硬编码 480 会把 1080p 压掉一半细节。
  */
 async function probeSource(file, config) {
-  const empty = { frames: 0, width: 0, height: 0 };
+  const empty = { frames: 0, width: 0, height: 0, hasAudio: false };
   let binary = findBinary("ffprobe", config);
   if (!binary) {
     try {
@@ -162,14 +162,37 @@ async function probeSource(file, config) {
   const width = Number(stream.width) || 0;
   const height = Number(stream.height) || 0;
   const duration = Number(stream.duration) > 0 ? Number(stream.duration) : Number(data.format?.duration);
-  if (Number.isFinite(duration) && duration > 0) return { frames: Math.round(duration * 24), width, height };
+  const hasAudio = await hasAudioStream(file, binary);
+  if (Number.isFinite(duration) && duration > 0) return { frames: Math.round(duration * 24), width, height, hasAudio };
   const rate = String(stream.avg_frame_rate || "0/1").split("/").map(Number);
   const fps = rate[1] ? rate[0] / rate[1] : rate[0];
   const sourceFrames = Number(stream.nb_frames);
   if (Number.isFinite(sourceFrames) && sourceFrames > 0) {
-    return { frames: Number.isFinite(fps) && fps > 0 ? Math.round((sourceFrames * 24) / fps) : Math.round(sourceFrames), width, height };
+    return { frames: Number.isFinite(fps) && fps > 0 ? Math.round((sourceFrames * 24) / fps) : Math.round(sourceFrames), width, height, hasAudio };
   }
-  return { frames: 0, width, height };
+  return { frames: 0, width, height, hasAudio };
+}
+
+/**
+ * 源视频有没有音轨。
+ *
+ * 换脸出片时要把原音轨带回去，但源片没有音轨时绝不能接音频输入：
+ * VHS_VideoCombine 会去源文件抽音频，抽不到就抛
+ * "VHS failed to extract audio from ...: Output file does not contain any stream"，
+ * 整个任务失败。手机录屏、AI 生成的无声素材都很常见，必须容错。
+ */
+async function hasAudioStream(file, ffprobeBinary) {
+  try {
+    const { stdout } = await execFileAsync(
+      ffprobeBinary,
+      ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", file],
+      { timeout: 10000, maxBuffer: 256 * 1024, encoding: "utf8" },
+    );
+    return String(stdout || "").trim().length > 0;
+  } catch {
+    // 探测失败按「没有音轨」处理：宁可出无声成片，也不要整个任务失败。
+    return false;
+  }
 }
 
 async function padSourceToFrames(sourcePath, outputPath, sourceFrameCount, targetFrames, config) {
@@ -530,7 +553,7 @@ async function makeContactSheet(videoBuffer, config, outPath) {
  * 正确做法：视频段照常用原片源（保服装/动作/背景），
  * 出片后再逐帧跑 ReActor，这样脸才真的换掉，衣服也真的不动。
  */
-function reactorVideoSwapGraph(job, names, { fps = 24, prefix }) {
+function reactorVideoSwapGraph(job, names, { fps = 24, prefix, hasAudio = false }) {
   const graph = {
     "1": { class_type: "VHS_LoadVideoPath", inputs: {
       video: names.video,
@@ -566,10 +589,14 @@ function reactorVideoSwapGraph(job, names, { fps = 24, prefix }) {
       format: "video/h264-mp4",
       pingpong: false,
       save_output: true,
-      // 保留原片音轨：换脸不该改变声音
-      audio: ["1", 2],
     } },
   };
+  // 源片有音轨时才接上：换脸不该改变声音。
+  //
+  // 源片没有音轨时绝不能接 —— VHS 会去源文件里抽音频，抽不到就抛
+  // "VHS failed to extract audio from ...: Output file does not contain any stream"，
+  // 整个换脸直接失败。手机录屏/无声素材很常见，必须容错。
+  if (hasAudio) graph["4"].inputs.audio = ["1", 2];
   return graph;
 }
 
@@ -894,7 +921,7 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
     update(job, { stage: "s2_frame", progress: 8 });
     try {
       const source = { buffer: await fsp.readFile(job.paths.source), originalname: "source.mp4" };
-      let probe = { frames: 0, width: 0, height: 0 };
+      let probe = { frames: 0, width: 0, height: 0, hasAudio: false };
       try {
         probe = await probeSource(job.paths.source, config);
       } catch (error) {
@@ -907,6 +934,9 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
       // 1080p 源片用 480 会把细节砍掉一半，720p 用 480 也会损失比例。
       job.shortEdge = pickRemakeShortEdge(probe.width, probe.height);
       job.sourceSize = { width: probe.width, height: probe.height };
+      // 源片是否带音轨：没有就不能给 VHS_VideoCombine 接音频输入，
+      // 否则它会去抽音频、抽不到直接报错，整个换脸失败。
+      job.sourceHasAudio = Boolean(probe.hasAudio);
       // 图像画布按源片朝向算：竖屏素材若按横屏裁，会把人脸裁掉。
       job.imageSize = pickImageCanvas(probe.width, probe.height);
       update(job, {});
@@ -1030,7 +1060,7 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
         const fg = reactorVideoSwapGraph(
           job,
           { video: sourceAbs, ref: swapRef.name },
-          { fps: 24, prefix: `swap-chain/${job.id}/video` },
+          { fps: 24, prefix: `swap-chain/${job.id}/video`, hasAudio: Boolean(job.sourceHasAudio) },
         );
         const { history: swapHistory, promptId: swapPromptId } = await waitPrompt(job, fg, {
           stage: "s5_face_swap",

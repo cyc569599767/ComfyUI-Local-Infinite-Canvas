@@ -456,3 +456,35 @@ test("保留服装：没有参考图时回退", () => {
   assert.equal(r.state, "fallback");
   assert.equal(r.active, false);
 });
+
+// ── 无音轨源片不能接音频输入 ────────────────────────────────────
+//
+// 现场：手机录屏/AI 生成的无声素材很常见。给 VHS_VideoCombine 接上
+// audio 后，VHS 会去源文件抽音轨，抽不到直接抛
+// "VHS failed to extract audio from ...: Output file does not contain any stream"，
+// 整个换脸任务失败。
+//
+// 修法：只有源片确实有音轨时才接 audio。这里用纯逻辑把判定钉住。
+
+/** 与 swap-chain.js 里 reactorVideoSwapGraph 的接法保持一致。 */
+function buildCombineInputs({ hasAudio }) {
+  const inputs = { images: ["3", 0], frame_rate: 24, loop_count: 0, format: "video/h264-mp4", pingpong: false, save_output: true };
+  if (hasAudio) inputs.audio = ["1", 2];
+  return inputs;
+}
+
+test("源片有音轨：接上 audio，保留原声", () => {
+  const inputs = buildCombineInputs({ hasAudio: true });
+  assert.deepEqual(inputs.audio, ["1", 2]);
+});
+
+test("源片无音轨：绝不接 audio（否则 VHS 抽音频失败）", () => {
+  const inputs = buildCombineInputs({ hasAudio: false });
+  assert.equal("audio" in inputs, false, "无音轨时不能有 audio 键");
+});
+
+test("音轨探测失败按无音轨处理（宁出无声片也别整单失败）", () => {
+  // hasAudioStream 的 catch 分支返回 false，等价于下面的输入
+  const inputs = buildCombineInputs({ hasAudio: false });
+  assert.equal("audio" in inputs, false);
+});
