@@ -606,7 +606,14 @@ export async function createGatewayApp(overrides = {}) {
   });
   await freeWorkflows.load();
   // 角色替换长链（上游 swap-chain）：按段生成并逐段接力，产物落 dataDir。
-  const swapChain = createSwapChain({ comfy, config, logger, dataDir: config.dataDir });
+  const swapChain = createSwapChain({
+    comfy,
+    config,
+    logger,
+    dataDir: config.dataDir,
+    // 逐帧换脸要用 VHS_LoadVideoPath，它只认磁盘绝对路径，需要 ComfyUI 根目录。
+    comfyRoot: () => (typeof setup !== "undefined" ? setup?.comfyRootForScan?.() : "") || config.comfyDir || "",
+  });
   swapChain.load();
   // G1：后台轮询 ComfyUI 工作流目录，源文件改了就防抖同步（不阻塞启动）。
   // 定时器 unref，退出时不需要额外清理；sync 失败只记 warn。
@@ -4010,6 +4017,8 @@ export async function createGatewayApp(overrides = {}) {
       mode: req.body?.mode,
       targetSelection: req.body?.target_selection,
       seed: req.body?.seed,
+      // 换人时是否保留原片服装（true=只换脸，服装沿用原片）
+      keepClothes: req.body?.keep_clothes === "true" || req.body?.keep_clothes === true,
     });
     res.status(202).json(job);
   });

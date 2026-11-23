@@ -237,12 +237,23 @@ export function pixelCorrelation(a, b) {
  *   · 整图平均 avgDiff 超过阈值（整片改动，如换装/换场景）
  * 两者都设下限，避免「只动了一两个像素」也算通过。
  */
-export function judgeChanged({ peakDiff = 0, avgDiff = 0, thresholds = {} }) {
+export function judgeChanged({ peakDiff = 0, avgDiff = 0, maxDiff = 0, thresholds = {} }) {
+    // 三个口径，满足其一即算「真的改了」，因为不同路径的改动形态差别很大：
+    //
+    //   · avgDiff  — 整片改动（换装/换场景）：差异摊在全图
+    //   · peakDiff — 局部重绘（Qwen 全图重绘式换脸）：实测前 5% 均值 54 左右
+    //   · maxDiff  — 精细换脸（ReActor/inswapper）：只动五官纹理，
+    //                实测前 5% 均值仅 11.61、但最大单格 23.67、差异>10 的格子占 3%
+    //
+    // 只卡 peakDiff>18 会把 ReActor 的正常换脸全部误杀（脸明明换了，
+    // 只是改动面积小、幅度细）。所以给 maxDiff 留一条下限 18。
     const minPeak = thresholds.minPeak ?? 18;
     const minAvg = thresholds.minAvg ?? 7;
+    const minMax = thresholds.minMax ?? 18;
     const peakOk = Number(peakDiff) > minPeak;
     const avgOk = Number(avgDiff) > minAvg;
-    return { changedOk: peakOk || avgOk, peakOk, avgOk };
+    const maxOk = Number(maxDiff) > minMax;
+    return { changedOk: peakOk || avgOk || maxOk, peakOk, avgOk, maxOk };
 }
 
 /**
@@ -254,7 +265,7 @@ export function judgeChanged({ peakDiff = 0, avgDiff = 0, thresholds = {} }) {
  * targetDiff 传入整图平均，peakDiff 传入局部峰值（前 5% 格子均值）。
  * 只传 targetDiff 时退回旧行为，便于兼容既有调用。
  */
-export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, peakDiff = null, structureCorr = 1, fullFrame = false, mode = "", identity = [], thresholds = {} }) {
+export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, peakDiff = null, maxDiff = null, structureCorr = 1, fullFrame = false, mode = "", identity = [], thresholds = {} }) {
     const minStructure = thresholds.minStructure ?? 0.55;
     const maxOutside = thresholds.maxOutside ?? 40;
     const maxOutsideEdit = thresholds.maxOutsideEdit ?? 55;
@@ -270,13 +281,14 @@ export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, peakDiff = nul
     // 有局部峰值就用它判定，否则退回整图平均 + 旧阈值。
     const changed = peakDiff === null || peakDiff === undefined
         ? { changedOk: targetDiff > (thresholds.minChanged ?? 7) }
-        : judgeChanged({ peakDiff, avgDiff: targetDiff, thresholds });
+        : judgeChanged({ peakDiff, avgDiff: targetDiff, maxDiff: maxDiff ?? 0, thresholds });
     const identityOk = !identity.length || identity.every((item) => item.hit);
     return {
         outsideOk,
         changedOk: changed.changedOk,
         peakOk: changed.peakOk,
         avgOk: changed.avgOk,
+        maxOk: changed.maxOk ?? null,
         identityOk,
         pass: changed.changedOk && outsideOk && identityOk,
     };

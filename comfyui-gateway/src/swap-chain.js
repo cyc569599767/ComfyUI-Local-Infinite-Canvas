@@ -31,6 +31,8 @@ const QWEN_LORA_6 = "p_q_image_2.1_6_steps_v0.2_comfyui_bf16.safetensors";
 const QWEN_OLDX = "oldx-qwen2.1人物替换.safetensors";
 const QWEN_CLIP = "qwen3vl_8b_int8_convrot.safetensors";
 const QWEN_VAE = "qwen_image_2.1_vae_bf16.safetensors";
+// ReActor 的人脸修复模型：先用 none，保持原始质感；装了 codeformer 可换。
+const REACTOR_RESTORE = "none";
 const SWAP_UNET = "viggle_remake_swap_pruned_int8_convrot.safetensors";
 const H3_CLIP = "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors";
 const H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors";
@@ -261,6 +263,25 @@ function inBox(x, y, box) {
  * 现场实测（脸已完全换掉）：整图平均差异 5.47，前 5% 格子均值 54.33。
  * 用整图平均判定会把改动按面积稀释，必然误杀。
  */
+/**
+ * 区域内单格最大差异：给「精细换脸」用的兜底口径。
+ *
+ * ReActor/inswapper 只替换五官纹理，改动面积很小（实测差异>10 的格子仅占 3%），
+ * 但单点幅度明确（最大 23.67）。只看前 5% 均值（11.61）会漏判。
+ */
+function maxRegionDiff(a, b, boxes) {
+  let max = 0;
+  for (let y = 0; y < 36; y += 1) {
+    for (let x = 0; x < 64; x += 1) {
+      if (!boxes.some((box) => inBox(x, y, box))) continue;
+      const px = (y * 64 + x) * 3;
+      const d = (Math.abs(a[px] - b[px]) + Math.abs(a[px + 1] - b[px + 1]) + Math.abs(a[px + 2] - b[px + 2])) / 3;
+      if (d > max) max = d;
+    }
+  }
+  return max;
+}
+
 function peakRegionDiff(a, b, boxes, ratio = 0.05) {
   const diffs = [];
   for (let y = 0; y < 36; y += 1) {
@@ -396,11 +417,15 @@ async function evaluateImageGate(job, paintedBuffer, config) {
   // 局部峰值差异：换人只改脸，脸在整幅画面里占比很小，
   // 用整图平均会把改动稀释到阈值以下（实测整图 5.47 vs 前5%格子 54.33）。
   const peakDiff = peakRegionDiff(targetGrid, paintedGrid, boxes);
+  // 最大单格差异：ReActor 这类精细换脸只改五官纹理，改动面积小（差异>10 的
+  // 格子仅占 3%），但单点幅度明确 —— 实测最大 23.67，而峰值均值只有 11.61。
+  const maxDiff = maxRegionDiff(targetGrid, paintedGrid, boxes);
   // 判定细节见 swap-chain-target.js 的 judgeImageGate。
   const verdict = judgeImageGate({
     outsideDiff,
     targetDiff,
     peakDiff,
+    maxDiff,
     structureCorr,
     fullFrame,
     mode: job.mode,
@@ -415,11 +440,15 @@ async function evaluateImageGate(job, paintedBuffer, config) {
     outsideDiff: Number(outsideDiff.toFixed(2)),
     targetDiff: Number(targetDiff.toFixed(2)),
     peakDiff: Number(peakDiff.toFixed(2)),
+    maxDiff: Number(maxDiff.toFixed(2)),
     fullFrame,
     structureCorr: Number(structureCorr.toFixed(4)),
     identity,
     outsideOk,
     changedOk,
+    peakOk: verdict.peakOk ?? null,
+    avgOk: verdict.avgOk ?? null,
+    maxOk: verdict.maxOk ?? null,
     identityOk,
     negativeControl: { name: "unchanged-target", targetDiff: Number(negativeDiff.toFixed(2)), wouldPass: negativeDiff > 7 },
     pass,
@@ -447,10 +476,14 @@ async function evaluateVideoGate(job, videoBuffer, config) {
       const srcGrid = await rgbGrid(sourceFrames[i].buffer, config);
       const targetDiff = regionDiff(srcGrid, outGrid, boxes, { inside: true });
       const outsideDiff = regionDiff(srcGrid, outGrid, boxes, { inside: false });
+      // 逐帧换脸（ReActor）只改五官，改动面积小、整图平均会被稀释。
+      // 所以额外记录局部峰值与单格最大值，供 keep_clothes 模式判定用。
+      const peakDiff = peakRegionDiff(srcGrid, outGrid, boxes);
+      const maxDiff = maxRegionDiff(srcGrid, outGrid, boxes);
       let luma = 0;
       for (let p = 0; p < outGrid.length; p += 3) luma += outGrid[p] * 0.299 + outGrid[p + 1] * 0.587 + outGrid[p + 2] * 0.114;
       luma /= outGrid.length / 3;
-      readings.push({ frame: frames[i], targetDiff: Number(targetDiff.toFixed(2)), outsideDiff: Number(outsideDiff.toFixed(2)), luma: Number(luma.toFixed(1)) });
+      readings.push({ frame: frames[i], targetDiff: Number(targetDiff.toFixed(2)), peakDiff: Number(peakDiff.toFixed(2)), maxDiff: Number(maxDiff.toFixed(2)), outsideDiff: Number(outsideDiff.toFixed(2)), luma: Number(luma.toFixed(1)) });
     }
     // 判定细节（含「第 0 帧不参与门槛」的理由）见 swap-chain-target.js 的 judgeVideoGate。
     const verdict = judgeVideoGate({ readings, mode: job.mode });
@@ -484,6 +517,60 @@ async function makeContactSheet(videoBuffer, config, outPath) {
   } finally {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * 逐帧换脸视频：把 ReActor 应用在整段视频的每一帧上。
+ *
+ * 为什么不能只换图像段的那一帧：
+ * 实测 keep_clothes 只在图像段换脸时，painted 的脸部改动只有纹理级
+ * （maxDiff 23.67，差异>10 的格子仅 3%），视频段的 H3 Remake 认为它
+ * 与原片几乎一致，于是把脸"还原"成原来的样子 —— 出片里人脸根本没换。
+ *
+ * 正确做法：视频段照常用原片源（保服装/动作/背景），
+ * 出片后再逐帧跑 ReActor，这样脸才真的换掉，衣服也真的不动。
+ */
+function reactorVideoSwapGraph(job, names, { fps = 24, prefix }) {
+  const graph = {
+    "1": { class_type: "VHS_LoadVideoPath", inputs: {
+      video: names.video,
+      force_rate: 0,
+      custom_width: 0,
+      custom_height: 0,
+      frame_load_cap: 0,
+      skip_first_frames: 0,
+      select_every_nth: 1,
+      format: "AnimateDiff",
+    } },
+    "2": { class_type: "LoadImage", inputs: { image: names.ref } },
+    "3": { class_type: "ReActorFaceSwap", inputs: {
+      enabled: true,
+      input_image: ["1", 0],
+      source_image: ["2", 0],
+      swap_model: "inswapper_128.onnx",
+      facedetection: "retinaface_resnet50",
+      face_restore_model: REACTOR_RESTORE,
+      face_restore_visibility: 1,
+      codeformer_weight: 0.5,
+      detect_gender_input: "no",
+      detect_gender_source: "no",
+      input_faces_index: "0",
+      source_faces_index: "0",
+      console_log_level: 0,
+    } },
+    "4": { class_type: "VHS_VideoCombine", inputs: {
+      images: ["3", 0],
+      frame_rate: fps,
+      loop_count: 0,
+      filename_prefix: prefix,
+      format: "video/h264-mp4",
+      pingpong: false,
+      save_output: true,
+      // 保留原片音轨：换脸不该改变声音
+      audio: ["1", 2],
+    } },
+  };
+  return graph;
 }
 
 function imageGraph(job, names) {
@@ -580,7 +667,7 @@ function editVideoGraph(job, names) {
   };
 }
 
-export function createSwapChain({ comfy, config, logger, dataDir }) {
+export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = () => "" }) {
   const root = path.join(dataDir, "swap-chain");
   const storeFile = path.join(dataDir, "swap-chain-jobs.json");
   fs.mkdirSync(root, { recursive: true });
@@ -624,6 +711,9 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       intent: job.intent,
       targetBoxes: job.targetBoxes,
       seed: job.seed,
+      // 是否保留了原片服装（true=只换脸，ReActor 路径）
+      keepClothes: Boolean(job.keepClothes),
+      keepClothesSkipped: job.keepClothesSkipped || null,
       sourceFrameCount: job.sourceFrameCount ?? null,
       frames: job.frames ?? null,
       // 源片真实尺寸与选定的画布短边：前端可据此提前告知「会输出多大」，
@@ -655,7 +745,7 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
     save();
   }
 
-  async function create({ source, refs = [], intent = "", mode, targetSelection, seed }) {
+  async function create({ source, refs = [], intent = "", mode, targetSelection, seed, keepClothes = false }) {
     load();
     if (!source?.buffer?.length) throw new SwapChainError("缺少源视频", { status: 400, code: "missing_source_video" });
     const selectedMode = inferMode(intent, mode);
@@ -678,6 +768,8 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
     const job = {
       id, mode: selectedMode, intent: String(intent || "").trim(), targetBoxes: boxes,
       seed: Number(seed) || DEFAULT_SEED,
+      // 是否保留原片服装。默认 false（沿用旧行为：参考图的长相与服装一起带过来）。
+      keepClothes: Boolean(keepClothes),
       status: "queued", stage: "s1_intent", progress: 0,
       refs: refs.map((item, index) => ({ name: refNames[index], filename: item.originalname || refNames[index], mimeType: item.mimetype || "image/png" })),
       refNames, paths: { dir, source: path.join(dir, "source.mp4"), target: path.join(dir, "target.png"), masked: path.join(dir, "target-masked.png"), painted: path.join(dir, "painted.png"), video: path.join(dir, "video.mp4"), contact: path.join(dir, "contact.png"), refs: refPaths },
@@ -851,10 +943,20 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
       for (let i = 0; i < job.paths.refs.length; i += 1) {
         refImages.push(await upload(await fsp.readFile(job.paths.refs[i]), `swap-ref-${i}.png`, "image/png"));
       }
-      await prepareStage(job, "s3_image");
-      update(job, { stage: "s3_image", progress: 20 });
       let painted = null;
       let imageGate = null;
+      // keep_clothes=true：只换脸不动服装。
+      // 只有单人换脸支持这种模式（双人/编辑类仍走 Qwen 全图重绘）。
+      const keepClothes = Boolean(job.keepClothes) && job.mode === "single_swap" && refImages.length > 0;
+      if (job.keepClothes && !keepClothes) {
+        job.keepClothesSkipped = "ReActor 只在单人换脸时可用，本次已回退到整体重绘";
+      }
+      // keep_clothes 模式下整段图像制备都不需要：
+      // 最终画面由「源视频逐帧换脸」直接产出，先在这里生成一张 painted 只会在
+      // 磁盘上留一个用不上的中间文件，还白烧一次图像生成。
+      if (!keepClothes) {
+      await prepareStage(job, "s3_image");
+      update(job, { stage: "s3_image", progress: 20 });
       for (let attempt = 0; attempt <= MAX_IMAGE_RETRIES; attempt += 1) {
         const graph = imageGraph(job, { target: targetImage.name, refs: refImages.map((item) => item.name) });
         if (attempt > 0) {
@@ -875,9 +977,13 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
         if (imageGate.pass) break;
       }
       if (!imageGate?.pass) throw new SwapChainError("图像门未通过：目标未命中/身份或背景保持不足", { status: 422, code: "image_gate_failed", details: imageGate });
-      await prepareStage(job, "s5_video");
-      update(job, { stage: "s5_video", progress: 45 });
-      const paintedImage = await upload(painted, "swap-painted.png", "image/png");
+      }
+      let paintedImage = null;
+      if (!keepClothes) {
+        await prepareStage(job, "s5_video");
+        update(job, { stage: "s5_video", progress: 45 });
+        paintedImage = await upload(painted, "swap-painted.png", "image/png");
+      }
       let videoSourcePath = job.paths.source;
       if (job.sourceFrameCount > 0 && job.frames > job.sourceFrameCount) {
         try {
@@ -889,30 +995,105 @@ export function createSwapChain({ comfy, config, logger, dataDir }) {
         }
       }
       const sourceVideo = await upload(await fsp.readFile(videoSourcePath), "swap-source.mp4", "video/mp4");
+      // keep_clothes 模式：H3 段改为「用原片自身体做参考」，只做轻度重建来保动作
+      // 与服装；真正换脸放到出片之后逐帧跑 ReActor。
+      //
+      // 原因：ReActor 在单帧上的改动是纹理级的（maxDiff 23.67、差异>10 的格子仅
+      // 3%），H3 Remake 面对这种细微变化会认为「和原片一样」，直接把脸还原回去，
+      // 实测出片里人脸根本没换。所以脸必须在最终画面上换。
       let video = null;
       let videoGate = null;
-      for (let attempt = 0; attempt <= MAX_VIDEO_RETRIES; attempt += 1) {
-        const graph = job.mode.startsWith("edit_")
-          ? editVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name })
-          : swapVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name });
-        if (attempt > 0) graph[Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise")]?.inputs && (graph[Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise")].inputs.seed = job.seed + attempt);
-        // 视频阶段超时要给足：H3 换人实测一次约 17 分钟（175 帧 736x1280），
-        // 而 ComfyUI 刚重启时还要重新加载权重，首次更慢。原来设 20 分钟只有
-        // 3 分钟余量，正常生成会被误杀成「执行超时」，白烧一次 17 分钟。
-        const { history, promptId } = await waitPrompt(job, graph, { stage: `s5_video_${attempt}`, timeoutMs: 45 * 60 * 1000 });
-        const file = outputFile(history);
-        if (!file) throw new SwapChainError("视频生成没有输出", { status: 502, code: "video_no_output" });
-        const view = await comfy.view(file);
-        video = view.buffer;
+
+      // keep_clothes 模式：完全跳过 H3 视频重绘，直接在源视频上逐帧换脸。
+      //
+      // 为什么不能先让 H3 生成再换脸：H3 的参考图若用原片自身，等于让它照着
+      // 原片重画一遍 —— 实测产出与原片逐帧相关 0.9997（几乎是原样复刻），
+      // 白烧约 5 分钟，还会多产出一份和原片几乎一样的中间文件。
+      // 既然「服装/动作/背景全都不动」，就根本不需要重绘，直接换脸。
+      if (keepClothes) {
+        await prepareStage(job, "s5_face_swap");
+        update(job, { stage: "s5_face_swap", progress: 45 });
+        const swapRef = await upload(await fsp.readFile(job.paths.refs[0]), `face-swap-ref-${job.id}.png`, "image/png");
+        // VHS_LoadVideoPath 只认磁盘绝对路径：直接用源视频本地路径，不用上传。
+        const sourceAbs = path.resolve(job.paths.source);
+        if (!fs.existsSync(sourceAbs)) {
+          throw new SwapChainError(`找不到源视频：${sourceAbs}`, { status: 500, code: "face_swap_source_missing" });
+        }
+        const fg = reactorVideoSwapGraph(
+          job,
+          { video: sourceAbs, ref: swapRef.name },
+          { fps: 24, prefix: `swap-chain/${job.id}/video` },
+        );
+        const { history: swapHistory, promptId: swapPromptId } = await waitPrompt(job, fg, {
+          stage: "s5_face_swap",
+          timeoutMs: 30 * 60 * 1000,
+        });
+        const swapFile = outputFile(swapHistory);
+        if (!swapFile) throw new SwapChainError("逐帧换脸没有输出", { status: 502, code: "face_swap_no_output" });
+        const swapped = await comfy.view(swapFile);
+        video = swapped.buffer;
         await fsp.writeFile(job.paths.video, video);
         await makeContactSheet(video, config, job.paths.contact).catch(() => {});
         update(job, { stage: "s6_video_gate", progress: 80 });
         videoGate = await evaluateVideoGate(job, video, config);
-        job.gates.video = { ...videoGate, attempt, promptId };
+        job.gates.video = { ...videoGate, promptId: swapPromptId, mode: "reactor_frame_swap" };
+        // 逐帧换脸的改动幅度天然比重绘小：实测 targetMin 3.81，
+        // 而 H3 重绘式换人在 7~50 区间。所以只校验「画面没坏」+「确实动过」。
+        // 用局部峰值判定「脸是否真的换了」：逐帧换脸只动五官，
+        // 整图平均（targetMin）必然被稀释。实测 face 区域峰值可达 20+，
+        // 而整图平均只有 1.96。
+        const facePeakMin = Math.min(...(videoGate.samples || []).map((item) => item.peakDiff ?? 0));
+        const faceMaxMin = Math.min(...(videoGate.samples || []).map((item) => item.maxDiff ?? 0));
+        const faceSwapApplied = facePeakMin >= 6 || faceMaxMin >= 15;
+        job.gates.faceSwap = {
+          applied: faceSwapApplied,
+          targetMin: videoGate.targetMin,
+          facePeakMin,
+          faceMaxMin,
+          backgroundOk: videoGate.backgroundOk,
+          blackOk: videoGate.blackOk,
+          skippedVideoRedraw: true,
+        };
         update(job, {});
-        if (videoGate.pass) break;
+        if (videoGate.backgroundOk === false || videoGate.blackOk === false) {
+          throw new SwapChainError("逐帧换脸后画面异常：背景或亮度不合格", { status: 422, code: "video_gate_failed", details: videoGate });
+        }
+        if (!faceSwapApplied) {
+          throw new SwapChainError(
+            `逐帧换脸未生效：人脸区域变化过小（峰值 ${facePeakMin} / 单格最大 ${faceMaxMin}），可能画面里没有人脸`,
+            { status: 422, code: "face_swap_not_applied", details: videoGate },
+          );
+        }
+        logger?.info?.(`swap-chain ${job.id} keep_clothes：跳过 H3 重绘，直接逐帧换脸完成`);
+      } else {
+        for (let attempt = 0; attempt <= MAX_VIDEO_RETRIES; attempt += 1) {
+          const graph = job.mode.startsWith("edit_")
+            ? editVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name })
+            : swapVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name });
+          if (attempt > 0) {
+            const noiseId = Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise");
+            if (noiseId) graph[noiseId].inputs.seed = job.seed + attempt;
+          }
+          // 视频阶段超时要给足：H3 换人实测一次约 17 分钟（175 帧 736x1280），
+          // 而 ComfyUI 刚重启时还要重新加载权重，首次更慢。原来设 20 分钟只有
+          // 3 分钟余量，正常生成会被误杀成「执行超时」，白烧一次 17 分钟。
+          const { history, promptId } = await waitPrompt(job, graph, { stage: `s5_video_${attempt}`, timeoutMs: 45 * 60 * 1000 });
+          const file = outputFile(history);
+          if (!file) throw new SwapChainError("视频生成没有输出", { status: 502, code: "video_no_output" });
+          const view = await comfy.view(file);
+          video = view.buffer;
+          await fsp.writeFile(job.paths.video, video);
+          await makeContactSheet(video, config, job.paths.contact).catch(() => {});
+          update(job, { stage: "s6_video_gate", progress: 80 });
+          videoGate = await evaluateVideoGate(job, video, config);
+          job.gates.video = { ...videoGate, attempt, promptId };
+          update(job, {});
+          if (videoGate.pass) break;
+        }
+        if (!videoGate?.pass) {
+          throw new SwapChainError("视频门未通过：身份未持续/背景或亮度异常", { status: 422, code: "video_gate_failed", details: videoGate });
+        }
       }
-      if (!videoGate?.pass) throw new SwapChainError("视频门未通过：身份未持续/背景或亮度异常", { status: 422, code: "video_gate_failed", details: videoGate });
       if (job.sourceFrameCount > 0 && job.frames > job.sourceFrameCount) {
         const trimmedPath = `${job.paths.video}.trim.mp4`;
         await trimToSourceDuration(job.paths.video, trimmedPath, job.sourceFrameCount / 24, config);

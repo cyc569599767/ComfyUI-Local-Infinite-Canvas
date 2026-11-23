@@ -336,3 +336,82 @@ test("不传 peakDiff 时退回旧行为（兼容既有调用）", () => {
   });
   assert.equal(legacyLow.changedOk, false);
 });
+
+// ── 精细换脸（ReActor）要能被识别为「真的改了」 ────────────────────
+//
+// 现场：男性换女性，脸确实换了，但改动集中在 3% 的区域，
+// 前 5% 均值只有 11.61（低于 18 的峰值阈值），最大单格 23.67。
+// 只卡峰值均值会把正常换脸误杀。
+
+test("精细换脸靠最大单格差异通过（现场数据）", () => {
+  const r = judgeChanged({ peakDiff: 11.61, avgDiff: 1.3, maxDiff: 23.67 });
+  assert.equal(r.changedOk, true, "脸换了，改动面积小但幅度明确，不该误杀");
+  assert.equal(r.maxOk, true);
+  assert.equal(r.peakOk, false);
+});
+
+test("精细换脸阈值放宽后，真没换仍然拦下", () => {
+  // 原样返回
+  assert.equal(judgeChanged({ peakDiff: 1, avgDiff: 0.5, maxDiff: 3 }).changedOk, false);
+  // 轻微压缩噪点：单格最大也不该过 18
+  assert.equal(judgeChanged({ peakDiff: 9, avgDiff: 1.2, maxDiff: 15 }).changedOk, false);
+});
+
+test("图像门：ReActor 换脸（背景全保留）应通过", () => {
+  const r = judgeImageGate({
+    outsideDiff: 0, targetDiff: 1.3, peakDiff: 11.61, maxDiff: 23.67,
+    structureCorr: 0.9985, fullFrame: true, mode: "single_swap",
+    identity: [{ hit: true }],
+  });
+  assert.equal(r.pass, true, "只换脸、背景结构完全保留，应放行");
+  assert.equal(r.maxOk, true);
+});
+
+test("图像门：整图重画仍被结构相关拦下（不能因为放宽而失效）", () => {
+  const r = judgeImageGate({
+    outsideDiff: 0, targetDiff: 75.84, peakDiff: 90, maxDiff: 200,
+    structureCorr: 0.3658, fullFrame: true, mode: "single_swap",
+    identity: [{ hit: true }],
+  });
+  assert.equal(r.pass, false, "结构崩了必须拦下");
+});
+
+// ── 逐帧换脸（ReActor）视频门：整图平均会被稀释 ──────────────────
+//
+// 现场实测（124 帧逐帧换脸，脸全部换成参考人物）：
+//   整图平均 targetDiff 1.86~2.38  ← 旧门槛 6，直接误杀
+//   局部峰值 peakDiff  11.4~13.03
+//   单格最大 maxDiff   20.33~24.33
+// 换脸只动五官，改动面积小，整图平均必然被稀释。
+
+test("逐帧换脸的峰值口径能识别出「真的换了」（现场数据）", () => {
+  const samples = [
+    { peakDiff: 11.4, maxDiff: 23.67, targetDiff: 1.86 },
+    { peakDiff: 12.28, maxDiff: 24.33, targetDiff: 1.98 },
+    { peakDiff: 12.61, maxDiff: 24.0, targetDiff: 2.12 },
+    { peakDiff: 13.03, maxDiff: 20.33, targetDiff: 2.38 },
+  ];
+  const facePeakMin = Math.min(...samples.map((s) => s.peakDiff));
+  const faceMaxMin = Math.min(...samples.map((s) => s.maxDiff));
+  // 与 swap-chain.js 里的判定保持一致
+  assert.equal(facePeakMin >= 6 || faceMaxMin >= 15, true, "峰值 11+ 说明脸确实换了");
+  // 整图平均口径会误判
+  assert.equal(Math.min(...samples.map((s) => s.targetDiff)) >= 6, false, "整图平均只有 1.86，旧门槛必然误杀");
+});
+
+test("逐帧换脸：画面没换时必须拦下", () => {
+  const still = [
+    { peakDiff: 1.2, maxDiff: 3.5, targetDiff: 0.4 },
+    { peakDiff: 1.8, maxDiff: 4.1, targetDiff: 0.6 },
+  ];
+  const facePeakMin = Math.min(...still.map((s) => s.peakDiff));
+  const faceMaxMin = Math.min(...still.map((s) => s.maxDiff));
+  assert.equal(facePeakMin >= 6 || faceMaxMin >= 15, false, "没换脸不能通过");
+});
+
+test("逐帧换脸：只有压缩噪点时拦下", () => {
+  const noise = [{ peakDiff: 5.5, maxDiff: 14.0, targetDiff: 1.1 }];
+  const facePeakMin = Math.min(...noise.map((s) => s.peakDiff));
+  const faceMaxMin = Math.min(...noise.map((s) => s.maxDiff));
+  assert.equal(facePeakMin >= 6 || faceMaxMin >= 15, false, "噪点峰值 5.5、单格 14 都不过线");
+});
