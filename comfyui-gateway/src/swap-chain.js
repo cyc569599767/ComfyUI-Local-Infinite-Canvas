@@ -305,6 +305,38 @@ function maxRegionDiff(a, b, boxes) {
   return max;
 }
 
+/**
+ * 区域内「剧烈改动的面积占比」：差异 > threshold 的格子占区域内多少。
+ *
+ * 为什么需要它：视频门的 targetMin（框内平均差异）方向是错的。
+ * 实测 5 个样本（都是不保留服装的 H3 重绘）：
+ *
+ *   样本            实际质量   中间帧平均差异   >25 格子占比
+ *   钢铁侠 A/B/C     崩坏        31~56           53.8% / 63.8% / 54.3%
+ *   撑伞男（通过）    良好        7.9~9.4          9.2%
+ *   撑伞女（曾被误杀）良好        4.6~5.8          4.3%
+ *
+ * 崩坏的样本改动大、分数高，反而「通过」；只换脸的好样本改动小、分数低，
+ * 反而被拦 —— 用平均差异做判据完全反了。两份崩坏视频（0d35 与 76628068）
+ * 内容几乎相同，却一个被拦一个放行，就是这么来的。
+ *
+ * 面积占比则区分得很干净：崩坏 ≥53.8%，良好 ≤9.2%，中间是巨大的空隙。
+ */
+function violentAreaRatio(a, b, boxes, threshold = 25) {
+  let total = 0;
+  let violent = 0;
+  for (let y = 0; y < 36; y += 1) {
+    for (let x = 0; x < 64; x += 1) {
+      if (!boxes.some((box) => inBox(x, y, box))) continue;
+      total += 1;
+      const px = (y * 64 + x) * 3;
+      const d = (Math.abs(a[px] - b[px]) + Math.abs(a[px + 1] - b[px + 1]) + Math.abs(a[px + 2] - b[px + 2])) / 3;
+      if (d > threshold) violent += 1;
+    }
+  }
+  return total ? violent / total : 0;
+}
+
 function peakRegionDiff(a, b, boxes, ratio = 0.05) {
   const diffs = [];
   for (let y = 0; y < 36; y += 1) {
@@ -503,10 +535,12 @@ async function evaluateVideoGate(job, videoBuffer, config) {
       // 所以额外记录局部峰值与单格最大值，供 keep_clothes 模式判定用。
       const peakDiff = peakRegionDiff(srcGrid, outGrid, boxes);
       const maxDiff = maxRegionDiff(srcGrid, outGrid, boxes);
+      // 剧烈改动面积占比：用于识别「整片被重绘成别的东西」这类崩坏。
+      const violentArea = violentAreaRatio(srcGrid, outGrid, boxes);
       let luma = 0;
       for (let p = 0; p < outGrid.length; p += 3) luma += outGrid[p] * 0.299 + outGrid[p + 1] * 0.587 + outGrid[p + 2] * 0.114;
       luma /= outGrid.length / 3;
-      readings.push({ frame: frames[i], targetDiff: Number(targetDiff.toFixed(2)), peakDiff: Number(peakDiff.toFixed(2)), maxDiff: Number(maxDiff.toFixed(2)), outsideDiff: Number(outsideDiff.toFixed(2)), luma: Number(luma.toFixed(1)) });
+      readings.push({ frame: frames[i], targetDiff: Number(targetDiff.toFixed(2)), peakDiff: Number(peakDiff.toFixed(2)), maxDiff: Number(maxDiff.toFixed(2)), violentArea: Number((violentArea * 100).toFixed(1)), outsideDiff: Number(outsideDiff.toFixed(2)), luma: Number(luma.toFixed(1)) });
     }
     // 判定细节（含「第 0 帧不参与门槛」的理由）见 swap-chain-target.js 的 judgeVideoGate。
     const verdict = judgeVideoGate({ readings, mode: job.mode });
@@ -519,7 +553,11 @@ async function evaluateVideoGate(job, videoBuffer, config) {
       outsideMax: verdict.outsideMax,
       backgroundMax: verdict.backgroundMax,
       lumaMin: verdict.lumaMin,
+      // 崩坏判据（主）：框内剧烈改动面积最大占比。
+      // 没有它前端/日志就看不出「为什么被判崩坏」。
+      violentAreaMax: verdict.violentAreaMax,
       targetOk: verdict.targetOk,
+      structureOk: verdict.structureOk,
       backgroundOk: verdict.backgroundOk,
       blackOk: verdict.blackOk,
       negativeControl: { name: "unchanged-source", targetDiff: unchanged.targetDiff, wouldPass: unchanged.targetDiff > 6 },
@@ -1096,13 +1134,22 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
           targetMin: videoGate.targetMin,
           facePeakMin,
           faceMaxMin,
+          violentAreaMax: videoGate.violentAreaMax,
+          structureOk: videoGate.structureOk,
           backgroundOk: videoGate.backgroundOk,
           blackOk: videoGate.blackOk,
           skippedVideoRedraw: true,
         };
         update(job, {});
+        // 逐帧换脸也可能把画面改崩（校验同 H3 路径：剧烈改动面积过大就判崩）。
         if (videoGate.backgroundOk === false || videoGate.blackOk === false) {
           throw new SwapChainError("逐帧换脸后画面异常：背景或亮度不合格", { status: 422, code: "video_gate_failed", details: videoGate });
+        }
+        if (videoGate.structureOk === false) {
+          throw new SwapChainError(
+            `逐帧换脸后画面崩坏：剧烈改动面积 ${videoGate.violentAreaMax}% 过大`,
+            { status: 422, code: "video_structure_broken", details: videoGate },
+          );
         }
         if (!faceSwapApplied) {
           throw new SwapChainError(

@@ -533,3 +533,64 @@ test("三条出片路径的音频接法一致（逐帧换脸 / 换人重绘 / �
     assert.notEqual(build(true).audio, undefined);
   }
 });
+
+// ── 视频门：改看「剧烈改动面积」，不再用平均差异当质量闸门 ──────────
+//
+// 现场 5 个真实样本（都是不保留服装的 H3 重绘）：
+//
+//   样本          实际质量  中间帧平均差异   剧烈改动面积(>25)
+//   钢铁侠A        崩坏       30.5~56.2       63.8%
+//   钢铁侠B        崩坏       31.9~52.0       53.8%
+//   钢铁侠C        崩坏       31.9~53.8       54.3%   ← 旧判定误放
+//   撑伞男         良好        7.9~9.4         9.2%
+//   撑伞女         良好        4.6~5.8         4.3%   ← 旧判定误杀
+//
+// 平均差异方向是反的：崩坏改动大分数高反而过，好换人改动小分数低反被拦。
+// 更直接的证据：钢铁侠B(3.82) 与 钢铁侠C(32.31) 内容几乎相同，
+// 一个被拦一个放行 —— 说明旧阈值根本没在判别质量。
+
+const reading = ({ frame, targetDiff, violentArea, outsideDiff = 0, luma = 80 }) => ({ frame, targetDiff, violentArea, outsideDiff, luma });
+
+test("视频门：正常换人（只改脸、面积小）应通过", () => {
+  const v = judgeVideoGate({
+    readings: [reading({ frame: 0, targetDiff: 4.72, violentArea: 4.1 }), reading({ frame: 32, targetDiff: 5.48, violentArea: 4.3 }), reading({ frame: 64, targetDiff: 5.43, violentArea: 4.0 }), reading({ frame: 96, targetDiff: 6.65, violentArea: 4.2 })],
+    mode: "single_swap",
+  });
+  assert.equal(v.pass, true, "撑伞女：脸换了、面积仅 4.3%，不该误杀");
+  assert.equal(v.structureOk, true);
+});
+
+test("视频门：整片被重绘成盔甲（面积过半）必须拦下", () => {
+  const v = judgeVideoGate({
+    readings: [reading({ frame: 0, targetDiff: 3.84, violentArea: 3.9 }), reading({ frame: 32, targetDiff: 32.31, violentArea: 54.3 }), reading({ frame: 64, targetDiff: 48.1, violentArea: 54.0 }), reading({ frame: 96, targetDiff: 53.91, violentArea: 52.0 })],
+    mode: "single_swap",
+  });
+  assert.equal(v.pass, false, "钢铁侠C：平均差异 32 很高，但那是崩坏，旧判定放行了");
+  assert.equal(v.structureOk, false);
+  assert.ok(v.violentAreaMax > 50);
+});
+
+test("视频门：三份崩坏样本全部拦下（含旧判定误放的那份）", () => {
+  const samples = [
+    [{ 0: 4.0, 32: 30.85, 64: 49.09, 96: 56.26 }, { 0: 3.5, 32: 63.8, 64: 60, 96: 58 }],
+    [{ 0: 3.82, 32: 32.28, 64: 48.09, 96: 52.07 }, { 0: 3.2, 32: 53.8, 64: 52, 96: 50 }],
+    [{ 0: 3.84, 32: 32.31, 64: 48.1, 96: 53.91 }, { 0: 3.9, 32: 54.3, 64: 54.0, 96: 52.0 }],
+  ];
+  for (const [diffs, areas] of samples) {
+    const readings = [0, 32, 64, 96].map((f) => reading({ frame: f, targetDiff: diffs[f], violentArea: areas[f] }));
+    const v = judgeVideoGate({ readings, mode: "single_swap" });
+    assert.equal(v.pass, false, "崩坏样本必须拦下");
+  }
+});
+
+test("视频门：画面几乎没动（面积和差异都小）仍拦下", () => {
+  const readings = [0, 32, 64, 96].map((f) => reading({ frame: f, targetDiff: 0.4, violentArea: 0.5 }));
+  const v = judgeVideoGate({ readings, mode: "single_swap" });
+  assert.equal(v.pass, false, "完全没换人不能过");
+});
+
+test("视频门：面积判据可被阈值覆盖，便于现场调参", () => {
+  const readings = [0, 32, 64, 96].map((f) => reading({ frame: f, targetDiff: 20, violentArea: 35 }));
+  assert.equal(judgeVideoGate({ readings, mode: "single_swap" }).pass, false, "默认 30%");
+  assert.equal(judgeVideoGate({ readings, mode: "single_swap", thresholds: { maxViolentArea: 40 } }).pass, true, "放宽到 40% 可过");
+});

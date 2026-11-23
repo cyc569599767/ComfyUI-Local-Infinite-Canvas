@@ -117,7 +117,18 @@ export function buildSwapVideoPrompt(job) {
  * 视频（每次 10 分钟）。起始帧应当单独记录，不参与硬性门槛。
  */
 export function judgeVideoGate({ readings, mode = "", thresholds = {} }) {
-    const minMid = thresholds.minMid ?? 6;
+    // 这两个数字的分工（实测数据见 swap-chain.js 的 violentAreaRatio 注释）：
+    //
+    //   maxViolentArea —— 主判据。框内「剧烈改动」的格子占比超过它就判崩坏。
+    //     崩坏（整片被重绘成盔甲等）实测 53.8% / 63.8% / 54.3%；
+    //     正常换人（只改脸）实测 4.3% / 9.2%。取 30% 两侧都有充足余量。
+    //
+    //   minMid —— 只用来兜「完全没动」的下限，不再是质量闸门。
+    //     原来它当质量阈值用（6），方向是错的：崩坏改动大分数高反而通过，
+    //     好换人改动小分数低反被拦。两份内容几乎相同的崩坏视频
+    //     （0d35 得分 3.82 被拦、76628068 得分 32.31 放行）就是这么来的。
+    const minMid = thresholds.minMid ?? 2;
+    const maxViolentArea = thresholds.maxViolentArea ?? 30;
     const maxOutside = thresholds.maxOutside ?? 60;
     const minLuma = thresholds.minLuma ?? 8;
     const list = Array.isArray(readings) ? readings : [];
@@ -128,7 +139,9 @@ export function judgeVideoGate({ readings, mode = "", thresholds = {} }) {
             outsideMax: 0,
             backgroundMax: 0,
             lumaMin: 0,
+            violentAreaMax: 0,
             targetOk: false,
+            structureOk: false,
             backgroundOk: false,
             blackOk: false,
             pass: false,
@@ -148,6 +161,10 @@ export function judgeVideoGate({ readings, mode = "", thresholds = {} }) {
     const lumaMin = Math.min(...list.map((item) => Number(item.luma) || 0));
     const editTime = mode === "edit_time" || mode === "edit_light";
     const targetOk = targetMin > minMid;
+    // 崩坏判据：取各采样帧里最大的剧烈改动面积（任一帧崩了就算崩）。
+    const violentAreas = list.map((item) => Number(item.violentArea)).filter((v) => Number.isFinite(v));
+    const violentAreaMax = violentAreas.length ? Math.max(...violentAreas) : 0;
+    const structureOk = violentAreaMax <= maxViolentArea;
     const backgroundOk = editTime ? true : backgroundMax < maxOutside;
     const blackOk = lumaMin > minLuma;
     return {
@@ -155,11 +172,13 @@ export function judgeVideoGate({ readings, mode = "", thresholds = {} }) {
         startDiff: Number(startDiff.toFixed(2)),
         outsideMax: Number(outsideMax.toFixed(2)),
         backgroundMax: Number(backgroundMax.toFixed(2)),
+        violentAreaMax: Number(violentAreaMax.toFixed(1)),
         lumaMin: Number(lumaMin.toFixed(1)),
         targetOk,
+        structureOk,
         backgroundOk,
         blackOk,
-        pass: targetOk && backgroundOk && blackOk,
+        pass: targetOk && structureOk && backgroundOk && blackOk,
     };
 }
 
