@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, describeTarget, describeTargetEn, FULL_FRAME_BOX, isFullFrameBox, isPromptInQueue, judgeChanged, judgeImageGate, judgeVideoGate, pixelCorrelation } from "../src/swap-chain-target.js";
+import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, describeTarget, describeTargetEn, FULL_FRAME_BOX, isFullFrameBox, isPromptInQueue, judgeChanged, judgeImageGate, judgeVideoGate, pixelCorrelation, resolveKeepClothes } from "../src/swap-chain-target.js";
 
 test("单人影默认用整幅框，不再赌半幅", () => {
   const boxes = defaultTargetBoxes("single_swap", "把视频里的人换成参考图中的角色");
@@ -414,4 +414,45 @@ test("逐帧换脸：只有压缩噪点时拦下", () => {
   const facePeakMin = Math.min(...noise.map((s) => s.peakDiff));
   const faceMaxMin = Math.min(...noise.map((s) => s.maxDiff));
   assert.equal(facePeakMin >= 6 || faceMaxMin >= 15, false, "噪点峰值 5.5、单格 14 都不过线");
+});
+
+// ── 「保留原片服装」开关的可行性 ──────────────────────────────────
+
+test("保留服装：单人换脸 + 有参考图 → 生效", () => {
+  const r = resolveKeepClothes({ keepClothes: true, mode: "single_swap", refCount: 1 });
+  assert.equal(r.state, "active");
+  assert.equal(r.active, true);
+});
+
+test("保留服装：开关关闭时不做任何事", () => {
+  const r = resolveKeepClothes({ keepClothes: false, mode: "single_swap", refCount: 1 });
+  assert.equal(r.state, "off");
+  assert.equal(r.active, false);
+});
+
+test("保留服装：与换装互斥，必须报错而不是静默择一", () => {
+  const r = resolveKeepClothes({ keepClothes: true, mode: "edit_clothes", refCount: 1 });
+  assert.equal(r.state, "conflict", "既要保留服装又要换装，语义冲突");
+  assert.equal(r.active, false);
+  assert.match(r.reason, /冲突/);
+});
+
+test("保留服装：双人替换回退并说明原因", () => {
+  const r = resolveKeepClothes({ keepClothes: true, mode: "double_swap", refCount: 2 });
+  assert.equal(r.state, "fallback");
+  assert.equal(r.active, false);
+  assert.match(r.reason, /双人替换不支持/);
+});
+
+test("保留服装：编辑类模式回退", () => {
+  for (const mode of ["edit_light", "edit_time"]) {
+    const r = resolveKeepClothes({ keepClothes: true, mode, refCount: 1 });
+    assert.equal(r.state, "fallback");
+  }
+});
+
+test("保留服装：没有参考图时回退", () => {
+  const r = resolveKeepClothes({ keepClothes: true, mode: "single_swap", refCount: 0 });
+  assert.equal(r.state, "fallback");
+  assert.equal(r.active, false);
 });

@@ -20,7 +20,7 @@ const FRAMES = 124;
 const REMAKE_FRAMES_MIN = 90;
 const REMAKE_FRAMES_MAX = 345;
 import { pickImageCanvas, pickRemakeShortEdge } from "./remake-canvas.js";
-import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, isFullFrameBox, isPromptInQueue, judgeImageGate, judgeVideoGate } from "./swap-chain-target.js";
+import { buildSingleSwapPrompt, buildSwapVideoPrompt, defaultTargetBoxes, isFullFrameBox, isPromptInQueue, judgeImageGate, judgeVideoGate, resolveKeepClothes } from "./swap-chain-target.js";
 
 const DEFAULT_SHORT_EDGE = 480;
 const SWAP_SIGMAS = "1.0, 0.990476, 0.965243, 0.923077, 0.8, 0.631579, 0.0";
@@ -947,10 +947,18 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
       let imageGate = null;
       // keep_clothes=true：只换脸不动服装。
       // 只有单人换脸支持这种模式（双人/编辑类仍走 Qwen 全图重绘）。
-      const keepClothes = Boolean(job.keepClothes) && job.mode === "single_swap" && refImages.length > 0;
-      if (job.keepClothes && !keepClothes) {
-        job.keepClothesSkipped = "ReActor 只在单人换脸时可用，本次已回退到整体重绘";
+      // 「保留服装」可行性判定见 swap-chain-target.js 的 resolveKeepClothes：
+      // 与「换装」互斥时必须报错，模式不支持时回退并告知，不静默择一执行。
+      const keepClothesPlan = resolveKeepClothes({
+        keepClothes: Boolean(job.keepClothes),
+        mode: job.mode,
+        refCount: refImages.length,
+      });
+      if (keepClothesPlan.state === "conflict") {
+        throw new SwapChainError(keepClothesPlan.reason, { status: 400, code: "keep_clothes_conflicts_with_edit" });
       }
+      const keepClothes = keepClothesPlan.active;
+      if (keepClothesPlan.state === "fallback") job.keepClothesSkipped = keepClothesPlan.reason;
       // keep_clothes 模式下整段图像制备都不需要：
       // 最终画面由「源视频逐帧换脸」直接产出，先在这里生成一张 painted 只会在
       // 磁盘上留一个用不上的中间文件，还白烧一次图像生成。

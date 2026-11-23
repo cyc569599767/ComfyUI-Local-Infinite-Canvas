@@ -36,7 +36,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
-import { App, Button, Input, Modal, Slider } from "antd";
+import { App, Button, Input, Modal, Slider, Switch } from "antd";
 import { CONFIG_COMPOSER_ENABLED, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -450,6 +450,8 @@ function InfiniteCanvasPage() {
     const [swapChainNodeId, setSwapChainNodeId] = useState<string | null>(null);
     const [swapChainRefFiles, setSwapChainRefFiles] = useState<File[]>([]);
     const [swapChainIntent, setSwapChainIntent] = useState("");
+    // 是否保留原片服装（默认保留：换人的常见诉求是换脸不换衣）
+    const [swapChainKeepClothes, setSwapChainKeepClothes] = useState(true);
     // 主体在展开图里的水平位置，0–1。0.5 = 居中；落在接缝上时左右挪开。
     const [panoramaOffset, setPanoramaOffset] = useState(0.5);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
@@ -3658,7 +3660,7 @@ function InfiniteCanvasPage() {
     // 产物是一张新视频卡（带来源连线），不是覆盖源视频 —— 源片保留下来可反复试。
     const swapChainAbortRef = useRef<AbortController | null>(null);
     const runSwapChain = useCallback(
-        async (sourceNode: CanvasNodeData, options: { refs: File[]; intent: string; mode?: SwapChainMode }) => {
+        async (sourceNode: CanvasNodeData, options: { refs: File[]; intent: string; mode?: SwapChainMode; keepClothes?: boolean }) => {
             if (!sourceNode.metadata?.content) {
                 message.warning(t("canvas.nodeToolbar.swapChainNeedVideo"));
                 return;
@@ -3701,12 +3703,21 @@ function InfiniteCanvasPage() {
                 });
                 if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                 const result = await requestSwapChain(
-                    { source: sourceFile, refs: options.refs, intent: options.intent, mode: options.mode || "single_swap" },
+                    {
+                        source: sourceFile,
+                        refs: options.refs,
+                        intent: options.intent,
+                        mode: options.mode || "single_swap",
+                        keepClothes: Boolean(options.keepClothes),
+                    },
                     {
                         signal: controller.signal,
                         onProgress: (job, label) => patchChild({ stepProgress: { step: Math.round((job.progress || 0)), total: 100, complete: false }, generationStageLabel: label }),
                     },
                 );
+                // 勾了「保留原片服装」但当前模式不支持时，后端会静默回退到整体重绘。
+                // 必须告知用户，否则会以为服装保住了却看到参考图的衣服。
+                if (result.keepClothesSkipped) message.warning(t("canvas.nodeToolbar.swapChainKeepClothesUnsupported"));
                 const video = await storeGeneratedVideo({ url: result.videoUrl, mimeType: "video/mp4" } as never).catch(() => null);
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -8497,6 +8508,25 @@ function InfiniteCanvasPage() {
                                 autoSize={{ minRows: 2, maxRows: 5 }}
                             />
                         </label>
+                        {/* 保留服装开关：换人成片两种打法差别很大，必须让用户自己选。
+                            开：只换脸，服装/身体/背景/动作全部沿用原片（ReActor 逐帧换脸，约 1 分钟）
+                            关：整体重绘，参考图的服装会一起带过来（Qwen + H3，较慢） */}
+                        <div
+                            className="flex items-center justify-between gap-4 rounded-lg border border-stone-200 px-3 py-2.5 dark:border-stone-700"
+                            data-swapchain-keep-clothes-row
+                        >
+                            <div className="min-w-0 flex-1">
+                                <div className="text-xs font-medium">{t("canvas.nodeToolbar.swapChainKeepClothes")}</div>
+                                <div className="mt-1 text-[11px] leading-4 opacity-60">{t("canvas.nodeToolbar.swapChainKeepClothesHint")}</div>
+                            </div>
+                            <Switch
+                                size="small"
+                                checked={swapChainKeepClothes}
+                                data-swapchain-keep-clothes
+                                onChange={setSwapChainKeepClothes}
+                                aria-label={t("canvas.nodeToolbar.swapChainKeepClothes")}
+                            />
+                        </div>
                         <div className="flex justify-end gap-2">
                             <Button
                                 onClick={() => {
@@ -8514,7 +8544,9 @@ function InfiniteCanvasPage() {
                                     const refs = swapChainRefFiles;
                                     setSwapChainNodeId(null);
                                     setSwapChainRefFiles([]);
-                                    if (node && refs.length) void runSwapChain(node, { refs, intent: swapChainIntent.trim() });
+                                    if (node && refs.length) {
+                                        void runSwapChain(node, { refs, intent: swapChainIntent.trim(), keepClothes: swapChainKeepClothes });
+                                    }
                                 }}
                             >
                                 {t("canvas.model3d.panoramaStart")}

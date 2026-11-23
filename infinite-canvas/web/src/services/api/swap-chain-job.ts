@@ -13,6 +13,10 @@ export type SwapChainResult = {
     /** 换人后的静帧，用于在画布上先给个视觉反馈。 */
     paintedUrl: string;
     mode: SwapChainMode;
+    /** 实际是否走了「只换脸、保留服装」路径。 */
+    keepClothes: boolean;
+    /** 勾了保留服装但当前模式不支持时的回退说明。 */
+    keepClothesSkipped: string | null;
 };
 
 export class SwapChainCancelledError extends Error {
@@ -87,6 +91,8 @@ export async function requestSwapChain(
         intent: string;
         mode: SwapChainMode;
         targetSelection?: SwapChainTargetSelection | null;
+        /** 是否保留原片服装：true=只换脸，服装/身体/背景沿用原片。 */
+        keepClothes?: boolean;
         seed?: number;
     },
     options: {
@@ -126,7 +132,14 @@ export async function requestSwapChain(
             if (job.status === "completed") {
                 const videoUrl = swapChainArtifactUrl(job.artifacts?.video);
                 if (!videoUrl) throw new SwapChainFailedError("换人任务已完成但没有返回成片地址", jobId, job.stage);
-                return { jobId, videoUrl, paintedUrl: swapChainArtifactUrl(job.artifacts?.painted), mode: job.mode };
+                return {
+                    jobId,
+                    videoUrl,
+                    paintedUrl: swapChainArtifactUrl(job.artifacts?.painted),
+                    mode: job.mode,
+                    keepClothes: Boolean(job.keepClothes),
+                    keepClothesSkipped: job.keepClothesSkipped || null,
+                };
             }
             if (job.status === "failed") throw new SwapChainFailedError(job.error || "角色替换失败", jobId, job.stage || null);
             if (job.status === "cancelled") throw new SwapChainCancelledError();

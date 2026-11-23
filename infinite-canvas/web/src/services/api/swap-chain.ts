@@ -19,6 +19,10 @@ export type SwapChainJob = {
     shortEdge?: number | null;
     sourceFrameCount?: number | null;
     frames?: number | null;
+    /** 是否走「只换脸、保留服装」路径。 */
+    keepClothes?: boolean;
+    /** 想保留服装但不支持该模式时的回退说明。 */
+    keepClothesSkipped?: string | null;
     gates: Record<string, unknown>;
     error: string | null;
     createdAt: string;
@@ -33,6 +37,8 @@ type CreateInput = {
     mode: SwapChainMode;
     targetSelection?: SwapChainTargetSelection | null;
     seed?: number;
+    /** 是否保留原片服装：true=只换脸，服装/身体/背景沿用原片。 */
+    keepClothes?: boolean;
     signal?: AbortSignal;
 };
 
@@ -58,6 +64,7 @@ export async function createSwapChainTask(input: CreateInput): Promise<SwapChain
     form.append("mode", input.mode);
     if (input.targetSelection) form.append("target_selection", JSON.stringify(input.targetSelection));
     if (input.seed) form.append("seed", String(input.seed));
+    if (input.keepClothes) form.append("keep_clothes", "true");
     const response = await fetch(`${gatewayBase()}/v1/swap-chain`, { method: "POST", body: form, signal: input.signal });
     if (!response.ok) throw new Error(await readError(response));
     return (await response.json()) as SwapChainJob;

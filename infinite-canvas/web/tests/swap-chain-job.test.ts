@@ -27,7 +27,16 @@ const server = Bun.serve({
     port: 0,
     fetch: async (req) => {
         const path = new URL(req.url).pathname;
-        calls.push({ path, method: req.method });
+        // 保留提交体里的表单字段，用于验证 keep_clothes 是否真的发出去了
+        let form: Record<string, string> | null = null;
+        if (req.method === "POST" && path === "/v1/swap-chain") {
+            const fd = await req.clone().formData().catch(() => null);
+            if (fd) {
+                form = {};
+                for (const [k, v] of fd.entries()) form[k] = typeof v === "string" ? v : `file:${(v as File).name}`;
+            }
+        }
+        calls.push({ path, method: req.method, form });
         const n = (counters.get(path) || 0) + 1;
         counters.set(path, n);
         return script(path, n);
@@ -218,4 +227,43 @@ test("onProgress 能收到阶段中文名与进度", async () => {
     });
     await requestSwapChain(input(), { pollIntervalMs: 5, onProgress: (_job, label) => seen.push(label) });
     expect(seen).toEqual(["逐帧换人", "交付成片"]);
+});
+// ── 保留原片服装开关 ───────────────────────────────────────────
+
+test("勾了保留服装：提交体带 keep_clothes=true", async () => {
+    reset((path) => {
+        if (path === "/v1/swap-chain") return Response.json(job({ status: "queued" }));
+        return Response.json(job({ status: "completed", stage: "s7_delivery", progress: 100 }));
+    });
+    await requestSwapChain({ ...input(), keepClothes: true }, { pollIntervalMs: 5 });
+    const submit = calls.find((c) => c.path === "/v1/swap-chain");
+    expect(submit?.form?.keep_clothes).toBe("true");
+});
+
+test("没勾保留服装：提交体不带 keep_clothes（走原有整体重绘）", async () => {
+    reset((path) => {
+        if (path === "/v1/swap-chain") return Response.json(job({ status: "queued" }));
+        return Response.json(job({ status: "completed", stage: "s7_delivery", progress: 100 }));
+    });
+    await requestSwapChain({ ...input(), keepClothes: false }, { pollIntervalMs: 5 });
+    const submit = calls.find((c) => c.path === "/v1/swap-chain");
+    expect(submit?.form?.keep_clothes).toBeUndefined();
+});
+
+test("结果带回 keepClothes 与回退说明，供 UI 提示", async () => {
+    reset((path) => {
+        if (path === "/v1/swap-chain") return Response.json(job({ status: "queued" }));
+        return Response.json(
+            job({
+                status: "completed",
+                stage: "s7_delivery",
+                progress: 100,
+                keepClothes: false,
+                keepClothesSkipped: "双人替换不支持保留服装（需要同时重绘两个人的身体），本次已回退到整体重绘",
+            }),
+        );
+    });
+    const result = await requestSwapChain({ ...input(), keepClothes: true }, { pollIntervalMs: 5 });
+    expect(result.keepClothes).toBe(false);
+    expect(result.keepClothesSkipped).toContain("双人替换不支持");
 });

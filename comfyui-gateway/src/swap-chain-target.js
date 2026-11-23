@@ -293,3 +293,38 @@ export function judgeImageGate({ outsideDiff = 0, targetDiff = 0, peakDiff = nul
         pass: changed.changedOk && outsideOk && identityOk,
     };
 }
+
+/**
+ * 「是否保留原片服装」的可行性判定（纯函数）。
+ *
+ * 三种结果：
+ *   active      —— 走 ReActor 逐帧换脸，只换脸、其他全部沿用原片
+ *   conflict    —— 用户既要保留服装又要换装，语义互斥，必须报错
+ *   fallback    —— 当前模式不支持（如双人替换），回退整体重绘，需告知用户
+ *
+ * 为什么不静默择一执行：回退会让用户拿到与预期相反的结果
+ * （想保留服装，却看到参考图的衣服被带过来）。
+ */
+export function resolveKeepClothes({ keepClothes = false, mode = "", refCount = 0 } = {}) {
+  if (!keepClothes) return { state: "off", active: false, reason: "" };
+  if (mode === "edit_clothes") {
+    return {
+      state: "conflict",
+      active: false,
+      reason: "「保留原片服装」与「换装」是互相冲突的两个要求，请只选一个",
+    };
+  }
+  if (mode !== "single_swap") {
+    return {
+      state: "fallback",
+      active: false,
+      reason: mode === "double_swap"
+        ? "双人替换不支持保留服装（需要同时重绘两个人的身体），本次已回退到整体重绘"
+        : "当前模式不支持保留服装，本次已回退到整体重绘",
+    };
+  }
+  if (Number(refCount) <= 0) {
+    return { state: "fallback", active: false, reason: "换人需要至少 1 张参考图，本次已回退到整体重绘" };
+  }
+  return { state: "active", active: true, reason: "" };
+}
