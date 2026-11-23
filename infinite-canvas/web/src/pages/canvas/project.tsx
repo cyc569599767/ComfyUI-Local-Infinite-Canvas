@@ -22,7 +22,8 @@ import { dataUrlToFile, getDataUrlByteSize, readImageMeta } from "@/lib/image-ut
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
-import { videoWorkflowId } from "@/lib/canvas/video-model-mode";
+import { baseVideoWorkflowId, videoWorkflowId } from "@/lib/canvas/video-model-mode";
+import { withSelfSourceVideo as mergeSelfSourceVideo } from "@/lib/canvas/self-source-video";
 import { automationImageSize, computeAutomationLayout } from "@/lib/automation/layout";
 import { AUTOMATION_VIDEO_PROMPT_VERSION, STORYBOARD_NEGATIVE_PROMPT, STORYBOARD_PROMPT_VERSION, applyComicFrameworkHints, automationCharacterSheetPrompt, buildAutomationVideoReference, buildComicFrameworkMessages, buildComicToVideoMessages, buildGridMoss, buildNovelToComicMessages, buildScriptAdaptationMessages, cameraMoveCount, collectAutomationScenes, duplicatePageEvents, extractJson, formatPageCard, formatScriptForPlanning, isCrowdCharacterName, isRef2VAPrompt, mergeAutomationScripts, mergeComicPlans, missingPageEvents, normalizeComicPlan, normalizeMossLayout, normalizeScript, normalizeVideoPrompts, pageSpeechSeconds, resolvePageVideoSeconds, reviewComicPlan, sanitizePageDialogue, scriptStats, splitAutomationSource, splitPageVideoSegments, splitScriptIntoBatches } from "@/lib/automation/skills";
 import { buildCharacterExtractionMessages, buildPropExtractionMessages, buildPropPolishMessages, buildRolePolishMessages, buildSceneExtractionMessages, buildScenePolishMessages, characterAssetPrompt, deriveSceneVariant, frameReferencePrompt, isMajorSceneChange, isSameSceneKey, normalizeCharacters, normalizeLocationKey, normalizeProps, normalizeScenes, propAssetPrompt, sceneAssetPrompt, sceneReferencePrompt, sharesSceneBase } from "@/lib/short-drama/assets";
@@ -51,7 +52,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeSuperResolveDialog, type CanvasSuperResolveParams } from "@/components/canvas/canvas-node-super-resolve-dialog";
 import { CanvasNodeVideoUpscaleDialog, type CanvasVideoUpscaleMethod, type CanvasVideoUpscaleParams } from "@/components/canvas/canvas-node-video-upscale-dialog";
 import { CanvasImageCompareModal } from "@/components/canvas/canvas-image-compare-modal";
-import { audioReferenceFromNode, buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
+import { audioReferenceFromNode, videoReferenceFromNode, buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasGenerationTimer } from "@/components/canvas/canvas-generation-timer";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasSelectionToolbar } from "@/components/canvas/canvas-selection-toolbar";
@@ -4291,7 +4292,17 @@ function InfiniteCanvasPage() {
                             videoInterpolation: generationConfig.videoInterpolation,
                             params: generationConfig.params,
                             references: generationReferenceUrls(generationContext),
-                        }, generationContext.referenceVideos, generationContext.referenceAudios);
+                        },
+                        // 角色替换/视频编辑的源视频就是「这个节点自己已有的视频」，
+                        // 但 referenceVideos 只收上游连线，不含自身 —— 不补这一条，
+                        // 后端会报「ref_videos 需要至少 1 张视频」而画面上明明有视频。
+                        mergeSelfSourceVideo(
+                          generationContext.referenceVideos,
+                          baseVideoWorkflowId(videoWorkflowId(generationConfig, generationConfig.model)),
+                          generationConfig.videoMode,
+                          videoReferenceFromNode(sourceNode),
+                        ),
+                        generationContext.referenceAudios);
                     } finally {
                         finishGenerationRequest(videoId, controller);
                     }

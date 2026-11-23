@@ -276,6 +276,18 @@ function readReferenceVideo(node: CanvasNodeData): ReferenceVideo | null {
     };
 }
 
+/**
+ * 把视频节点自身的产物读成参考视频。
+ *
+ * 角色替换（video-h3-character-swap）的语义是「把这段视频里的人换掉」，
+ * 源视频就是节点自己已经有的内容。但 referenceVideos 只从上游连线收集，
+ * 不包含节点自身 —— 于是后端收到 0 个视频，报
+ * 「ref_videos 需要至少 1 张视频」，而画面上明明有视频。
+ */
+export function videoReferenceFromNode(node: CanvasNodeData | undefined): ReferenceVideo | null {
+    return node ? readReferenceVideo(node) : null;
+}
+
 /** 把音频节点自身的产物读成参考音频：音色克隆可以直接拿当前节点当参考音色。 */
 export function audioReferenceFromNode(node: CanvasNodeData | undefined): ReferenceAudio | null {
     return node ? readReferenceAudio(node) : null;
