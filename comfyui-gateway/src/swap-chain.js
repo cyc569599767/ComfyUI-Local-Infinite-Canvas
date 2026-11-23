@@ -640,8 +640,8 @@ function imageGraph(job, names) {
   return graph;
 }
 
-function swapVideoGraph(job, names) {
-  return {
+function swapVideoGraph(job, names, { hasAudio = false } = {}) {
+  const graph = {
     "1": { class_type: "UNETLoader", inputs: { unet_name: SWAP_UNET, weight_dtype: "default" } },
     "21": { class_type: "MiniMaxH3SigmaShift", inputs: { model: ["1", 0], shift_video: 12, shift_audio: 2 } },
     "22": { class_type: "ModelAttentionBackend", inputs: { model: ["21", 0], attention: "comfy kitchen attention" } },
@@ -656,7 +656,7 @@ function swapVideoGraph(job, names) {
     "91": { class_type: "MiniMaxH3TRTVAELoader", inputs: { decoder: "minimax_h3_vae_decoder.engine", encoder: "None" } },
     "9": { class_type: "LoadImage", inputs: { image: names.painted } },
     "9102": { class_type: "VHS_LoadVideo", inputs: { video: names.source, force_rate: 24, custom_width: 0, custom_height: 0, frame_load_cap: 345, skip_first_frames: 0, select_every_nth: 1, format: "AnimateDiff" } },
-    "42": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["9102", 0], prompt: buildSwapVideoPrompt(job), ref_1: ["9", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, audio: ["9102", 2] } },
+    "42": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["9102", 0], prompt: buildSwapVideoPrompt(job), ref_1: ["9", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE } },
     "12": { class_type: "RemakeNoise", inputs: { positive: ["42", 0], seed: job.seed } },
     "13": { class_type: "BasicGuider", inputs: { model: ["3", 0], conditioning: ["42", 0] } },
     "14": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
@@ -668,10 +668,15 @@ function swapVideoGraph(job, names) {
     "19": { class_type: "CreateVideo", inputs: { images: ["17", 0], audio: ["17", 1], fps: 24, bit_depth: "auto", color_space: "sRGB", codec: "none" } },
     "20": { class_type: "SaveVideo", inputs: { video: ["19", 0], filename_prefix: `swap-chain/${job.id}/video`, format: "mp4", codec: "h264" } },
   };
+  // 源片有音轨才接：RemakeConditioning 拿不到音轨时会抛
+  // "VHS failed to extract audio from ...: Output file does not contain any stream"，
+  // 整个 H3 重绘直接失败。无声素材（手机录屏、AI 生成）非常常见。
+  if (hasAudio) graph["42"].inputs.audio = ["9102", 2];
+  return graph;
 }
 
-function editVideoGraph(job, names) {
-  return {
+function editVideoGraph(job, names, { hasAudio = false } = {}) {
+  const graph = {
     "1": { class_type: "UNETLoader", inputs: { unet_name: EDIT_UNET, weight_dtype: "default" } },
     "2": { class_type: "LoraLoaderBypassModelOnly", inputs: { model: ["1", 0], lora_name: EDIT_LORA, strength_model: 1 } },
     "3": { class_type: "RemakeKeyframeUntil", inputs: { model: ["2", 0], keyframe_until: 0.9 } },
@@ -681,7 +686,7 @@ function editVideoGraph(job, names) {
     "7": { class_type: "VHS_LoadVideo", inputs: { video: names.source, force_rate: 24, custom_width: 0, custom_height: 0, frame_load_cap: 345, skip_first_frames: 0, select_every_nth: 1, format: "AnimateDiff" } },
     "8": { class_type: "LoadImage", inputs: { image: names.painted } },
     "30": { class_type: "PathchSageAttentionKJ", inputs: { model: ["3", 0], sage_attention: "auto", allow_compile: false } },
-    "9": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["7", 0], ref_1: ["8", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, prompt: buildEditVideoPrompt(job), audio: ["7", 2] } },
+    "9": { class_type: "RemakeConditioning", inputs: { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: ["7", 0], ref_1: ["8", 0], pins: "", frames: job.frames || FRAMES, short_edge: job.shortEdge || DEFAULT_SHORT_EDGE, prompt: buildEditVideoPrompt(job) } },
     "10": { class_type: "RemakeNoise", inputs: { positive: ["9", 0], seed: job.seed } },
     "11": { class_type: "BasicGuider", inputs: { model: ["30", 0], conditioning: ["9", 0] } },
     "12": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler" } },
@@ -692,6 +697,9 @@ function editVideoGraph(job, names) {
     "17": { class_type: "CreateVideo", inputs: { images: ["15", 0], audio: ["16", 0], fps: 24, bit_depth: "auto", color_space: "sRGB", codec: "none" } },
     "18": { class_type: "SaveVideo", inputs: { video: ["17", 0], filename_prefix: `swap-chain/${job.id}/video`, format: "mp4", codec: "h264" } },
   };
+  // 同 swapVideoGraph：无音轨源片不能给 RemakeConditioning 接 audio。
+  if (hasAudio) graph["9"].inputs.audio = ["7", 2];
+  return graph;
 }
 
 export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = () => "" }) {
@@ -1106,8 +1114,8 @@ export function createSwapChain({ comfy, config, logger, dataDir, comfyRoot = ()
       } else {
         for (let attempt = 0; attempt <= MAX_VIDEO_RETRIES; attempt += 1) {
           const graph = job.mode.startsWith("edit_")
-            ? editVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name })
-            : swapVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name });
+            ? editVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name }, { hasAudio: Boolean(job.sourceHasAudio) })
+            : swapVideoGraph(job, { source: sourceVideo.name, painted: paintedImage.name }, { hasAudio: Boolean(job.sourceHasAudio) });
           if (attempt > 0) {
             const noiseId = Object.keys(graph).find((id) => graph[id].class_type === "RemakeNoise");
             if (noiseId) graph[noiseId].inputs.seed = job.seed + attempt;

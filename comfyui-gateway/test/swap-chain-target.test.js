@@ -488,3 +488,48 @@ test("音轨探测失败按无音轨处理（宁出无声片也别整单失败�
   const inputs = buildCombineInputs({ hasAudio: false });
   assert.equal("audio" in inputs, false);
 });
+
+// ── H3 重绘路径（keep_clothes=false）也不能无条件接音频 ──────────
+//
+// 同一类坑出现过两次：
+//   1. 逐帧换脸的 VHS_VideoCombine
+//   2. H3 重绘的 RemakeConditioning（节点 9102 报
+//      "VHS failed to extract audio from ...swap-source.mp4"）
+// 源片没有音轨时，两条路径都必须不接 audio。
+
+/** 与 swap-chain.js 里 swapVideoGraph / editVideoGraph 的接法保持一致。 */
+function buildRemakeInputs({ hasAudio, sourceNode }) {
+  const inputs = { clip: ["4", 0], vae: ["5", 0], audio_vae: ["6", 0], source: [sourceNode, 0], pins: "" };
+  if (hasAudio) inputs.audio = [sourceNode, 2];
+  return inputs;
+}
+
+test("H3 重绘：源片有音轨才接 audio", () => {
+  assert.deepEqual(buildRemakeInputs({ hasAudio: true, sourceNode: "9102" }).audio, ["9102", 2]);
+  assert.deepEqual(buildRemakeInputs({ hasAudio: true, sourceNode: "7" }).audio, ["7", 2]);
+});
+
+test("H3 重绘：源片无音轨时不接 audio（否则 VHS_LoadVideo 直接失败）", () => {
+  for (const node of ["9102", "7"]) {
+    const inputs = buildRemakeInputs({ hasAudio: false, sourceNode: node });
+    assert.equal("audio" in inputs, false, `节点 ${node} 无音轨时不能有 audio`);
+  }
+});
+
+test("三条出片路径的音频接法一致（逐帧换脸 / 换人重绘 / 编辑重绘）", () => {
+  // 1) 逐帧换脸 VHS_VideoCombine
+  const combine = (hasAudio) => {
+    const i = { images: ["3", 0], frame_rate: 24 };
+    if (hasAudio) i.audio = ["1", 2];
+    return i;
+  };
+  // 2) 换人重绘 RemakeConditioning
+  const swapRemake = (hasAudio) => buildRemakeInputs({ hasAudio, sourceNode: "9102" });
+  // 3) 编辑重绘 RemakeConditioning
+  const editRemake = (hasAudio) => buildRemakeInputs({ hasAudio, sourceNode: "7" });
+
+  for (const build of [combine, swapRemake, editRemake]) {
+    assert.equal("audio" in build(false), false);
+    assert.notEqual(build(true).audio, undefined);
+  }
+});
