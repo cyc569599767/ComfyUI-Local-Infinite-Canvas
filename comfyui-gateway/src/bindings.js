@@ -211,7 +211,22 @@ export function applyBindings(workflow, entry, context, { logger, stats } = {}) 
       const selected = media.slice(0, Number(binding.max || 8));
       const min = Number(binding.min || 0);
       if (selected.length < min) {
-        throw new BindingError(`工作流需要至少 ${min} 个参考素材，但请求里只有 ${selected.length} 个。`, { code: "missing_reference_media" });
+        // 报错必须说清「缺的是什么、去哪里补」。
+        // 原来只说「工作流需要至少 N 个参考素材」，用户完全不知道是没连线、
+        // 还是连错了卡片类型 —— 视频节点最常见的失败就是「图片卡没连到视频节点」。
+        const kind = isVideo ? "视频" : isAudio ? "音频" : "图片";
+        const target = binding.input || key;
+        const received = isVideo ? context.uploadedVideos : isAudio ? context.uploadedAudios : context.uploadedImages;
+        const detail = !received?.length
+          ? `当前${kind}数 0：请确认${kind}卡片已经连接到这个节点（仅在提示词里写「@图1」不算引用，需要拉线）`
+          : `当前只有 ${selected.length} 个`;
+        throw new BindingError(
+          `工作流 ${entry.name} 的「${target}」需要至少 ${min} 张${kind}，但${detail}。`,
+          {
+            code: "missing_reference_media",
+            details: { binding: key, input: target, need: min, got: selected.length, mediaKind: kind },
+          },
+        );
       }
       const prefix = String(binding.inputPrefix || binding.input || "ref_images.ref_image_");
       const indexBase = Number.isInteger(binding.indexBase) ? binding.indexBase : 0;

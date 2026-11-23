@@ -189,3 +189,49 @@ test("non-strict workflows keep truncating to their max", () => {
   );
   assert.equal(Object.keys(out["76"].inputs).filter((key) => key.startsWith("ref_images.")).length, 6);
 });
+
+// ── 缺素材的报错必须能指导用户 ────────────────────────────────
+//
+// 现场：视频节点选「H3 角色替换」，画布上有图片卡但没拉线连过来，
+// 用户只在提示词里写了「@image#1」。原报错是
+// 「工作流需要至少 1 个参考素材，但请求里只有 0 个」——
+// 完全看不出是「没连线」，用户无从下手。
+
+test("缺角色参考图时，报错要说清是哪个绑定、缺几张、怎么补", () => {
+  let caught = null;
+  try {
+    applyBindings(swapWorkflow(), swapEntry(), buildContext({ prompt: "swap", uploadedImages: [], uploadedVideos: videos(1) }));
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught, "必须报错");
+  assert.equal(caught.code, "missing_reference_media");
+  // 指明绑定输入名
+  assert.match(caught.message, /ref_images/);
+  // 指明需要几张
+  assert.match(caught.message, /至少 1 张/);
+  // 指明素材类型
+  assert.match(caught.message, /图片/);
+  // 关键：告诉用户「要连线，光在提示词里写不算」
+  assert.match(caught.message, /连接/);
+  assert.match(caught.message, /@图1/);
+  // details 带上结构化信息，前端可以做针对性引导
+  assert.deepEqual(
+    { need: caught.details?.need, got: caught.details?.got, kind: caught.details?.mediaKind },
+    { need: 1, got: 0, kind: "图片" },
+  );
+});
+
+test("缺视频素材时，报错要指明是视频而不是图片", () => {
+  // 构造一个只需要视频的工作流场景：复用 swapEntry 但清空视频
+  let caught = null;
+  try {
+    const entry = swapEntry({ bindings: { videos: { node: "76", input: "ref_videos", from: "video", array: true, inputPrefix: "ref_videos.ref_video_", min: 1, max: 1, loadType: "video" } } });
+    applyBindings(swapWorkflow(), entry, buildContext({ prompt: "x", uploadedImages: [], uploadedVideos: [] }));
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught);
+  assert.match(caught.message, /视频/);
+  assert.equal(caught.details?.mediaKind, "视频");
+});

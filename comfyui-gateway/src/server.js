@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import express from "express";
 import multer from "multer";
 
-import { buildContext } from "./bindings.js";
+import { applyBindings, buildContext } from "./bindings.js";
 import { h3EasyBinding, h3EasyReferences, h3EasyUploadFiles } from "./h3-easy-media.js";
 import { shouldLogRequest } from "./access-log.js";
 import { imageInputCapacity } from "./base-models.js";
@@ -2099,6 +2099,30 @@ export async function createGatewayApp(overrides = {}) {
       seedFixed: body.seedFixed,
       ratio: body.ratio,
     });
+    // 提交时就跑一遍绑定校验，别等任务入队后才在异步阶段失败。
+    //
+    // 现场：POST /v1/videos 返回 200 且任务 queued，紧接着 WARN
+    // 「工作流需要至少 1 个参考素材，但请求里只有 0 个」——用户界面上
+    // 只看到任务无声失败，既不知道原因也不知道怎么改。
+    // 绑定是纯计算（把素材编号写进工作流 JSON），在入口预跑一次代价极低，
+    // 却能把这类错误变成带明确指引的 400。
+    try {
+      applyBindings(
+        entry.workflow || {},
+        registry.resolveForMode ? registry.resolveForMode(entry, videoMode) : entry,
+        { ...context, params },
+        { logger, stats: {} },
+      );
+    } catch (error) {
+      if (error?.code === "missing_reference_media" || error?.code === "missing_reference_image" || error?.code === "missing_reference_audio") {
+        throw new HttpError(error.message, {
+          status: 400,
+          code: error.code,
+          details: error.details,
+        });
+      }
+      // 其他绑定错误（比如工作流版本不匹配）留给执行阶段处理，这里不吞掉也不误报。
+    }
     const task = tasks.create({
       model: entry.name,
       request: {
@@ -3362,8 +3386,21 @@ export async function createGatewayApp(overrides = {}) {
       }
       requiredImageCount = 0;
     }
+    logger.info(
+      `video ${entry.id} precheck: files=${files.length} videos=${videoFiles.length} audios=${audioFiles.length} ` +
+        `requiredImageCount=${requiredImageCount} minMedia=${entry.minMedia ?? "-"} mode=${videoMode} ` +
+        `fields=[${(req.files || []).map((f) => f.fieldname).join(",")}]`,
+    );
     if (files.length < requiredImageCount) {
-      const hint = h3WorkflowId === "video-h3-ref2va" ? "（H3 多参支持 1–6 图 / 0–2 音频 / 0–1 视频，至少一种媒体）" : (h3WorkflowId === "video-h3-frames" || h3WorkflowId === "video-h3-fast") ? "（首尾帧支持首帧、尾帧或首尾帧；首尾帧模式需要 2 张图）" : "";
+      const hint = h3WorkflowId === "video-h3-ref2va"
+        ? "（H3 多参支持 1–6 图 / 0–2 音频 / 0–1 视频，至少一种媒体）"
+        : h3WorkflowId === "video-h3-character-swap"
+          // 角色替换最常见的失败：用户把角色图放在画布上，但没有拉线到这个视频节点。
+          // 只在提示词里写「@图1」不会传素材 —— 这里必须说明白，否则用户无从下手。
+          ? "（角色替换需要 1–6 张角色参考图：把角色图片卡片连接到这个视频节点；仅在提示词里写「@图1」不算引用）"
+          : (h3WorkflowId === "video-h3-frames" || h3WorkflowId === "video-h3-fast")
+            ? "（首尾帧支持首帧、尾帧或首尾帧；首尾帧模式需要 2 张图）"
+            : "";
       throw new HttpError(`工作流 ${entry.name} 需要至少 ${requiredImageCount} 张参考图${hint}`, { status: 400, code: "missing_reference_image" });
     }
     if (entry.minMedia && files.length + videoFiles.length + audioFiles.length < Number(entry.minMedia)) {
@@ -3390,6 +3427,13 @@ export async function createGatewayApp(overrides = {}) {
     const uploadedImages = await uploadImages(comfy, files);
     const uploadedVideos = await uploadImages(comfy, videoFiles);
     const uploadedAudios = await uploadImages(comfy, audioFiles);
+    // 诊断：bindings 层报「参考素材 0 个」时，光看错误信息无法判断是
+    // 前端没传、还是字段名没匹配上。把入口的分类结果打出来。
+    logger.info(
+      `video ${entry.id} media: files=${files.length} videos=${videoFiles.length} audios=${audioFiles.length} ` +
+        `uploaded=${uploadedImages.length}/${uploadedVideos.length}/${uploadedAudios.length} mode=${videoMode} ` +
+        `fields=[${(req.files || []).map((f) => f.fieldname).join(",")}]`,
+    );
     // H3 有硬性像素上限（1920x1088 = 2,088,960）。4K 卡片会算出 3840x2176
     // = 8,355,840（上限的 4 倍），以前要跑到 ComfyUI 才由 conditioning 节点抛
     // ValueError，白等一轮 GPU。这里在入口就拦住并给出可用尺寸。
