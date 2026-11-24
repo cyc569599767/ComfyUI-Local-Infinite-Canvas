@@ -37,7 +37,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
-import { App, Button, Input, Modal, Slider, Switch } from "antd";
+import { App, Button, Input, Modal, Slider } from "antd";
 import { CONFIG_COMPOSER_ENABLED, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -113,7 +113,8 @@ import {
 } from "@/lib/canvas/canvas-generation-helpers";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, isRegisteredNodeType, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { draftLongSideSize, inferVideoRatio, normalizePixelSize, parsePixelSize } from "@/lib/media-size";
-import { videoModelForWorkflow } from "@/lib/canvas/video-model-mode";
+import { videoModelForWorkflow, videoModelModePatch } from "@/lib/canvas/video-model-mode";
+import { resolveSwapChainKeepClothes, type SwapChainMethod } from "@/services/api/swap-chain";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-manager-modal";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
@@ -451,8 +452,7 @@ function InfiniteCanvasPage() {
     const [swapChainNodeId, setSwapChainNodeId] = useState<string | null>(null);
     const [swapChainRefFiles, setSwapChainRefFiles] = useState<File[]>([]);
     const [swapChainIntent, setSwapChainIntent] = useState("");
-    // 是否保留原片服装（默认保留：换人的常见诉求是换脸不换衣）
-    const [swapChainKeepClothes, setSwapChainKeepClothes] = useState(true);
+    const [swapChainMethod, setSwapChainMethod] = useState<SwapChainMethod>("keep");
     // 主体在展开图里的水平位置，0–1。0.5 = 居中；落在接缝上时左右挪开。
     const [panoramaOffset, setPanoramaOffset] = useState(0.5);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
@@ -3754,6 +3754,105 @@ function InfiniteCanvasPage() {
             }
         },
         [message, t],
+    );
+
+    /**
+     * H3 角色替换：把参考图与源视频都连到一张**新建**的视频卡上，走正常视频生成。
+     *
+     * 三个要点（少了任何一条都会失败）：
+     * 1. 参考图必须是连线输入 —— referenceImages 只从连线收集，写在提示词里的
+     *    「@图1」不算引用；
+     * 2. 源视频也必须连进来 —— H3 角色替换的 ref_videos 下限是 1，而节点自身的
+     *    视频从来不进 referenceVideos（它只收上游连线），所以不能直接在原卡上生成，
+     *    否则报「ref_videos 需要至少 1 张视频，但当前视频数 0」，而画面上明明有视频；
+     * 3. 产物落在新卡上 —— 原片保留，可反复换不同角色对比。
+     */
+    const runH3CharacterSwap = useCallback(
+        async (sourceNode: CanvasNodeData, refs: File[], intent: string): Promise<boolean> => {
+            if (!sourceNode.metadata?.content) {
+                message.warning(t("canvas.nodeToolbar.swapChainNeedVideo"));
+                return false;
+            }
+            const model = videoModelForWorkflow(effectiveConfig, "video-h3-character-swap");
+            if (!model) {
+                message.warning(t("canvas.nodeToolbar.swapChainH3Unavailable"));
+                return false;
+            }
+            // 参考图一次传完再建卡，避免上传失败留下半截连线；保留 file 与 image 的配对，
+            // 不能在失败图片被过滤后再用原数组 index，否则卡片标题会错配。
+            const uploaded = await Promise.all(
+                refs.slice(0, 6).map(async (file) => ({ file, image: await uploadImage(file).catch(() => null) })),
+            );
+            if (uploaded.some((item) => !item.image?.url)) {
+                message.error(t("canvas.nodeToolbar.swapChainH3UploadFailed"));
+                return false;
+            }
+            const uploadedRefs = uploaded as Array<{ file: File; image: NonNullable<(typeof uploaded)[number]["image"]> }>;
+
+            const resultId = nanoid();
+            const sourceNaturalWidth = Number(sourceNode.metadata?.naturalWidth) || 0;
+            const sourceNaturalHeight = Number(sourceNode.metadata?.naturalHeight) || 0;
+            const sourceSize = sourceNode.metadata?.size || (sourceNaturalWidth > 0 && sourceNaturalHeight > 0 ? `${sourceNaturalWidth}x${sourceNaturalHeight}` : undefined);
+            const resultWidth = sourceNode.width || NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
+            const resultHeight = sourceNode.height || NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
+            const resultX = sourceNode.position.x + sourceNode.width + 96;
+            const addedNodes: CanvasNodeData[] = [
+                {
+                    id: resultId,
+                    type: CanvasNodeType.Video,
+                    title: t("canvas.nodeToolbar.swapChainH3CardTitle"),
+                    position: { x: resultX, y: sourceNode.position.y },
+                    width: resultWidth,
+                    height: resultHeight,
+                    metadata: {
+                        status: NODE_STATUS_LOADING,
+                        // 画幅与时长沿用源片：换人不该把竖屏改成横屏，也不该改时长。
+                        ...(sourceSize ? { size: sourceSize } : {}),
+                        ...(sourceNode.metadata.seconds ? { seconds: sourceNode.metadata.seconds } : {}),
+                        ...(sourceNode.metadata.frameMode ? { frameMode: sourceNode.metadata.frameMode } : {}),
+                        ...videoModelModePatch(effectiveConfig, model),
+                    },
+                },
+            ];
+            const addedConnections: CanvasConnection[] = [
+                // 源视频 → 结果卡：这正是 ref_videos 的来源。
+                { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: resultId },
+            ];
+            // 角色参考图排在结果卡右侧一列，不压住源片。
+            uploadedRefs.forEach(({ file, image }, index) => {
+                const size = fitNodeSize(image.width, image.height);
+                const refId = nanoid();
+                addedNodes.push({
+                    id: refId,
+                    type: CanvasNodeType.Image,
+                    title: file.name || t("canvas.nodeToolbar.swapChainRefs"),
+                    position: { x: resultX + resultWidth + 80, y: sourceNode.position.y + index * (size.height + 24) },
+                    width: size.width,
+                    height: size.height,
+                    metadata: imageMetadata(image),
+                });
+                addedConnections.push({ id: nanoid(), fromNodeId: refId, toNodeId: resultId });
+            });
+
+            // 直接落 ref 再生成：handleGenerateNode 读的是 nodesRef/connectionsRef，
+            // 只 setState 的话这一帧还看不到新卡与新连线。
+            const nextNodes = [...nodesRef.current, ...addedNodes];
+            const nextConnections = [...connectionsRef.current, ...addedConnections];
+            nodesRef.current = nextNodes;
+            connectionsRef.current = nextConnections;
+            setNodes(nextNodes);
+            setConnections(nextConnections);
+            setSelectedNodeIds(new Set([resultId]));
+            setSelectedConnectionId(null);
+            window.setTimeout(() => focusNodeRef.current?.(resultId), 120);
+
+            // 默认提示词先锁死「谁是源视频、谁是角色」，再叠加用户的补充要求。
+            const base = t("canvas.nodeToolbar.swapChainH3DefaultPrompt");
+            const prompt = intent ? `${base}\n${intent}` : base;
+            await generateNodeRef.current?.(resultId, "video", prompt);
+            return true;
+        },
+        [effectiveConfig, message, t],
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
@@ -8290,7 +8389,16 @@ function InfiniteCanvasPage() {
                     }}
                     onInterpolateVideo={(node) => void interpolateVideoNode(node)}
                     onDraftVideo={(node) => void draftVideoNode(node)}
-                    onSwapChain={(node) => setSwapChainNodeId(node.id)}
+                    onSwapChain={(node, method) => {
+                        // 子菜单只选链路；服装设置统一读取视频卡提示词面板的选项。
+                        setSwapChainMethod(method || "keep");
+                        setNodes((current) => current.map((item) => item.id === node.id
+                            ? { ...item, metadata: { ...item.metadata, swapChainMethod: method || "keep" } }
+                            : item));
+                        setSwapChainRefFiles([]);
+                        setSwapChainIntent("");
+                        setSwapChainNodeId(node.id);
+                    }}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onSaveStyle={(node) => void stageNodeStyle(node)}
@@ -8491,10 +8599,10 @@ function InfiniteCanvasPage() {
                     centered
                 >
                     <div className="flex flex-col gap-4">
-                        <p className="text-xs leading-5 opacity-65">{t("canvas.nodeToolbar.swapChainHowTo")}</p>
                         <label className="grid gap-1.5 text-xs">
-                            {t("canvas.nodeToolbar.swapChainRefs")}
+                            {t(swapChainMethod === "h3" ? "canvas.nodeToolbar.swapChainRefsH3" : "canvas.nodeToolbar.swapChainRefs")}
                             <input
+                                key={`${swapChainNodeId || "closed"}:${swapChainMethod}`}
                                 type="file"
                                 accept="image/*"
                                 multiple
@@ -8502,9 +8610,11 @@ function InfiniteCanvasPage() {
                                 className="block w-full text-xs file:mr-3 file:rounded-md file:border-0 file:bg-stone-200 file:px-3 file:py-1.5 file:text-xs dark:file:bg-stone-700"
                                 onChange={(event) => {
                                     const files = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/"));
-                                    // 后端只取前 2 张，这里先截断并告知，避免用户以为全用上了。
-                                    if (files.length > 2) message.warning(t("canvas.nodeToolbar.swapChainRefsLimit"));
-                                    setSwapChainRefFiles(files.slice(0, 2));
+                                    const maxRefs = swapChainMethod === "h3" ? 6 : 2;
+                                    if (files.length > maxRefs) {
+                                        message.warning(t(swapChainMethod === "h3" ? "canvas.nodeToolbar.swapChainRefsLimitH3" : "canvas.nodeToolbar.swapChainRefsLimit"));
+                                    }
+                                    setSwapChainRefFiles(files.slice(0, maxRefs));
                                 }}
                             />
                             {swapChainRefFiles.length ? <span className="text-[11px] opacity-60">{swapChainRefFiles.map((file) => file.name).join("、")}</span> : null}
@@ -8519,25 +8629,6 @@ function InfiniteCanvasPage() {
                                 autoSize={{ minRows: 2, maxRows: 5 }}
                             />
                         </label>
-                        {/* 保留服装开关：换人成片两种打法差别很大，必须让用户自己选。
-                            开：只换脸，服装/身体/背景/动作全部沿用原片（ReActor 逐帧换脸，约 1 分钟）
-                            关：整体重绘，参考图的服装会一起带过来（Qwen + H3，较慢） */}
-                        <div
-                            className="flex items-center justify-between gap-4 rounded-lg border border-stone-200 px-3 py-2.5 dark:border-stone-700"
-                            data-swapchain-keep-clothes-row
-                        >
-                            <div className="min-w-0 flex-1">
-                                <div className="text-xs font-medium">{t("canvas.nodeToolbar.swapChainKeepClothes")}</div>
-                                <div className="mt-1 text-[11px] leading-4 opacity-60">{t("canvas.nodeToolbar.swapChainKeepClothesHint")}</div>
-                            </div>
-                            <Switch
-                                size="small"
-                                checked={swapChainKeepClothes}
-                                data-swapchain-keep-clothes
-                                onChange={setSwapChainKeepClothes}
-                                aria-label={t("canvas.nodeToolbar.swapChainKeepClothes")}
-                            />
-                        </div>
                         <div className="flex justify-end gap-2">
                             <Button
                                 onClick={() => {
@@ -8553,14 +8644,38 @@ function InfiniteCanvasPage() {
                                 onClick={() => {
                                     const node = swapChainNodeId ? nodesRef.current.find((item) => item.id === swapChainNodeId) : null;
                                     const refs = swapChainRefFiles;
+                                    const intent = swapChainIntent.trim();
+                                    const method = swapChainMethod;
+                                    // 显式选择优先；未设置时沿用所选链路的默认值，H3 不使用此参数。
+                                    const keepClothes = resolveSwapChainKeepClothes(method, node?.metadata?.swapChainKeepClothes);
+                                    if (!node) {
+                                        setSwapChainNodeId(null);
+                                        setSwapChainRefFiles([]);
+                                        return;
+                                    }
+                                    if (!refs.length) {
+                                        // 缺参考图时保留弹窗，避免用户点击提交后被关窗再找回来。
+                                        message.warning(t("canvas.nodeToolbar.swapChainNeedRef"));
+                                        return;
+                                    }
                                     setSwapChainNodeId(null);
                                     setSwapChainRefFiles([]);
-                                    if (node && refs.length) {
-                                        void runSwapChain(node, { refs, intent: swapChainIntent.trim(), keepClothes: swapChainKeepClothes });
+                                    if (method === "h3") {
+                                        // H3 角色替换不走 swap-chain 接口：它把参考图和源片
+                                        // 连到一张新视频卡上，走正常视频生成（源片保留可对比）。
+                                        void runH3CharacterSwap(node, refs, intent).then((started) => {
+                                            // 上传失败/工作流不可用时不清选择，用户可修正后立即重试。
+                                            if (!started) {
+                                                setSwapChainNodeId(node.id);
+                                                setSwapChainRefFiles(refs);
+                                            }
+                                        });
+                                        return;
                                     }
+                                    void runSwapChain(node, { refs, intent, keepClothes });
                                 }}
                             >
-                                {t("canvas.model3d.panoramaStart")}
+                                {t("canvas.nodeToolbar.swapChainStart")}
                             </Button>
                         </div>
                     </div>

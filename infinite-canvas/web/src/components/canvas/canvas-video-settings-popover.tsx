@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Settings2 } from "lucide-react";
-import { Button } from "antd";
+import { Button, Switch } from "antd";
 
 import { VideoSettingsPanel, videoInterpolationLabel, videoModeLabel, videoResolutionLabel, videoSecondsLabel, videoSelfLiftLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import i18n from "@/i18n";
@@ -20,9 +20,10 @@ type CanvasVideoSettingsPopoverProps = {
     onModeChange?: (value: "text" | "frames" | "reference") => void;
     durationLocked?: boolean;
     sourceDurationSeconds?: number;
+    swapChainClothing?: { keepClothes: boolean; onChange: (value: boolean) => void };
 };
 
-export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClassName, placement = "topLeft", frameMode, onFrameModeChange, onModeChange, durationLocked = false, sourceDurationSeconds }: CanvasVideoSettingsPopoverProps) {
+export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClassName, placement = "topLeft", frameMode, onFrameModeChange, onModeChange, durationLocked = false, sourceDurationSeconds, swapChainClothing }: CanvasVideoSettingsPopoverProps) {
     const theme = useCanvasTheme();
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -50,7 +51,7 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} frameMode={frameMode} onFrameModeChange={onFrameModeChange} onModeChange={onModeChange} durationLocked={durationLocked} sourceDurationSeconds={sourceDurationSeconds} /> : null;
+    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} frameMode={frameMode} onFrameModeChange={onFrameModeChange} onModeChange={onModeChange} durationLocked={durationLocked} sourceDurationSeconds={sourceDurationSeconds} swapChainClothing={swapChainClothing} /> : null;
     const durationSummary = durationLocked ? `${i18n.t("settingsPanels.video.followSource")}${sourceDurationSeconds != null ? ` · ${sourceDurationSeconds.toFixed(1)}s` : ""}` : videoSecondsLabel(config.videoSeconds);
     const customSize = isCustomVideoSize(config.size || "auto", config.vquality);
     const sizeSummary = customSize
@@ -60,7 +61,7 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[220px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
+                <Button data-video-settings-trigger size="small" type="text" className={buttonClassName || "!h-8 !max-w-[220px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
                     <span className="truncate">
                         {sizeSummary} · {durationSummary} · {videoModeLabel(config.videoMode)}{videoInterpolationLabel(config.videoInterpolation) ? ` · ${videoInterpolationLabel(config.videoInterpolation)}` : ""}{videoSelfLiftLabel(config.videoSelfLiftMode) ? ` · ${videoSelfLiftLabel(config.videoSelfLiftMode)}` : ""}
                     </span>
@@ -83,6 +84,7 @@ function VideoSettingsPortal({
     onModeChange,
     durationLocked,
     sourceDurationSeconds,
+    swapChainClothing,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -95,6 +97,7 @@ function VideoSettingsPortal({
     onModeChange?: (value: "text" | "frames" | "reference") => void;
     durationLocked?: boolean;
     sourceDurationSeconds?: number;
+    swapChainClothing?: CanvasVideoSettingsPopoverProps["swapChainClothing"];
 }) {
     const width = 356;
     const gap = 8;
@@ -121,11 +124,27 @@ function VideoSettingsPortal({
         <div
             ref={panelRef}
             className="canvas-image-settings-popover"
+            data-video-settings-panel
             style={style}
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
         >
+            {swapChainClothing ? (
+                <div className="mb-4 flex items-center justify-between gap-3 border-b pb-3" style={{ borderColor: theme.node.stroke }}>
+                    <div className="min-w-0">
+                        <div className="text-xs font-medium">{i18n.t("canvas.nodeToolbar.swapChainKeepClothes")}</div>
+                        <div className="mt-1 text-[11px] leading-4" style={{ color: theme.node.muted }}>{i18n.t("canvas.nodeToolbar.swapChainKeepClothesHint")}</div>
+                    </div>
+                    <Switch
+                        size="small"
+                        data-prompt-keep-clothes
+                        checked={swapChainClothing.keepClothes}
+                        onChange={swapChainClothing.onChange}
+                        aria-label={i18n.t("canvas.nodeToolbar.swapChainKeepClothes")}
+                    />
+                </div>
+            ) : null}
             <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" frameMode={frameMode} onFrameModeChange={onFrameModeChange} onModeChange={onModeChange} durationLocked={durationLocked} sourceDurationSeconds={sourceDurationSeconds} />
         </div>,
         document.body,

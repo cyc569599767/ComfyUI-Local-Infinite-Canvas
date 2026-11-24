@@ -1,5 +1,12 @@
 import { LOCAL_GATEWAY_ORIGIN } from "@/constant/app-mode";
 
+export type SwapChainMethod = "keep" | "redraw" | "h3";
+
+/** 提示词面板的显式设置优先；未设置时按入口预设，H3 不使用此开关。 */
+export function resolveSwapChainKeepClothes(method: SwapChainMethod = "keep", saved?: boolean): boolean {
+    return method !== "h3" && (saved ?? method === "keep");
+}
+
 export type SwapChainMode = "single_swap" | "double_swap" | "edit_clothes" | "edit_light" | "edit_time";
 export type SwapChainTargetSelection = { x: number; y: number; width: number; height: number };
 

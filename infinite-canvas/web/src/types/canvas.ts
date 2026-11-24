@@ -204,6 +204,10 @@ export type CanvasNodeMetadata = {
     seedFixed?: string;
     aspectRatio?: string;
     freeCard?: CanvasFreeCardInfo;
+    /** 最近选中的换人链路；未显式设置服装时用于显示默认值。 */
+    swapChainMethod?: "keep" | "redraw" | "h3";
+    /** 换人服装设置：只在提示词面板选项中编辑，随视频卡保存。 */
+    swapChainKeepClothes?: boolean;
     /** 角色替换（swap-chain）产物信息，便于回溯任务与源片。 */
     swapChain?: { jobId: string; videoUrl: string; mode: "single_swap" | "double_swap" | "edit_clothes" | "edit_light" | "edit_time"; intent: string; sourceNodeId: string };
     /** 生成中显示的阶段短语（如「逐帧换人」），仅 loading 期间有意义。 */

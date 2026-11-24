@@ -30,7 +30,7 @@ type CanvasNodeHoverToolbarProps = {
     onInterpolateVideo: (node: CanvasNodeData) => void;
     onDraftVideo: (node: CanvasNodeData) => void;
     /** 角色替换（swap-chain）：把视频里的人换成参考图中的角色。 */
-    onSwapChain: (node: CanvasNodeData) => void;
+    onSwapChain: (node: CanvasNodeData, method?: "keep" | "redraw" | "h3") => void;
     onDownload: (node: CanvasNodeData) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
     onSaveStyle: (node: CanvasNodeData) => void;
@@ -180,7 +180,34 @@ export function CanvasNodeHoverToolbar({
         ...(isVideo ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isAudio ? [{ id: "audioEdit", title: t("canvas.nodeToolbar.audioEditTitle"), label: t("canvas.nodeToolbar.audioEdit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isVideo ? [{ id: "videoDraft", title: t("canvas.nodeToolbar.draftTitle"), label: t("canvas.nodeToolbar.draft"), icon: <Zap className="size-4" />, onClick: () => onDraftVideo(node) }] : []),
-        ...(hasVideo ? [{ id: "swapChain", title: t("canvas.nodeToolbar.swapChainTitle"), label: t("canvas.nodeToolbar.swapChain"), icon: <Users className="size-4" />, onClick: () => onSwapChain(node) }] : []),
+        // 换人成片：三种实现方式差异很大（速度 / 是否换服装 / 质量），
+        // 做成和「超分」一样的子菜单，让用户明确选一种，而不是进弹窗再猜。
+        ...(hasVideo ? [{
+            id: "swapChain",
+            title: t("canvas.nodeToolbar.swapChainTitle"),
+            label: t("canvas.nodeToolbar.swapChain"),
+            icon: <Users className="size-4" />,
+            onClick: () => setOpenSubmenuId("swapChain"),
+            children: [{
+                id: "swapChainKeep",
+                title: t("canvas.nodeToolbar.swapChainMethodKeepHint"),
+                label: t("canvas.nodeToolbar.swapChainMethodKeep"),
+                icon: <Users className="size-4" />,
+                onClick: () => onSwapChain(node, "keep"),
+            }, {
+                id: "swapChainRedraw",
+                title: t("canvas.nodeToolbar.swapChainMethodRedrawHint"),
+                label: t("canvas.nodeToolbar.swapChainMethodRedraw"),
+                icon: <Palette className="size-4" />,
+                onClick: () => onSwapChain(node, "redraw"),
+            }, {
+                id: "swapChainH3",
+                title: t("canvas.nodeToolbar.swapChainMethodH3Hint"),
+                label: t("canvas.nodeToolbar.swapChainMethodH3"),
+                icon: <Sparkles className="size-4" />,
+                onClick: () => onSwapChain(node, "h3"),
+            }],
+        }] : []),
         ...(hasVideo ? [{ id: "videoInterpolate", title: t("canvas.nodeToolbar.interpolateTitle"), label: t("canvas.nodeToolbar.interpolate"), icon: <Clapperboard className="size-4" />, onClick: () => onInterpolateVideo(node) }] : []),
         ...(hasVideo ? [{
             id: "videoUpscale",

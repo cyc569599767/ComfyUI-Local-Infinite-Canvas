@@ -10,6 +10,30 @@
 //   6. 用户取消必发 cancel（曾踩过：sleep 内部抛 AbortError 会跳过 cancel）
 //   7. 超时主动取消
 import { afterAll, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolveSwapChainKeepClothes } from "../src/services/api/swap-chain";
+
+test("服装选项：入口预设与提示词面板显式选择一致，H3 不参与", () => {
+    expect(resolveSwapChainKeepClothes()).toBe(true);
+    expect(resolveSwapChainKeepClothes("keep")).toBe(true);
+    expect(resolveSwapChainKeepClothes("redraw")).toBe(false);
+    expect(resolveSwapChainKeepClothes("keep", false)).toBe(false);
+    expect(resolveSwapChainKeepClothes("redraw", true)).toBe(true);
+    expect(resolveSwapChainKeepClothes("h3", true)).toBe(false);
+    expect(resolveSwapChainKeepClothes("h3", false)).toBe(false);
+});
+
+test("服装开关唯一入口在提示词面板选项，弹窗无重复控件或独立状态", () => {
+    const page = readFileSync(new URL("../src/pages/canvas/project.tsx", import.meta.url), "utf8");
+    const panel = readFileSync(new URL("../src/components/canvas/canvas-node-prompt-panel.tsx", import.meta.url), "utf8");
+    const options = readFileSync(new URL("../src/components/canvas/canvas-video-settings-popover.tsx", import.meta.url), "utf8");
+    expect(page).not.toContain("data-swapchain-keep-clothes");
+    expect(page).not.toContain("setSwapChainKeepClothes");
+    expect(page).toContain('key={`${swapChainNodeId || "closed"}:${swapChainMethod}`}');
+    expect(page).toContain("resolveSwapChainKeepClothes(method, node?.metadata?.swapChainKeepClothes)");
+    expect(panel).toContain("swapChainKeepClothes: keepClothes");
+    expect(options.match(/data-prompt-keep-clothes/g)).toHaveLength(1);
+});
 
 const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 const storage = new Map<string, string>();

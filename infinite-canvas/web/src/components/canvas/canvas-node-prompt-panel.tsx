@@ -25,6 +25,7 @@ import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textare
 import { PromptOptimizeOptions } from "./prompt-optimize-options";
 import { abortCaptionJob, hasCaptionJob, registerCaptionJob, releaseCaptionJob } from "@/lib/canvas/caption-jobs";import { abortPromptOptimizeJob, hasPromptOptimizeJob, registerPromptOptimizeJob, releasePromptOptimizeJob } from "@/lib/canvas/prompt-optimize-jobs";
 import { usePromptCapabilities } from "@/hooks/use-prompt-capabilities";
+import { resolveSwapChainKeepClothes } from "@/services/api/swap-chain";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
 
@@ -571,6 +572,10 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                                 onModeChange={changeVideoMode}
                                 durationLocked={isCharacterSwap}
                                 sourceDurationSeconds={sourceVideoDurationSeconds}
+                                swapChainClothing={node.type === CanvasNodeType.Video && node.metadata?.content && !isCharacterSwap && node.metadata.swapChainMethod !== "h3" ? {
+                                    keepClothes: resolveSwapChainKeepClothes(node.metadata.swapChainMethod, node.metadata.swapChainKeepClothes),
+                                    onChange: (keepClothes) => onConfigChange(node.id, { swapChainKeepClothes: keepClothes }),
+                                } : undefined}
                             />
                         </>
                     ) : mode === "audio" ? (
